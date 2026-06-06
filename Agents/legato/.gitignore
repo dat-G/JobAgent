@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Local transcript benchmark outputs derived from private samples.
+workflows/transcript/chenxi_*

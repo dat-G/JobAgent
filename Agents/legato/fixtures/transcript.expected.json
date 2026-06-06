@@ -1,0 +1,46 @@
+{
+  "institution": "Example University",
+  "student": {
+    "name": "Ada Chen",
+    "student_id": "S123456"
+  },
+  "terms": [
+    {
+      "term": "2025 Fall"
+    },
+    {
+      "term": "2026 Spring"
+    }
+  ],
+  "courses": [
+    {
+      "term": "2025 Fall",
+      "course_code": "CS101",
+      "course_name": "Introduction to Computer Science",
+      "credits": "3",
+      "grade": "A",
+      "points": "4.0"
+    },
+    {
+      "term": "2025 Fall",
+      "course_code": "MATH201",
+      "course_name": "Linear Algebra",
+      "credits": "3",
+      "grade": "A-",
+      "points": "3.7"
+    },
+    {
+      "term": "2026 Spring",
+      "course_code": "STAT210",
+      "course_name": "Applied Statistics",
+      "credits": "3",
+      "grade": "A",
+      "points": "4.0"
+    }
+  ],
+  "summary": {
+    "gpa": "3.85",
+    "total_credits": "9",
+    "rank": "3/120"
+  }
+}

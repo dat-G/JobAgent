@@ -1,0 +1,16 @@
+[project]
+name = "legato"
+version = "0.1.0"
+description = "Fast resume and transcript structuring via MarkItDown and Presto."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+legato = "legato.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["legato", "workflows", "workflows.resume"]

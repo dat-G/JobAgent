@@ -1,0 +1,2 @@
+This fixture intentionally is not a real PDF or DOCX.
+Acceptance tests use it only when MarkItDown is mocked or replaced.

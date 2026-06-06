@@ -20,6 +20,8 @@ Current scope:
 go run ./cmd/presto
 ```
 
+By default the server listens on `127.0.0.1:8080`. Set `PRESTO_ADDR` explicitly if it must bind another interface.
+
 By default, Presto uses the local Echo provider. To use an OpenAI-compatible API:
 
 ```sh

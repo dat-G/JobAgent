@@ -1,0 +1,29 @@
+{
+  "candidate": {
+    "name": "Ada Chen",
+    "headline": ""
+  },
+  "contacts": {
+    "email": "ada@example.com",
+    "phone": "+1 555 123 4567",
+    "location": "",
+    "links": []
+  },
+  "education": [
+    {
+      "text": "Example University, B.S. Computer Science"
+    }
+  ],
+  "experience": [
+    {
+      "text": "Built document extraction services for recruiting workflows."
+    }
+  ],
+  "projects": [
+    {
+      "text": "Legato: fast resume and transcript structuring."
+    }
+  ],
+  "skills": ["Python", "Go", "OCR", "Document AI"],
+  "certifications": []
+}

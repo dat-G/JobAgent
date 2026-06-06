@@ -1,0 +1,70 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["identity", "education", "certifications_awards", "experience"],
+  "properties": {
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "birth_year", "sex"],
+      "properties": {
+        "name": { "type": "string" },
+        "birth_year": { "type": "string" },
+        "sex": { "type": "string" }
+      }
+    },
+    "education": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["school", "degree", "degree_level", "major", "department", "school_tags"],
+        "properties": {
+          "school": { "type": "string" },
+          "degree": { "type": "string" },
+          "degree_level": { "type": "string", "enum": ["", "专科", "本科", "硕士", "博士"] },
+          "major": { "type": "string" },
+          "department": { "type": "string" },
+          "school_tags": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["matched_school", "is_985", "is_211", "is_double_first_class", "ruanke_rank"],
+            "properties": {
+              "matched_school": { "type": "string" },
+              "is_985": { "type": "boolean" },
+              "is_211": { "type": "boolean" },
+              "is_double_first_class": { "type": "boolean" },
+              "ruanke_rank": { "type": ["number", "null"] }
+            }
+          }
+        }
+      }
+    },
+    "certifications_awards": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "result"],
+        "properties": {
+          "name": { "type": "string" },
+          "result": { "type": "string" }
+        }
+      }
+    },
+    "experience": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "role", "contribution", "level"],
+        "properties": {
+          "type": { "type": "string" },
+          "role": { "type": "string" },
+          "contribution": { "type": "string" },
+          "level": { "type": "number", "minimum": 0, "maximum": 10 }
+        }
+      }
+    }
+  }
+}
