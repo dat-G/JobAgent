@@ -99,7 +99,9 @@ certifications_awards agent --+-- local school tags + local experience -> merge 
 
 Experience is generated locally in the first version to avoid an extra high-latency model request. It uses resume text plus `certifications_awards` to produce work/project, contest, and campus-role entries.
 To avoid double counting, `experience` keeps only described work/project/role/contest entries with contribution text. Undescribed competitions and certificates stay only in `certifications_awards`.
-`role` is optional. Fill it only when the role is explicit and cheap to identify; otherwise keep it as `""`. Ability assessment should rely primarily on `contribution` and `level`.
+`role` is optional, but when available it should prefer `organization/company/event / role`, for example `字节跳动 / MCP标注(实习生)` or `杜邦青年创新大赛 / 队长`. For projects without a clear organization or title, keep `role` as `""` instead of fabricating one.
+`contribution` should be a short ability-focused contribution summary. It should avoid repeating the organization/event name and focus on what the student did in that experience.
+Ability assessment should rely primarily on `contribution` and `level`.
 
 Education school tags are generated locally from `cache/ruanke_china_university_ranking_2026_structured.json`. Matching uses exact school name first, then a conservative contains match for extracted names such as `东北农业大学 · 本科`.
 Each education item gets `degree_level` as one of `专科` / `本科` / `硕士` / `博士` / `""`. If there is only one education item and its degree is missing, the local `education_degree_inference_agent` infers it from study years and school name, defaulting toward `本科`.

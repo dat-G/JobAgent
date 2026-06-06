@@ -31,7 +31,20 @@ class PrestoFormatter:
         output = run.get("output") or ""
         if run.get("error"):
             raise RuntimeError(f"presto run failed: {run['error']}")
-        return FormatResult(data=extract_json_object(output), formatter="presto", warnings=[])
+        try:
+            data, warnings = extract_json_object_with_warnings(output)
+            return FormatResult(data=data, formatter="presto", warnings=warnings)
+        except ValueError as exc:
+            fallback = LocalRuleFormatter().format(markdown, target)
+            return FormatResult(
+                data=fallback.data,
+                formatter="presto_local_fallback",
+                warnings=[
+                    "presto formatter returned invalid JSON; used local Legato fallback: "
+                    + safe_error_message(exc),
+                    *fallback.warnings,
+                ],
+            )
 
     def _request(self, method: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -67,7 +80,9 @@ def build_formatter_prompt(markdown: str, target: str) -> str:
     schema = schema_for(target)
     return (
         "You are Legato's formatter. Convert the recognized Markdown into the target JSON.\n"
-        "Return only valid JSON. Do not include markdown fences or commentary.\n\n"
+        "Return only one valid JSON object. Do not include markdown fences or commentary.\n"
+        "Every string must be valid JSON: escape quotes, backslashes, and newlines.\n"
+        "Do not omit commas between object fields or array items.\n\n"
         f"Target: {target}\n"
         f"JSON schema:\n{json.dumps(schema, ensure_ascii=False, indent=2)}\n\n"
         "Rules:\n"
@@ -80,6 +95,11 @@ def build_formatter_prompt(markdown: str, target: str) -> str:
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
+    data, _ = extract_json_object_with_warnings(text)
+    return data
+
+
+def extract_json_object_with_warnings(text: str) -> tuple[dict[str, Any], list[str]]:
     stripped = text.strip()
     if stripped.startswith("```"):
         stripped = re.sub(r"^```(?:json)?\s*", "", stripped)
@@ -88,7 +108,31 @@ def extract_json_object(text: str) -> dict[str, Any]:
     end = stripped.rfind("}")
     if start < 0 or end < start:
         raise ValueError("formatter output does not contain a JSON object")
-    return json.loads(stripped[start : end + 1])
+    candidate = stripped[start : end + 1]
+    try:
+        return json.loads(candidate), []
+    except json.JSONDecodeError as original:
+        repaired = repair_json_text(candidate)
+        if repaired != candidate:
+            try:
+                return json.loads(repaired), ["repaired invalid JSON returned by Presto formatter"]
+            except json.JSONDecodeError:
+                pass
+        raise original
+
+
+def repair_json_text(text: str) -> str:
+    repaired = text.strip()
+    repaired = re.sub(r",(\s*[}\]])", r"\1", repaired)
+    repaired = re.sub(r'([}\]"])\s*\n\s*("[-A-Za-z0-9_\u4e00-\u9fff]+":)', r"\1,\n\2", repaired)
+    repaired = re.sub(r"([}\]])\s*\n\s*([{[])", r"\1,\n\2", repaired)
+    repaired = re.sub(r'("\s*:\s*"[^"]*")\s+("[-A-Za-z0-9_\u4e00-\u9fff]+":)', r"\1, \2", repaired)
+    return repaired
+
+
+def safe_error_message(exc: Exception) -> str:
+    message = str(exc).replace("\n", " ").strip()
+    return message[:240]
 
 
 def parse_resume_markdown(markdown: str) -> dict[str, Any]:

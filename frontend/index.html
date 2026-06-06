@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>学生成长诊断与路径规划</title>
+    <meta name="description" content="上传简历后生成能力画像、岗位匹配分析和成长路径规划。">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="topbar" aria-label="页面导航">
+      <a class="brand" href="#upload" aria-label="回到上传页">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span>
+          <strong>Growth Lens</strong>
+          <small>学生成长诊断</small>
+        </span>
+      </a>
+      <nav class="step-nav" aria-label="页面进度">
+        <a href="#upload" class="step-dot is-active" data-step-link="upload">上传</a>
+        <a href="#profile" class="step-dot" data-step-link="profile">画像</a>
+        <a href="#matching" class="step-dot" data-step-link="matching">匹配</a>
+        <a href="#path" class="step-dot" data-step-link="path">路径</a>
+        <a href="#outputs" class="step-dot" data-step-link="outputs">输出</a>
+      </nav>
+      <div class="lock-state" id="lockState" role="status">上传简历后解锁</div>
+    </header>
+
+    <main id="deck" class="deck is-locked" tabindex="-1">
+      <section class="slide upload-slide" id="upload" data-step="upload" aria-labelledby="uploadTitle">
+        <div class="slide-shell upload-layout">
+          <div class="intro-panel reveal">
+            <p class="section-label">第一步</p>
+            <h1 id="uploadTitle">上传材料，启动成长诊断</h1>
+            <p class="lede">简历是必传材料。上传后页面会解锁向下浏览，生成诊断必须由 Legato 后端完成真实解析。</p>
+            <div class="recommendation-box" aria-label="推荐岗位说明">
+              <div>
+                <span>推荐方式</span>
+                <strong>系统自动推荐岗位</strong>
+              </div>
+              <p>首页只负责上传材料。上传后，推荐岗位和能力匹配度会在后续结果页展示，其中非真实解析生成的内容会标记为模拟数据。</p>
+            </div>
+            <div class="unlock-hint" id="unlockHint">
+              <span class="pulse-line" aria-hidden="true"></span>
+              <span>等待简历上传</span>
+            </div>
+          </div>
+
+          <form class="upload-console reveal" id="diagnosisForm">
+            <fieldset>
+              <legend>材料上传</legend>
+              <label class="file-drop is-required" for="resumeInput" id="resumeDrop">
+                <span class="file-drop-main">
+                  <strong>简历</strong>
+                  <span>PDF、DOC、DOCX、Markdown</span>
+                </span>
+                <span class="file-state" id="resumeState">必传</span>
+                <input id="resumeInput" name="resume" type="file" accept=".pdf,.doc,.docx,.md,.txt" required>
+              </label>
+
+              <label class="file-drop" for="transcriptInput" id="transcriptDrop">
+                <span class="file-drop-main">
+                  <strong>成绩单</strong>
+                  <span>用于课程与 GPA 证据补充</span>
+                </span>
+                <span class="file-state" id="transcriptState">可选</span>
+                <input id="transcriptInput" name="transcript" type="file" accept=".pdf,.png,.jpg,.jpeg,.doc,.docx,.xlsx,.xls">
+              </label>
+
+              <label class="file-drop" for="otherInput" id="otherDrop">
+                <span class="file-drop-main">
+                  <strong>其他材料</strong>
+                  <span>作品集、证书、项目说明</span>
+                </span>
+                <span class="file-state" id="otherState">可选</span>
+                <input id="otherInput" name="other" type="file" multiple>
+              </label>
+            </fieldset>
+
+            <div class="form-actions">
+              <button class="primary-action" id="runButton" type="submit" disabled>生成诊断</button>
+              <p id="uploadMessage" class="form-message">上传简历后可以继续浏览页面。</p>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <section class="slide module-slide is-module-locked" id="profile" data-step="profile" data-lock-message="能力画像 agent 完成后解锁" aria-labelledby="profileTitle">
+        <div class="slide-shell profile-layout">
+          <div class="section-copy reveal">
+            <p class="section-label">能力画像</p>
+            <h2 id="profileTitle">四维分值与雷达图数据</h2>
+            <p>基础信息来自 Legato 解析；当前四维分值、雷达图数据和 TOP5 匹配岗位仍为模拟数据。</p>
+          </div>
+
+          <div class="profile-grid">
+            <section class="data-panel reveal" aria-labelledby="basicInfoTitle">
+              <div class="panel-heading">
+                <h3 id="basicInfoTitle">基础信息</h3>
+                <div class="pill-row">
+                  <span class="status-pill is-real">Legato 解析</span>
+                  <span class="status-pill is-warning" id="basicInfoDataState">等待结构化数据</span>
+                </div>
+              </div>
+              <dl class="basic-list" id="basicInfo"></dl>
+              <div class="source-list" id="sourceList" aria-label="上传材料"></div>
+            </section>
+
+            <section class="data-panel reveal radar-panel" aria-labelledby="radarTitle">
+              <div class="panel-heading">
+                <h3 id="radarTitle">雷达图</h3>
+                <span class="status-pill is-simulated">模拟数据</span>
+              </div>
+              <div class="radar-wrap">
+                <svg id="radarChart" viewBox="0 0 360 320" role="img" aria-labelledby="radarChartTitle radarChartDesc"></svg>
+              </div>
+              <p class="chart-caption" id="radarText"></p>
+            </section>
+          </div>
+
+          <section class="resume-evidence reveal" aria-labelledby="resumeEvidenceTitle">
+            <div class="panel-heading">
+              <h3 id="resumeEvidenceTitle">奖项与经历证据</h3>
+              <div class="pill-row">
+                <span class="status-pill is-real">Resume workflow</span>
+                <span class="status-pill is-warning" id="resumeEvidenceState">等待结构化数据</span>
+              </div>
+            </div>
+            <div class="evidence-columns">
+              <section class="evidence-lane" aria-labelledby="awardTitle">
+                <div class="evidence-lane-header">
+                  <div>
+                    <h4 id="awardTitle">奖项与证书</h4>
+                    <p>按选择性、结果和岗位相关性保守评分。</p>
+                  </div>
+                  <span class="status-pill is-warning" id="awardDataState">等待奖项 agent</span>
+                </div>
+                <div class="evidence-list" id="awardList"></div>
+              </section>
+              <section class="evidence-lane" aria-labelledby="experienceTitle">
+                <div class="evidence-lane-header">
+                  <div>
+                    <h4 id="experienceTitle">经历评分</h4>
+                    <p>沿用 Legato level，转为百分制展示。</p>
+                  </div>
+                  <span class="status-pill is-warning" id="experienceDataState">等待经历 agent</span>
+                </div>
+                <div class="evidence-list" id="experienceList"></div>
+              </section>
+            </div>
+          </section>
+
+          <section class="score-board reveal" aria-labelledby="scoreTitle">
+            <div class="panel-heading">
+              <h3 id="scoreTitle">四维分值</h3>
+              <span class="status-pill is-simulated">模拟数据</span>
+            </div>
+            <div id="dimensionScores" class="score-list"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="slide module-slide is-module-locked" id="matching" data-step="matching" data-lock-message="岗位匹配 agent 完成后解锁" aria-labelledby="matchingTitle">
+        <div class="slide-shell matching-layout">
+          <div class="section-copy reveal">
+            <p class="section-label">岗位能力匹配</p>
+            <h2 id="matchingTitle">匹配度、差距明细和推荐理由</h2>
+            <p>匹配度、差距明细和推荐理由当前由规则样例生成，用于占位展示后续真实匹配 agent 的输出形态。</p>
+          </div>
+
+          <section class="match-score reveal" aria-labelledby="overallMatchLabel">
+            <span id="overallMatchLabel">总体匹配度</span>
+            <span class="sim-badge">模拟数据</span>
+            <strong id="overallMatch">82%</strong>
+            <small id="matchLevel">高潜力匹配</small>
+            <div class="meter" aria-hidden="true"><span id="overallMeter"></span></div>
+          </section>
+
+          <section class="data-panel reveal report-panel" aria-labelledby="reportTitle">
+            <div class="panel-heading">
+              <h3 id="reportTitle">可视化报表</h3>
+              <span class="status-pill is-simulated">模拟数据</span>
+            </div>
+            <div id="reportRows" class="report-rows"></div>
+          </section>
+
+          <section class="data-panel reveal gap-panel" aria-labelledby="gapTitle">
+            <div class="panel-heading">
+              <h3 id="gapTitle">差距明细</h3>
+              <span class="status-pill is-simulated">模拟数据</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>能力项</th>
+                    <th>当前证据</th>
+                    <th>岗位要求</th>
+                    <th>建议动作</th>
+                    <th>级别</th>
+                  </tr>
+                </thead>
+                <tbody id="gapTable"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="slide module-slide is-module-locked" id="path" data-step="path" data-lock-message="路径规划 agent 完成后解锁" aria-labelledby="pathTitle">
+        <div class="slide-shell path-layout">
+          <div class="section-copy reveal">
+            <p class="section-label">路径规划</p>
+            <h2 id="pathTitle">阶段目标、周任务、资源链接和达标标准</h2>
+            <p>路径规划当前为模拟数据，真实版本需要接入岗位权重、学生短板和任务达标追踪。</p>
+          </div>
+          <div id="pathStages" class="path-stages"></div>
+        </div>
+      </section>
+
+      <section class="slide module-slide is-module-locked" id="outputs" data-step="outputs" data-lock-message="结构化输出整理完成后解锁" aria-labelledby="outputsTitle">
+        <div class="slide-shell outputs-layout">
+          <div class="section-copy reveal">
+            <p class="section-label">结构化输出</p>
+            <h2 id="outputsTitle">导出结果与后端待实现清单</h2>
+            <p>结构化输出已按硬性指标组织。当前评分、推荐、路径和导出模板中非真实解析内容均标记为模拟数据。</p>
+          </div>
+
+          <section class="output-strip reveal" aria-label="导出能力">
+            <article>
+              <span>能力画像</span>
+              <strong>JSON / Excel</strong>
+              <span class="sim-badge">含模拟评分</span>
+              <div class="button-row">
+                <button type="button" data-export="profile-json">导出 JSON</button>
+                <button type="button" data-export="profile-xlsx">导出 Excel</button>
+              </div>
+            </article>
+            <article>
+              <span>路径规划</span>
+              <strong>PDF / Word</strong>
+              <span class="sim-badge">含模拟路径</span>
+              <div class="button-row">
+                <button type="button" data-export="path-pdf">导出 PDF</button>
+                <button type="button" data-export="path-doc">导出 Word</button>
+              </div>
+            </article>
+            <article>
+              <span>匹配结果</span>
+              <strong>可视化报表</strong>
+              <span class="sim-badge">含模拟匹配</span>
+              <div class="button-row">
+                <button type="button" data-export="match-json">导出报表 JSON</button>
+              </div>
+            </article>
+          </section>
+
+          <section class="data-panel reveal" aria-labelledby="jobsTitle">
+            <div class="panel-heading">
+              <h3 id="jobsTitle">TOP5 匹配岗位</h3>
+              <span class="status-pill is-simulated">模拟数据</span>
+            </div>
+            <div id="topJobs" class="job-list"></div>
+          </section>
+
+          <section class="data-panel reveal limitations-panel" aria-labelledby="limitationsTitle">
+            <div class="panel-heading">
+              <h3 id="limitationsTitle">数据真实性标记</h3>
+              <span class="status-pill is-simulated">模拟数据说明</span>
+            </div>
+            <ul id="limitationsList" class="limitations-list"></ul>
+          </section>
+
+          <section class="data-panel reveal requirements-panel" aria-labelledby="requirementsTitle">
+            <div class="panel-heading">
+              <h3 id="requirementsTitle">后端待实现需求列表</h3>
+              <span class="status-pill">后端能力清单</span>
+            </div>
+            <div id="requirementsList" class="requirements-list"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <aside class="generation-dock" aria-label="诊断生成进度">
+      <div class="generation-main">
+        <div class="generation-copy">
+          <span class="dock-label">诊断生成</span>
+          <strong id="runStatus">等待生成</strong>
+          <span id="runDetail">上传简历后点击生成诊断，进度会在这里更新。</span>
+        </div>
+        <div class="generation-meter" aria-hidden="true">
+          <span id="runProgressBar"></span>
+        </div>
+      </div>
+      <ol class="generation-steps" id="runSteps">
+        <li data-run-step="resume_agent"><span></span>简历</li>
+        <li data-run-step="transcript_agent"><span></span>成绩单</li>
+        <li data-run-step="profile"><span></span>画像</li>
+        <li data-run-step="matching"><span></span>匹配</li>
+        <li data-run-step="path"><span></span>路径</li>
+        <li data-run-step="outputs"><span></span>输出</li>
+      </ol>
+      <div class="generation-percent" id="runPercent">0%</div>
+    </aside>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

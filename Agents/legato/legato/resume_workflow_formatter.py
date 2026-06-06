@@ -178,6 +178,55 @@ class ResumeWorkflowFormatter:
             ),
         )
 
+    def format_stage(self, resume_text: str, stage: str) -> WorkflowFormatResult:
+        started = time.perf_counter()
+        if stage == "profile":
+            result = self._run_group_with_retry("profile", resume_text)
+            education_started = time.perf_counter()
+            education = enrich_education(result["data"].get("education", []), resume_text)
+            education_ms = int((time.perf_counter() - education_started) * 1000)
+            total_ms = int((time.perf_counter() - started) * 1000)
+            return WorkflowFormatResult(
+                data={
+                    "identity": result["data"].get("identity", {}),
+                    "education": education,
+                },
+                formatter="presto_resume_workflow_profile",
+                warnings=[],
+                debug=self._debug_envelope(
+                    {"profile": result},
+                    merge_ms=0,
+                    total_ms=total_ms,
+                    local_stages=[{"stage": "education_degree_inference_agent", "elapsed_ms": education_ms}],
+                ),
+            )
+        if stage == "certifications_awards":
+            result = self._run_group_with_retry("certifications_awards", resume_text)
+            total_ms = int((time.perf_counter() - started) * 1000)
+            return WorkflowFormatResult(
+                data={"certifications_awards": result["data"].get("certifications_awards", [])},
+                formatter="presto_resume_workflow_certifications_awards",
+                warnings=[],
+                debug=self._debug_envelope({"certifications_awards": result}, merge_ms=0, total_ms=total_ms),
+            )
+        if stage == "experience":
+            experience_started = time.perf_counter()
+            experience = build_local_experience(resume_text, [])
+            experience_ms = int((time.perf_counter() - experience_started) * 1000)
+            total_ms = int((time.perf_counter() - started) * 1000)
+            return WorkflowFormatResult(
+                data={"experience": experience},
+                formatter="resume_workflow_local_experience",
+                warnings=[],
+                debug=self._debug_envelope(
+                    {},
+                    merge_ms=0,
+                    total_ms=total_ms,
+                    local_stages=[{"stage": "experience_local", "elapsed_ms": experience_ms}],
+                ),
+            )
+        raise ValueError(f"unsupported resume workflow stage {stage!r}")
+
     def _format_combined(self, resume_text: str) -> WorkflowFormatResult:
         started = time.perf_counter()
         result = self._run_group_with_retry("combined", resume_text)
@@ -427,14 +476,15 @@ def extract_internship_experiences(resume_text: str) -> list[dict[str, Any]]:
         if not match:
             continue
         organization, role = split_experience_body(match.group("body"))
-        context = "\n".join(lines[index : min(len(lines), index + 6)])
-        contribution = summarize_internship_contribution(organization, role, context)
+        contribution_context = "\n".join(lines[max(0, index - 30) : min(len(lines), index + 6)])
+        scoring_context = "\n".join(lines[index : min(len(lines), index + 6)])
+        contribution = summarize_internship_contribution(organization, role, contribution_context)
         experiences.append(
             {
                 "type": "实习",
-                "role": role,
+                "role": compose_experience_role(organization, role),
                 "contribution": contribution,
-                "level": score_internship_level(organization, context),
+                "level": score_internship_level(organization, scoring_context),
             }
         )
     return experiences
@@ -452,12 +502,12 @@ def split_experience_body(body: str) -> tuple[str, str]:
 
 def summarize_internship_contribution(organization: str, role: str, context: str) -> str:
     if "MCP" in context and ("XML" in context or "xml" in context):
-        return f"{organization}MCP标注与XML修正"[:35]
+        return "MCP标注与XML修正"
     if "视频云平台" in context or "GoCloud" in context:
-        return f"{organization}视频云平台前端开发"[:35]
+        return "视频云平台前端开发"
     if role:
-        return f"{organization}{role}"[:35]
-    return organization[:35]
+        return role[:35]
+    return "实习任务执行"
 
 
 def score_internship_level(organization: str, context: str) -> int:
@@ -492,7 +542,7 @@ def extract_project_experiences(resume_text: str) -> list[dict[str, Any]]:
         experiences.append(
             {
                 "type": "科研项目" if "实验室" in context or "科研" in context or "研究" in context else "项目",
-                "role": extract_role(context),
+                "role": extract_project_subject(context),
                 "contribution": summarize_project_contribution(context),
                 "level": score_project_level(context),
             }
@@ -519,7 +569,7 @@ def extract_described_contest_experiences(resume_text: str) -> list[dict[str, An
         experiences.append(
             {
                 "type": "比赛",
-                "role": extract_role(context),
+                "role": compose_experience_role(extract_event_name(context), extract_role(context)),
                 "contribution": summarize_contest_contribution(context),
                 "level": score_contest_context_level(context),
             }
@@ -542,7 +592,7 @@ def extract_campus_role_experiences(resume_text: str) -> list[dict[str, Any]]:
         experiences.append(
             {
                 "type": "社团" if "协会" in context or "社团" in context else "任职",
-                "role": extract_role(context),
+                "role": compose_experience_role(extract_org_name(context), extract_role(context)),
                 "contribution": summarize_campus_contribution(context),
                 "level": 6 if any(signal in context for signal in ("组织", "负责", "带领", "赞助", "活动")) else 5,
             }
@@ -566,6 +616,18 @@ def extract_role(context: str) -> str:
     return ""
 
 
+def compose_experience_role(subject: str, role: str) -> str:
+    subject = compact_role_part(subject)
+    role = compact_role_part(role)
+    if subject and role and subject not in role:
+        return f"{subject} / {role}"[:35]
+    return role or subject
+
+
+def compact_role_part(value: str) -> str:
+    return value.strip(" ,，。；;|").replace("（", "(").replace("）", ")")
+
+
 def summarize_project_contribution(context: str) -> str:
     if "数据清洗" in context or "GNSS" in context:
         return "数据清洗与研究方法实现"
@@ -577,14 +639,41 @@ def summarize_project_contribution(context: str) -> str:
 def summarize_contest_contribution(context: str) -> str:
     result = extract_result_phrase(context)
     if "产品" in context or "PPT" in context or "方案" in context:
-        return f"{extract_event_name(context)}产品方案设计{result}"[:35]
-    return f"{extract_event_name(context)}{result}"[:35]
+        return f"产品方案设计{result}"[:35]
+    return result or compact_context_summary(context, ("制作", "分析", "实现", "带领", "组织"))
 
 
 def summarize_campus_contribution(context: str) -> str:
     if "活动" in context:
-        return f"{extract_org_name(context)}活动组织"[:35]
+        return "活动组织与资源协调"
     return compact_context_summary(context, ("组织", "负责", "带领", "协商", "活动"))
+
+
+def extract_project_subject(context: str) -> str:
+    lines = [line.strip(" ,，。；;") for line in context.splitlines() if line.strip()]
+    for line in lines:
+        if not is_clean_subject_line(line):
+            continue
+        if "实验室" in line:
+            return line[:24]
+    for line in lines:
+        if not is_clean_subject_line(line):
+            continue
+        if any(signal in line for signal in ("项目", "研究", "系统", "平台")):
+            return line[:24]
+    return ""
+
+
+def is_clean_subject_line(line: str) -> bool:
+    if is_descriptive_sentence(line):
+        return False
+    if len(line) > 28:
+        return False
+    return any(signal in line for signal in ("实验室", "项目", "研究", "系统", "平台"))
+
+
+def is_descriptive_sentence(line: str) -> bool:
+    return any(signal in line for signal in ("参与", "指导", "独立", "提出", "开发", "分析", "能力", "认可", "对于"))
 
 
 def compact_context_summary(context: str, signals: tuple[str, ...]) -> str:
@@ -598,11 +687,21 @@ def compact_context_summary(context: str, signals: tuple[str, ...]) -> str:
 def extract_event_name(context: str) -> str:
     hosted_match = re.search(r"主办的[“\"']?([^，。,；;\n]{2,24}(?:大赛|比赛|竞赛|挑战赛))", context)
     if hosted_match:
-        return hosted_match.group(1).strip("“”\"'")
+        return clean_event_name(hosted_match.group(1))
     match = re.search(r"([“\"']?[^，。,；;\n]{2,24}(?:大赛|比赛|竞赛|挑战赛))", context)
     if match:
-        return match.group(1).strip("“”\"'")
+        return clean_event_name(match.group(1))
     return ""
+
+
+def clean_event_name(value: str) -> str:
+    value = value.strip("“”\"' ,，。；;")
+    for marker in ("”", "\"", "'"):
+        if marker in value:
+            tail = value.split(marker)[-1].strip("“”\"' ,，。；;")
+            if tail:
+                value = tail
+    return value
 
 
 def extract_org_name(context: str) -> str:

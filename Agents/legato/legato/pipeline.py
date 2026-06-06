@@ -48,6 +48,7 @@ def process(
     ocr_max_pages: int = 1,
     ocr_render_scale: float = 1.0,
     workflow: str | None = None,
+    workflow_stage: str | None = None,
     workflow_combine_agents: bool = False,
     debug: bool = False,
 ) -> LegatoResult:
@@ -132,7 +133,10 @@ def process(
             timeout_seconds=remaining,
             combine_agents=workflow_combine_agents,
         )
-        formatted = formatter.format(markdown)
+        if workflow_stage:
+            formatted = formatter.format_stage(markdown, workflow_stage)
+        else:
+            formatted = formatter.format(markdown)
         formatter_debug = formatted.debug
     else:
         formatter = PrestoFormatter(presto_url, timeout_seconds=remaining) if use_presto else LocalRuleFormatter()

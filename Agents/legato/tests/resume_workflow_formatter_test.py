@@ -129,7 +129,7 @@ class ResumeWorkflowFormatterTest(unittest.TestCase):
         self.assertTrue(any(item["type"] == "社团" for item in experience))
         contests = [item for item in experience if item["type"] == "比赛"]
         self.assertEqual(len(contests), 1)
-        self.assertEqual(contests[0]["role"], "队长")
+        self.assertEqual(contests[0]["role"], "杜邦青年创新大赛 / 队长")
         self.assertEqual(contests[0]["level"], 9)
 
     def test_build_local_experience_does_not_duplicate_undescribed_awards(self) -> None:
@@ -154,7 +154,7 @@ class ResumeWorkflowFormatterTest(unittest.TestCase):
         )
         self.assertEqual(len(experience), 1)
         self.assertEqual(experience[0]["type"], "实习")
-        self.assertEqual(experience[0]["role"], "MCP标注（实习生）")
+        self.assertEqual(experience[0]["role"], "字节跳动 / MCP标注(实习生)")
         self.assertIn("MCP标注", experience[0]["contribution"])
         self.assertEqual(experience[0]["level"], 4)
 

@@ -49,6 +49,12 @@ Apply these after the base score.
 | National/top-tier result plus described ownership | 8-9 |
 | Pure award line without contribution description | keep in `certifications_awards`; do not create `experience` |
 
+## Field Semantics
+
+- `role`: identity of the experience. Prefer `organization/company/event / role` when both parts are explicit. Keep it empty when only a vague project description is available.
+- `contribution`: concise evidence of what the student did. Do not use it to restate company, school, or contest names unless that is the only meaningful evidence.
+- `level`: score the contribution evidence first, then adjust by organization/contest/school scope. Brand or title alone should not produce a high score.
+
 ## Contest Calibration
 
 Do not blacklist specific contest names. Score by:

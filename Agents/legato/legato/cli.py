@@ -15,6 +15,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target", choices=sorted(SCHEMAS), required=True)
     parser.add_argument("--workflow", choices=["resume"], help="Use a workflow-specific formatter.")
     parser.add_argument(
+        "--workflow-stage",
+        choices=["profile", "certifications_awards", "experience"],
+        help="Run one resume workflow stage and return partial structured data.",
+    )
+    parser.add_argument(
         "--workflow-combine-agents",
         action="store_true",
         help="For resume workflow, combine identity and education into one model request.",
@@ -63,6 +68,7 @@ def main(argv: list[str] | None = None) -> int:
             ocr_max_pages=args.ocr_max_pages,
             ocr_render_scale=args.ocr_render_scale,
             workflow=args.workflow,
+            workflow_stage=args.workflow_stage,
             workflow_combine_agents=args.workflow_combine_agents,
             debug=args.debug,
         ).to_dict()
