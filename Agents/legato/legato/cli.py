@@ -16,13 +16,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workflow", choices=["resume"], help="Use a workflow-specific formatter.")
     parser.add_argument(
         "--workflow-stage",
-        choices=["profile", "certifications_awards", "experience", "experience_hybrid", "item_benchmark"],
+        choices=["profile", "certifications_awards", "experience", "experience_hybrid", "item_benchmark", "major_baseline"],
         help="Run one resume workflow stage and return partial structured data.",
     )
     parser.add_argument(
         "--workflow-combine-agents",
         action="store_true",
         help="For resume workflow, combine identity and education into one model request.",
+    )
+    parser.add_argument(
+        "--workflow-stage-input",
+        help="Read JSON input for workflow stages that accept caller-assembled items.",
     )
     parser.add_argument("--debug", action="store_true", help="Include timings, retry counts, model, and endpoint.")
     parser.add_argument("--presto-url", default=None, help="Presto base URL. Defaults to LEGATO_PRESTO_URL or localhost.")
@@ -55,6 +59,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        workflow_stage_input = None
+        if args.workflow_stage_input:
+            workflow_stage_input = json.loads(Path(args.workflow_stage_input).read_text(encoding="utf-8"))
         result = process(
             args.source,
             args.target,
@@ -69,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
             ocr_render_scale=args.ocr_render_scale,
             workflow=args.workflow,
             workflow_stage=args.workflow_stage,
+            workflow_stage_input=workflow_stage_input,
             workflow_combine_agents=args.workflow_combine_agents,
             debug=args.debug,
         ).to_dict()

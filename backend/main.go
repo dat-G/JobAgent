@@ -47,16 +47,19 @@ type Diagnosis struct {
 }
 
 type AbilityProfile struct {
-	BasicInfo         BasicInfo        `json:"basic_info"`
-	Education         []EducationItem  `json:"education"`
-	FourDimScores     []ScoreDimension `json:"four_dim_scores"`
-	RadarData         []ScoreDimension `json:"radar_data"`
-	EvidenceSummary   []EvidenceItem   `json:"evidence_summary"`
-	AwardsStatus      string           `json:"awards_status"`
-	Awards            []AwardItem      `json:"awards"`
-	ExperiencesStatus string           `json:"experiences_status"`
-	Experiences       []ExperienceItem `json:"experiences"`
-	TopJobs           []MatchedJob     `json:"top5_matching_jobs"`
+	BasicInfo           BasicInfo        `json:"basic_info"`
+	Education           []EducationItem  `json:"education"`
+	FourDimScores       []ScoreDimension `json:"four_dim_scores"`
+	RadarData           []ScoreDimension `json:"radar_data"`
+	EvidenceSummary     []EvidenceItem   `json:"evidence_summary"`
+	AwardsStatus        string           `json:"awards_status"`
+	Awards              []AwardItem      `json:"awards"`
+	ExperiencesStatus   string           `json:"experiences_status"`
+	Experiences         []ExperienceItem `json:"experiences"`
+	BenchmarkStatus     string           `json:"benchmark_status"`
+	MajorBaselineStatus string           `json:"major_baseline_status"`
+	MajorBaseline       MajorBaseline    `json:"major_baseline"`
+	TopJobs             []MatchedJob     `json:"top5_matching_jobs"`
 }
 
 type BasicInfo struct {
@@ -81,6 +84,8 @@ type EducationItem struct {
 	Is211              bool   `json:"is_211"`
 	IsDoubleFirstClass bool   `json:"is_double_first_class"`
 	RuankeRank         int    `json:"ruanke_rank"`
+	SchoolKind         string `json:"school_kind,omitempty"`
+	ParentSchool       string `json:"parent_school,omitempty"`
 }
 
 type ScoreDimension struct {
@@ -98,25 +103,45 @@ type EvidenceItem struct {
 }
 
 type AwardItem struct {
-	Name        string `json:"name"`
-	Result      string `json:"result"`
-	Score       int    `json:"score"`
-	Level       string `json:"level"`
-	Reason      string `json:"reason"`
-	DataSource  string `json:"data_source"`
-	ScoreSource string `json:"score_source"`
+	Name                string    `json:"name"`
+	Result              string    `json:"result"`
+	EvidenceScope       string    `json:"evidence_scope"`
+	Score               int       `json:"score,omitempty"`
+	Level               float64   `json:"level,omitempty"`
+	ImpactFactor        *float64  `json:"impact_factor,omitempty"`
+	BenchmarkDimensions []string  `json:"benchmark_dimensions,omitempty"`
+	BenchmarkScores     []float64 `json:"benchmark_scores,omitempty"`
+	Signal              string    `json:"signal,omitempty"`
+	Reason              string    `json:"reason"`
+	DataSource          string    `json:"data_source"`
+	ScoreSource         string    `json:"score_source"`
 }
 
 type ExperienceItem struct {
-	Type         string `json:"type"`
-	Role         string `json:"role"`
-	Contribution string `json:"contribution"`
-	Level        int    `json:"level"`
-	Score        int    `json:"score"`
-	Signal       string `json:"signal"`
-	Reason       string `json:"reason"`
-	DataSource   string `json:"data_source"`
-	ScoreSource  string `json:"score_source"`
+	Type                string    `json:"type"`
+	Role                string    `json:"role"`
+	Contribution        string    `json:"contribution"`
+	EvidenceScope       string    `json:"evidence_scope"`
+	Level               int       `json:"level"`
+	Score               int       `json:"score,omitempty"`
+	ImpactFactor        *float64  `json:"impact_factor,omitempty"`
+	BenchmarkDimensions []string  `json:"benchmark_dimensions,omitempty"`
+	BenchmarkScores     []float64 `json:"benchmark_scores,omitempty"`
+	Signal              string    `json:"signal"`
+	Reason              string    `json:"reason"`
+	DataSource          string    `json:"data_source"`
+	ScoreSource         string    `json:"score_source"`
+}
+
+type MajorBaseline struct {
+	MajorName   string   `json:"major_name"`
+	MajorFamily string   `json:"major_family"`
+	BaseScore   int      `json:"base_score"`
+	Dimensions  []string `json:"dimensions,omitempty"`
+	Scores      []int    `json:"scores,omitempty"`
+	Rationale   string   `json:"rationale,omitempty"`
+	Confidence  float64  `json:"confidence,omitempty"`
+	Source      string   `json:"source,omitempty"`
 }
 
 type MatchedJob struct {
@@ -361,6 +386,14 @@ func filesFromForm(r *http.Request, formKey string, kind string) []SourceFile {
 	return files
 }
 
+func benchmarkDimensionNames() []string {
+	return []string{"逻辑", "语言", "专业", "领导", "抗压", "成长"}
+}
+
+func floatPtr(value float64) *float64 {
+	return &value
+}
+
 func mockDiagnosis(req DiagnosisRequest) Diagnosis {
 	recommendedRole := "前端工程师"
 	files := req.Files
@@ -420,70 +453,103 @@ func mockDiagnosis(req DiagnosisRequest) Diagnosis {
 				{Category: "竞赛证书", Summary: "英语六级、数学建模竞赛奖项可补充学习能力证据", Signal: "综合能力良好"},
 				{Category: "待补证据", Summary: "性能优化、测试覆盖、组件化设计、线上问题处理证据不足", Signal: "工程深度待补"},
 			},
-			AwardsStatus: "mock",
+			AwardsStatus:        "mock",
+			BenchmarkStatus:     "mock",
+			MajorBaselineStatus: "mock",
+			MajorBaseline: MajorBaseline{
+				MajorName:   "计算机科学与技术",
+				MajorFamily: "工科类",
+				BaseScore:   51,
+				Dimensions:  benchmarkDimensionNames(),
+				Scores:      []int{56, 46, 59, 42, 49, 53},
+				Rationale:   "按工科类专业、211/双一流/软科#120学校层次给出能力prior。",
+				Confidence:  0.68,
+				Source:      "mock_major_baseline",
+			},
 			Awards: []AwardItem{
 				{
-					Name:        "2023 年全国大学生数学建模竞赛黑龙江赛区",
-					Result:      "一等奖",
-					Score:       76,
-					Level:       "较强证据",
-					Reason:      "省级正式竞赛一等奖，能补充建模、协作和问题拆解能力，但仍缺少个人贡献描述。",
-					DataSource:  "模拟数据",
-					ScoreSource: "模拟评分",
+					Name:                "2023 年全国大学生数学建模竞赛黑龙江赛区",
+					Result:              "一等奖",
+					EvidenceScope:       "校外",
+					Level:               7,
+					ImpactFactor:        floatPtr(6.8),
+					BenchmarkDimensions: benchmarkDimensionNames(),
+					BenchmarkScores:     []float64{0.28, 0.08, 0.22, 0.12, 0.18, 0.12},
+					Signal:              "较强证据",
+					Reason:              "省级正式竞赛一等奖，能补充建模、协作和问题拆解能力，但仍缺少个人贡献描述。",
+					DataSource:          "模拟数据",
+					ScoreSource:         "模拟评分",
 				},
 				{
-					Name:        "全国大学英语六级考试",
-					Result:      "567 分",
-					Score:       58,
-					Level:       "基础证据",
-					Reason:      "基础证书可证明英语能力，按 Legato 评分约定不作为高价值能力证据。",
-					DataSource:  "模拟数据",
-					ScoreSource: "模拟评分",
+					Name:                "全国大学英语六级考试",
+					Result:              "567 分",
+					EvidenceScope:       "校外",
+					Level:               3,
+					ImpactFactor:        floatPtr(2.8),
+					BenchmarkDimensions: benchmarkDimensionNames(),
+					BenchmarkScores:     []float64{0.06, 0.58, 0.04, 0.04, 0.10, 0.18},
+					Signal:              "基础证据",
+					Reason:              "基础证书可证明英语能力，按 Legato 评分约定不作为高价值能力证据。",
+					DataSource:          "模拟数据",
+					ScoreSource:         "模拟评分",
 				},
 				{
-					Name:        "校级优秀学生干部",
-					Result:      "荣誉称号",
-					Score:       42,
-					Level:       "弱证据",
-					Reason:      "泛荣誉可作综合素质补充，但缺少具体任务、动作和结果。",
-					DataSource:  "模拟数据",
-					ScoreSource: "模拟评分",
+					Name:                "校级优秀学生干部",
+					Result:              "荣誉称号",
+					EvidenceScope:       "校内",
+					Level:               2,
+					ImpactFactor:        floatPtr(2.0),
+					BenchmarkDimensions: benchmarkDimensionNames(),
+					BenchmarkScores:     []float64{0.10, 0.15, 0.05, 0.30, 0.15, 0.25},
+					Signal:              "弱证据",
+					Reason:              "泛荣誉可作综合素质补充，但缺少具体任务、动作和结果。",
+					DataSource:          "模拟数据",
+					ScoreSource:         "模拟评分",
 				},
 			},
 			ExperiencesStatus: "mock",
 			Experiences: []ExperienceItem{
 				{
-					Type:         "实习",
-					Role:         "前端开发实习生",
-					Contribution: "参与视频云平台监控前台系统开发，负责页面模块实现和联调。",
-					Level:        7,
-					Score:        70,
-					Signal:       "强证据",
-					Reason:       "有岗位相关技术贡献和交付场景，仍需要补充量化结果与个人 ownership。",
-					DataSource:   "模拟数据",
-					ScoreSource:  "模拟评分",
+					Type:                "实习",
+					Role:                "前端开发实习生",
+					Contribution:        "参与视频云平台监控前台系统开发，负责页面模块实现和联调。",
+					EvidenceScope:       "校外",
+					Level:               7,
+					ImpactFactor:        floatPtr(6.2),
+					BenchmarkDimensions: benchmarkDimensionNames(),
+					BenchmarkScores:     []float64{0.16, 0.09, 0.34, 0.10, 0.19, 0.12},
+					Signal:              "强证据",
+					Reason:              "有岗位相关技术贡献和交付场景，仍需要补充量化结果与个人 ownership。",
+					DataSource:          "模拟数据",
+					ScoreSource:         "模拟评分",
 				},
 				{
-					Type:         "项目",
-					Role:         "前端负责人",
-					Contribution: "完成作品集项目的组件拆分、状态管理和部署说明。",
-					Level:        6,
-					Score:        60,
-					Signal:       "有效证据",
-					Reason:       "项目相关性较高，若补齐线上地址、测试和性能数据，可提升证据强度。",
-					DataSource:   "模拟数据",
-					ScoreSource:  "模拟评分",
+					Type:                "项目",
+					Role:                "前端负责人",
+					Contribution:        "完成作品集项目的组件拆分、状态管理和部署说明。",
+					EvidenceScope:       "校内",
+					Level:               6,
+					ImpactFactor:        floatPtr(5.6),
+					BenchmarkDimensions: benchmarkDimensionNames(),
+					BenchmarkScores:     []float64{0.20, 0.08, 0.36, 0.12, 0.12, 0.12},
+					Signal:              "有效证据",
+					Reason:              "项目相关性较高，若补齐线上地址、测试和性能数据，可提升证据强度。",
+					DataSource:          "模拟数据",
+					ScoreSource:         "模拟评分",
 				},
 				{
-					Type:         "校园",
-					Role:         "社团活动组织者",
-					Contribution: "组织校园活动并协调团队分工。",
-					Level:        4,
-					Score:        40,
-					Signal:       "普通经历",
-					Reason:       "体现协作和执行，但与推荐岗位能力要求的直接关系较弱。",
-					DataSource:   "模拟数据",
-					ScoreSource:  "模拟评分",
+					Type:                "校园",
+					Role:                "社团活动组织者",
+					Contribution:        "组织校园活动并协调团队分工。",
+					EvidenceScope:       "校内",
+					Level:               4,
+					ImpactFactor:        floatPtr(3.2),
+					BenchmarkDimensions: benchmarkDimensionNames(),
+					BenchmarkScores:     []float64{0.08, 0.22, 0.05, 0.34, 0.13, 0.18},
+					Signal:              "普通经历",
+					Reason:              "体现协作和执行，但与推荐岗位能力要求的直接关系较弱。",
+					DataSource:          "模拟数据",
+					ScoreSource:         "模拟评分",
 				},
 			},
 			TopJobs: []MatchedJob{
@@ -610,7 +676,7 @@ func buildAbilityProfileXLSX(profile AbilityProfile) ([]byte, error) {
 		{"毕业年份", profile.BasicInfo.GraduationYear},
 		{"推荐首选岗位", profile.BasicInfo.TargetRole},
 		{},
-		{"教育经历", "学院", "专业", "学历", "985", "211", "双一流", "软科排名"},
+		{"教育经历", "学院", "专业", "学历", "985", "211", "双一流", "软科排名", "学校类型"},
 	}
 	for _, item := range profile.Education {
 		rows = append(rows, []string{
@@ -622,7 +688,22 @@ func buildAbilityProfileXLSX(profile AbilityProfile) ([]byte, error) {
 			boolLabel(item.Is211),
 			boolLabel(item.IsDoubleFirstClass),
 			rankLabel(item.RuankeRank),
+			schoolKindLabel(item),
 		})
+	}
+	if len(profile.MajorBaseline.Scores) > 0 {
+		rows = append(rows,
+			[]string{},
+			[]string{"专业基础六维基线", "专业族群", "基础分", "六维基线", "说明", "来源"},
+			[]string{
+				profile.MajorBaseline.MajorName,
+				profile.MajorBaseline.MajorFamily,
+				fmt.Sprintf("%d", profile.MajorBaseline.BaseScore),
+				formatIntDistribution(profile.MajorBaseline.Dimensions, profile.MajorBaseline.Scores),
+				profile.MajorBaseline.Rationale,
+				profile.MajorBaseline.Source,
+			},
+		)
 	}
 	rows = append(rows,
 		[]string{},
@@ -635,17 +716,37 @@ func buildAbilityProfileXLSX(profile AbilityProfile) ([]byte, error) {
 	for _, item := range profile.RadarData {
 		rows = append(rows, []string{item.Name, fmt.Sprintf("%d/%d", item.Score, item.MaxScore), item.Level, item.Reason})
 	}
-	rows = append(rows, []string{}, []string{"奖项与证书", "结果", "评分", "等级", "评分说明", "来源"})
+	rows = append(rows, []string{}, []string{"奖项与证书", "结果", "分类", "Level", "Impact", "六维分布", "评分说明", "来源"})
 	for _, item := range profile.Awards {
-		rows = append(rows, []string{item.Name, item.Result, fmt.Sprintf("%d/100", item.Score), item.Level, item.Reason, item.DataSource + "；" + item.ScoreSource})
+		rows = append(rows, []string{
+			item.Name,
+			item.Result,
+			item.EvidenceScope,
+			formatScore10(item.Level),
+			formatOptionalScore10(item.ImpactFactor),
+			formatBenchmarkDistribution(item.BenchmarkDimensions, item.BenchmarkScores),
+			item.Reason,
+			item.DataSource + "；" + item.ScoreSource,
+		})
 	}
-	rows = append(rows, []string{}, []string{"经历", "角色", "贡献", "评分", "证据强度", "评分说明", "来源"})
+	rows = append(rows, []string{}, []string{"经历", "角色", "贡献", "分类", "Level", "Impact", "六维分布", "证据强度", "评分说明", "来源"})
 	for _, item := range profile.Experiences {
 		label := item.Type
 		if label == "" {
 			label = "经历"
 		}
-		rows = append(rows, []string{label, item.Role, item.Contribution, fmt.Sprintf("%d/100", item.Score), item.Signal, item.Reason, item.DataSource + "；" + item.ScoreSource})
+		rows = append(rows, []string{
+			label,
+			item.Role,
+			item.Contribution,
+			item.EvidenceScope,
+			formatScore10(float64(item.Level)),
+			formatOptionalScore10(item.ImpactFactor),
+			formatBenchmarkDistribution(item.BenchmarkDimensions, item.BenchmarkScores),
+			item.Signal,
+			item.Reason,
+			item.DataSource + "；" + item.ScoreSource,
+		})
 	}
 	rows = append(rows, []string{}, []string{"TOP5 匹配岗位", "匹配度", "推荐理由", "下一步证据"})
 	for _, job := range profile.TopJobs {
@@ -840,6 +941,63 @@ func rankLabel(rank int) string {
 		return ""
 	}
 	return fmt.Sprintf("#%d", rank)
+}
+
+func schoolKindLabel(item EducationItem) string {
+	if item.SchoolKind == "independent_college" {
+		if item.ParentSchool != "" {
+			return "独立学院/原三本（母体：" + item.ParentSchool + "）"
+		}
+		return "独立学院/原三本"
+	}
+	return item.SchoolKind
+}
+
+func formatScore10(value float64) string {
+	return fmt.Sprintf("%.1f/10", value)
+}
+
+func formatOptionalScore10(value *float64) string {
+	if value == nil {
+		return ""
+	}
+	return formatScore10(*value)
+}
+
+func formatBenchmarkDistribution(dimensions []string, scores []float64) string {
+	if len(scores) == 0 {
+		return ""
+	}
+	if len(dimensions) != len(scores) {
+		dimensions = benchmarkDimensionNames()
+	}
+	parts := make([]string, 0, len(scores))
+	for index, score := range scores {
+		name := fmt.Sprintf("维度%d", index+1)
+		if index < len(dimensions) && dimensions[index] != "" {
+			name = dimensions[index]
+		}
+		parts = append(parts, fmt.Sprintf("%s %.0f%%", name, score*100))
+	}
+	return strings.Join(parts, "；")
+}
+
+func formatIntDistribution(dimensions []string, scores []int) string {
+	if len(scores) == 0 {
+		return ""
+	}
+	if len(dimensions) != len(scores) {
+		dimensions = benchmarkDimensionNames()
+	}
+	parts := make([]string, 0, len(scores))
+	for index, score := range scores {
+		name := fmt.Sprintf("维度%d", index+1)
+		if index < len(dimensions) && dimensions[index] != "" {
+			name = dimensions[index]
+		}
+		parts = append(parts, fmt.Sprintf("%s %d", name, score))
+	}
+	return strings.Join(parts, "；")
 }
 
 func xmlText(value string) string {

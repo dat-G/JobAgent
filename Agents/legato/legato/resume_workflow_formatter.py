@@ -102,6 +102,13 @@ RANKING_CACHE = (
     / "cache"
     / "ruanke_china_university_ranking_2026_structured.json"
 )
+INDEPENDENT_COLLEGE_CACHE = (
+    Path(__file__).resolve().parents[1]
+    / "workflows"
+    / "resume"
+    / "cache"
+    / "independent_colleges.json"
+)
 
 
 @dataclass(frozen=True)
@@ -122,11 +129,13 @@ class ResumeWorkflowFormatter:
         timeout_seconds: float = 30,
         max_retries: int = 5,
         max_workers: int = 8,
+        stage_input: dict[str, Any] | None = None,
         combine_agents: bool = False,
     ) -> None:
         self.presto = PrestoFormatter(presto_url, timeout_seconds=timeout_seconds)
         self.max_retries = max_retries
         self.max_workers = max_workers
+        self.stage_input = stage_input or {}
         self.combine_agents = combine_agents
         self.prompts_dir = Path(__file__).resolve().parents[1] / "workflows" / "resume" / "prompts"
         self.common_prompt = self._read_prompt("common.md")
@@ -209,12 +218,32 @@ class ResumeWorkflowFormatter:
                 warnings=[],
                 debug=self._debug_envelope({"certifications_awards": result}, merge_ms=0, total_ms=total_ms),
             )
+        if stage == "major_baseline":
+            result = self._run_major_baseline_with_retry(resume_text)
+            total_ms = int((time.perf_counter() - started) * 1000)
+            return WorkflowFormatResult(
+                data={"major_baseline": result["data"].get("major_baseline", {})},
+                formatter="presto_resume_workflow_major_baseline",
+                warnings=[],
+                debug=self._debug_envelope(
+                    {"major_baseline": result},
+                    merge_ms=0,
+                    total_ms=total_ms,
+                ),
+            )
         if stage == "item_benchmark":
-            items_result = self._run_group_with_retry("certifications_awards", resume_text)
+            external_items = normalize_benchmark_input_items(self.stage_input.get("items"))
+            agents: dict[str, dict[str, Any]] = {}
+            if external_items:
+                items = external_items
+            else:
+                items_result = self._run_group_with_retry("certifications_awards", resume_text)
+                items = benchmark_items_from_certifications(items_result["data"].get("certifications_awards", []))
+                agents["certifications_awards"] = items_result
             benchmark_started = time.perf_counter()
             benchmark_result = self._run_item_benchmarks(
                 resume_text,
-                items_result["data"].get("certifications_awards", []),
+                items,
             )
             benchmark_ms = int((time.perf_counter() - benchmark_started) * 1000)
             total_ms = int((time.perf_counter() - started) * 1000)
@@ -223,7 +252,7 @@ class ResumeWorkflowFormatter:
                 formatter="presto_resume_workflow_item_benchmark",
                 warnings=[],
                 debug=self._debug_envelope(
-                    {"certifications_awards": items_result, **benchmark_result["agents"]},
+                    {**agents, **benchmark_result["agents"]},
                     merge_ms=0,
                     total_ms=total_ms,
                     local_stages=[{"stage": "item_benchmark_merge", "elapsed_ms": benchmark_ms}],
@@ -401,10 +430,10 @@ class ResumeWorkflowFormatter:
             if attempt > 1:
                 call_prompt += "\n\n" + self._retry_block(last_error, previous_output)
             call_started = time.perf_counter()
-            output = self._call_presto(call_prompt, "item_benchmark")
-            call_ms = int((time.perf_counter() - call_started) * 1000)
-            previous_output = output
             try:
+                output = self._call_presto(call_prompt, "item_benchmark")
+                call_ms = int((time.perf_counter() - call_started) * 1000)
+                previous_output = output
                 data = extract_json_object(output)
                 benchmark = normalize_item_benchmark(item, data)
                 validate_six_dim_scores(benchmark["scores"], "scores")
@@ -421,26 +450,54 @@ class ResumeWorkflowFormatter:
                 }
             except Exception as exc:
                 last_error = str(exc)
-        fallback = local_item_benchmark(item)
-        return {
-            "item": fallback,
-            "agent": {
-                "data": {"item_benchmark": fallback},
-                "attempts": self.max_retries,
-                "retry_count": self.max_retries,
-                "elapsed_ms": int((time.perf_counter() - started) * 1000),
-                "last_call_ms": 0,
-                "input": input_debug,
-                "fallback": True,
-                "last_error": last_error,
-            },
-        }
+        raise RuntimeError(f"item_benchmark[{index}] failed after {self.max_retries} attempts: {last_error}")
 
     def _item_benchmark_prompt(self, resume_text: str, item: dict[str, Any]) -> str:
         prompt = self._read_prompt("item_benchmark.md")
         context = compact_education_context(resume_text)
         item_text = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
         return prompt.replace("{{education_context}}", context).replace("{{item}}", item_text)
+
+    def _run_major_baseline_with_retry(self, resume_text: str) -> dict[str, Any]:
+        started = time.perf_counter()
+        context = major_baseline_context(resume_text, self.stage_input)
+        prompt = self._major_baseline_prompt(context)
+        previous_output = ""
+        last_error = ""
+        input_debug = {
+            "mode": "profile_education_transcript_context",
+            "input_chars": len(prompt),
+            "original_chars": len(resume_text),
+            "fallback_full_text": False,
+        }
+        for attempt in range(1, self.max_retries + 1):
+            call_prompt = prompt
+            if attempt > 1:
+                call_prompt += "\n\n" + self._retry_block(last_error, previous_output)
+            call_started = time.perf_counter()
+            try:
+                output = self._call_presto(call_prompt, "major_baseline")
+                call_ms = int((time.perf_counter() - call_started) * 1000)
+                previous_output = output
+                data = extract_json_object(output)
+                baseline = normalize_major_baseline(data, context)
+                validate_major_baseline(baseline)
+                return {
+                    "data": {"major_baseline": baseline},
+                    "attempts": attempt,
+                    "retry_count": attempt - 1,
+                    "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                    "last_call_ms": call_ms,
+                    "input": input_debug,
+                }
+            except Exception as exc:
+                last_error = str(exc)
+        raise RuntimeError(f"major_baseline failed after {self.max_retries} attempts: {last_error}")
+
+    def _major_baseline_prompt(self, context: dict[str, Any]) -> str:
+        prompt = self._read_prompt("major_baseline.md")
+        context_text = json.dumps(context, ensure_ascii=False, separators=(",", ":"))
+        return prompt.replace("{{common}}", self.common_prompt).replace("{{context}}", context_text)
 
     def _group_prompt(self, group: str, resume_text: str) -> str:
         prompt = self._read_prompt(f"{group}.md")
@@ -504,9 +561,11 @@ class ResumeWorkflowFormatter:
             for index, item in enumerate(items):
                 if not isinstance(item, dict):
                     raise ValueError(f"certifications_awards[{index}] must be an object")
-                for key in ("name", "result"):
+                for key in ("name", "result", "level", "evidence_scope"):
                     if key not in item:
                         raise ValueError(f"certifications_awards[{index}] missing {key}")
+                if item["evidence_scope"] not in EVIDENCE_SCOPES:
+                    raise ValueError(f"certifications_awards[{index}].evidence_scope must be 校内 or 校外")
             return
         if group == "item_benchmark":
             items = data.get("item_benchmark")
@@ -523,6 +582,9 @@ class ResumeWorkflowFormatter:
                 if not isinstance(impact, (int, float)) or isinstance(impact, bool) or impact < 0 or impact > 10:
                     raise ValueError(f"item_benchmark[{index}].impact_factor must be between 0 and 10")
             return
+        if group == "major_baseline":
+            validate_major_baseline(normalize_major_baseline(data, major_baseline_context("", self.stage_input)))
+            return
         if group in EXPERIENCE_GROUPS or group == "experience":
             items = data.get("experience")
             if not isinstance(items, list):
@@ -530,7 +592,7 @@ class ResumeWorkflowFormatter:
             for index, item in enumerate(items):
                 if not isinstance(item, dict):
                     raise ValueError(f"experience[{index}] must be an object")
-                for key in ("type", "role", "contribution", "level"):
+                for key in ("type", "role", "contribution", "level", "evidence_scope"):
                     if key not in item:
                         raise ValueError(f"experience[{index}] missing {key}")
                 level = item["level"]
@@ -538,6 +600,8 @@ class ResumeWorkflowFormatter:
                     raise ValueError(f"experience[{index}].level must be a number")
                 if level < 0 or level > 10:
                     raise ValueError(f"experience[{index}].level must be between 0 and 10")
+                if item["evidence_scope"] not in EVIDENCE_SCOPES:
+                    raise ValueError(f"experience[{index}].evidence_scope must be 校内 or 校外")
             return
         if group == "combined":
             self._validate_group("profile", data)
@@ -664,6 +728,7 @@ def extract_internship_experiences(resume_text: str) -> list[dict[str, Any]]:
                 "role": compose_experience_role(organization, role),
                 "contribution": contribution,
                 "level": score_internship_level(organization, scoring_context),
+                "evidence_scope": "校外",
             }
         )
     return experiences
@@ -740,6 +805,7 @@ def extract_project_experiences(resume_text: str) -> list[dict[str, Any]]:
                 "role": role,
                 "contribution": summarize_project_contribution(context),
                 "level": score_project_level(context),
+                "evidence_scope": normalize_evidence_scope("", {"type": "项目", "role": role, "contribution": context}),
             }
         )
         break
@@ -759,6 +825,7 @@ def extract_bullet_project_experiences(lines: list[str]) -> list[dict[str, Any]]
                 "role": role,
                 "contribution": contribution,
                 "level": level,
+                "evidence_scope": normalize_evidence_scope("", {"type": "项目", "role": role, "contribution": contribution}),
             }
         )
     return experiences
@@ -808,6 +875,7 @@ def extract_dated_project_experiences(lines: list[str]) -> list[dict[str, Any]]:
                 "role": compose_experience_role(subject, role),
                 "contribution": summarize_project_contribution(context),
                 "level": score_project_level(context),
+                "evidence_scope": normalize_evidence_scope("", {"type": "项目", "role": subject, "contribution": nearby}),
             }
         )
     return experiences
@@ -837,7 +905,20 @@ def is_project_anchor(line: str) -> bool:
 
 
 def is_research_description_anchor(line: str) -> bool:
-    return "研究项目" in line and any(signal in line for signal in ("GNSS", "DBSCAN", "点云", "轨迹", "田路分割"))
+    if any(skip in line for skip in ("荣誉", "奖项", "证书", "技能", "教育背景", "主修课程", "公众号")):
+        return False
+    if len(line) < 12:
+        return False
+    if "研究项目" in line and has_contribution_signal(line):
+        return True
+    return bool(
+        re.search(r"基于[^，。,；;\n]{2,32}的[^，。,；;\n]{2,32}(方法|模型|算法|系统|框架|模块)", line)
+        or re.search(r"针对[^，。,；;\n]{2,32}(数据集|问题|场景|任务)[^，。,；;\n]{0,32}(开发|实现|复现|分析|评估|构建)", line)
+        or (
+            any(marker in line for marker in ("研究项目", "科研项目", "研究中"))
+            and any(signal in line for signal in ("数据清洗", "模型训练", "算法实现", "实验评估", "论文复现", "复现与分析"))
+        )
+    )
 
 
 def extract_described_contest_experiences(resume_text: str) -> list[dict[str, Any]]:
@@ -857,6 +938,7 @@ def extract_described_contest_experiences(resume_text: str) -> list[dict[str, An
                 "role": compose_experience_role(extract_event_name(context), extract_role(context)),
                 "contribution": summarize_contest_contribution(context),
                 "level": score_contest_context_level(context),
+                "evidence_scope": normalize_evidence_scope("", {"type": "比赛", "role": extract_event_name(context), "contribution": context}),
             }
         )
     experiences.extend(extract_contest_role_experiences(lines))
@@ -878,6 +960,7 @@ def extract_contest_role_experiences(lines: list[str]) -> list[dict[str, Any]]:
                 "role": compose_experience_role(extract_event_name(context), role),
                 "contribution": summarize_contest_role_contribution(context, role),
                 "level": score_contest_context_level(context),
+                "evidence_scope": normalize_evidence_scope("", {"type": "比赛", "role": extract_event_name(context), "contribution": context}),
             }
         )
     return experiences
@@ -901,6 +984,7 @@ def extract_campus_role_experiences(resume_text: str) -> list[dict[str, Any]]:
                 "role": compose_experience_role(extract_org_name(context), extract_role(context)),
                 "contribution": summarize_campus_contribution(context),
                 "level": 6 if any(signal in context for signal in ("组织", "负责", "带领", "赞助", "活动")) else 5,
+                "evidence_scope": "校内",
             }
         )
     return experiences
@@ -962,6 +1046,10 @@ def summarize_project_contribution(context: str) -> str:
         return "二进制漏洞挖掘与漏洞验证"
     if "数据清洗" in context or "GNSS" in context:
         return "数据清洗与研究方法实现"
+    if "实验评估" in context or "模型训练" in context:
+        return "模型实现与实验评估"
+    if "论文复现" in context or "复现与分析" in context or "非开源文章" in context:
+        return "论文复现与研究方法分析"
     if "MCP" in context:
         return "MCP任务标注与内容修正"
     return compact_context_summary(context, ("项目", "研究", "开发", "实现", "分析"))
@@ -1010,12 +1098,61 @@ def extract_project_subject(context: str) -> str:
 
 
 def extract_research_subject_from_context(context: str) -> str:
-    if "GNSS" in context:
-        if "田路分割" in context or "时序" in context:
-            return "GNSS轨迹田路分割研究项目"
-        if "点云" in context or "DBSCAN" in context:
-            return "GNSS点云处理研究项目"
+    lines = [line.strip(" ,，。；;") for line in context.splitlines() if line.strip()]
+    for line in lines:
+        explicit = research_subject_from_explicit_project_line(line)
+        if explicit:
+            return explicit
+    for line in lines:
+        method_subject = research_subject_from_method_line(line)
+        if method_subject:
+            return method_subject
+    for line in lines:
+        target_subject = research_subject_from_target_line(line)
+        if target_subject:
+            return target_subject
     return ""
+
+
+def research_subject_from_explicit_project_line(line: str) -> str:
+    matches = re.findall(r"([^，。,；;\n]{4,36})的研究项目", line)
+    if not matches:
+        return ""
+    subject = clean_research_subject(matches[-1])
+    return f"{subject}研究项目" if subject else ""
+
+
+def research_subject_from_method_line(line: str) -> str:
+    match = re.search(r"基于[^，。,；;\n]{2,32}的(?P<subject>[^，。,；;\n]{2,32}?)(方法|模型|算法|系统|框架|模块)", line)
+    if not match:
+        return ""
+    subject = clean_research_subject(match.group("subject"))
+    suffix = match.group(2)
+    if not subject:
+        return ""
+    return f"{subject}{suffix}研究项目"[:35]
+
+
+def research_subject_from_target_line(line: str) -> str:
+    match = re.search(r"针对(?P<subject>[^，。,；;\n]{2,32})(数据集|问题|场景|任务)", line)
+    if not match:
+        return ""
+    subject = clean_research_subject(match.group("subject") + match.group(2))
+    return f"{subject}研究项目"[:35] if subject else ""
+
+
+def clean_research_subject(subject: str) -> str:
+    subject = compact_role_part(subject)
+    for marker in ("模型的", "方法的", "系统的", "算法的", "框架的", "模块的"):
+        if marker in subject:
+            subject = subject.split(marker)[-1]
+    subject = re.sub(r"^(基于|关于|对于|针对|模型的|型的|方法的|项目的|使用的)", "", subject)
+    subject = re.sub(r"^(农机|相关|该|本)", "", subject)
+    subject = subject.strip("的 -–—,，。；;")
+    subject = subject.replace("的", "")
+    if len(subject) > 24:
+        subject = subject[-24:]
+    return subject
 
 
 def is_clean_subject_line(line: str) -> bool:
@@ -1144,6 +1281,484 @@ def filter_llm_experience_candidates(candidates: list[Any]) -> list[dict[str, An
 
 
 BENCHMARK_DIMENSIONS = ("逻辑", "语言", "专业", "领导", "抗压", "成长")
+EVIDENCE_SCOPES = ("校内", "校外")
+MAJOR_FAMILIES = ("文科类", "理科类", "工科类", "商科类", "医农类", "艺术体育类", "交叉类", "未知")
+
+
+def major_baseline_context(resume_text: str, stage_input: dict[str, Any] | None = None) -> dict[str, Any]:
+    stage_input = stage_input or {}
+    basic_info = stage_input.get("basic_info") if isinstance(stage_input.get("basic_info"), dict) else {}
+    raw_education = stage_input.get("education") if isinstance(stage_input.get("education"), list) else []
+    education: list[dict[str, Any]] = []
+    for item in raw_education:
+        if not isinstance(item, dict):
+            continue
+        tags = item.get("school_tags") if isinstance(item.get("school_tags"), dict) else {}
+        education.append(
+            {
+                "school": str(item.get("school") or ""),
+                "degree": str(item.get("degree") or item.get("degree_level") or ""),
+                "department": str(item.get("department") or ""),
+                "major": str(item.get("major") or ""),
+                "is_985": bool(item.get("is_985") or item.get("is985") or tags.get("is_985")),
+                "is_211": bool(item.get("is_211") or item.get("is211") or tags.get("is_211")),
+                "is_double_first_class": bool(item.get("is_double_first_class") or item.get("isDoubleFirstClass") or tags.get("is_double_first_class")),
+                "ruanke_rank": item.get("ruanke_rank") or item.get("ruankeRank") or tags.get("ruanke_rank") or 0,
+                "school_kind": str(item.get("school_kind") or tags.get("school_kind") or ""),
+                "parent_school": str(item.get("parent_school") or tags.get("parent_school") or ""),
+            }
+        )
+    transcript_use = str(
+        stage_input.get("transcript_use")
+        or basic_info.get("transcript_use")
+        or basic_info.get("transcriptUse")
+        or ""
+    )
+    major_name = first_non_empty(
+        [
+            basic_info.get("major"),
+            *[item.get("major") for item in education],
+        ]
+    )
+    department = first_non_empty([item.get("department") for item in education])
+    degree = first_non_empty([basic_info.get("degree"), *[item.get("degree") for item in education]])
+    major_text = "".join([major_name, department, degree, compact_education_context(resume_text)])
+    base_score_hint = academic_base_score_from_transcript(transcript_use)
+    school_hint = school_quality_hint(education, major_name, major_text)
+    return {
+        "basic_info": {
+            "school": str(basic_info.get("school") or ""),
+            "major": str(basic_info.get("major") or ""),
+            "degree": str(basic_info.get("degree") or ""),
+        },
+        "education": education,
+        "transcript_use": transcript_use,
+        "resume_education_context": compact_education_context(resume_text),
+        "major_name_hint": major_name,
+        "major_family_hint": infer_major_family(major_text),
+        "school_quality_hint": school_hint,
+        "base_score_hint": base_score_hint,
+        "dimensions": list(BENCHMARK_DIMENSIONS),
+    }
+
+
+def normalize_major_baseline(data: dict[str, Any], context: dict[str, Any] | None = None) -> dict[str, Any]:
+    context = context or {}
+    raw = data.get("major_baseline") if isinstance(data, dict) else {}
+    if not isinstance(raw, dict):
+        raw = data if isinstance(data, dict) else {}
+    fallback = local_major_baseline(context)
+    major_name = str(raw.get("major_name") or context.get("major_name_hint") or fallback["major_name"])
+    family = str(raw.get("major_family") or context.get("major_family_hint") or fallback["major_family"])
+    if family not in MAJOR_FAMILIES:
+        family = infer_major_family(major_name)
+    if family not in MAJOR_FAMILIES:
+        family = fallback["major_family"]
+    base_score = numeric_int(raw.get("base_score"), fallback["base_score"])
+    base_score = clamp_int(base_score, 30, 85)
+    scores = normalize_major_baseline_scores(raw.get("scores") or raw.get("baseline_scores") or raw.get("dimension_scores"), fallback["scores"])
+    confidence = numeric_float(raw.get("confidence"), fallback["confidence"])
+    return {
+        "major_name": major_name,
+        "major_family": family,
+        "base_score": base_score,
+        "dimensions": list(BENCHMARK_DIMENSIONS),
+        "scores": scores,
+        "rationale": str(raw.get("rationale") or fallback["rationale"])[:120],
+        "confidence": round(max(0.0, min(float(confidence), 1.0)), 2),
+        "source": str(raw.get("source") or "presto_major_baseline"),
+    }
+
+
+def validate_major_baseline(baseline: dict[str, Any]) -> None:
+    if not isinstance(baseline, dict):
+        raise ValueError("major_baseline must be an object")
+    if baseline.get("major_family") not in MAJOR_FAMILIES:
+        raise ValueError("major_baseline.major_family is invalid")
+    scores = baseline.get("scores")
+    if not isinstance(scores, list) or len(scores) != 6:
+        raise ValueError("major_baseline.scores must be an array of length 6")
+    for index, score in enumerate(scores):
+        if not isinstance(score, int) or isinstance(score, bool) or score < 0 or score > 100:
+            raise ValueError(f"major_baseline.scores[{index}] must be an integer between 0 and 100")
+
+
+def local_major_baseline(context: dict[str, Any] | None = None) -> dict[str, Any]:
+    context = context or {}
+    major_name = str(context.get("major_name_hint") or "")
+    major_family = str(context.get("major_family_hint") or infer_major_family(major_name))
+    if major_family not in MAJOR_FAMILIES:
+        major_family = "未知"
+    base_score = clamp_int(numeric_int(context.get("base_score_hint"), 50), 30, 85)
+    school_hint = context.get("school_quality_hint") if isinstance(context.get("school_quality_hint"), dict) else {}
+    school_bonus = clamp_int(numeric_int(school_hint.get("school_bonus_hint"), 0), 0, 3)
+    school_penalty = clamp_int(numeric_int(school_hint.get("school_penalty_hint"), 0), 0, 10)
+    specialty_bonus = clamp_int(numeric_int(school_hint.get("specialty_bonus_hint"), 0), 0, 2)
+    adjusted_base = clamp_int(base_score + school_bonus - school_penalty, 30, 85)
+    score_base = clamp_int(base_score + school_bonus - school_penalty, 30, 85)
+    effective_school_bonus = 0 if school_penalty > 0 else school_bonus
+    scores = apply_school_major_adjustments(
+        major_family_scores(score_base, major_family, bool(major_name)),
+        major_family,
+        effective_school_bonus,
+        specialty_bonus,
+    )
+    return {
+        "major_name": major_name,
+        "major_family": major_family,
+        "base_score": adjusted_base,
+        "dimensions": list(BENCHMARK_DIMENSIONS),
+        "scores": scores,
+        "rationale": local_major_baseline_rationale(major_family, school_hint),
+        "confidence": local_major_baseline_confidence(major_family, school_hint),
+        "source": "local_major_baseline",
+    }
+
+
+def normalize_major_baseline_scores(raw_scores: Any, fallback_scores: list[int]) -> list[int]:
+    if isinstance(raw_scores, dict):
+        values = [raw_scores.get(name) for name in BENCHMARK_DIMENSIONS]
+    elif isinstance(raw_scores, list):
+        values = raw_scores[:6]
+    else:
+        values = []
+    if len(values) < 6:
+        values = values + fallback_scores[len(values):]
+    normalized: list[int] = []
+    for index, value in enumerate(values[:6]):
+        score = numeric_float(value, fallback_scores[index])
+        if 0 <= score <= 1:
+            score *= 100
+        elif 1 < score <= 10:
+            score *= 10
+        normalized.append(clamp_int(round(score), 25, 85))
+    return normalized
+
+
+def major_family_scores(base_score: int, family: str, has_major: bool) -> list[int]:
+    offsets = {
+        "工科类": [4, -4, 7, -8, -2, 2],
+        "理科类": [6, -4, 5, -8, -2, 2],
+        "文科类": [0, 7, 5, -6, -3, 2],
+        "商科类": [2, 5, 5, -2, -2, 2],
+        "医农类": [2, -3, 7, -8, 2, 1],
+        "艺术体育类": [-3, 5, 6, -6, 3, 2],
+        "交叉类": [3, 3, 6, -6, -1, 2],
+        "未知": [0, 0, 2 if has_major else 0, -8, -4, 0],
+    }
+    return [clamp_int(base_score + offset, 25, 85) for offset in offsets.get(family, offsets["未知"])]
+
+
+def apply_school_major_adjustments(
+    scores: list[int],
+    major_family: str,
+    school_bonus: int,
+    specialty_bonus: int,
+) -> list[int]:
+    adjusted = list(scores[:6]) + [50] * max(0, 6 - len(scores))
+    school_offsets = [
+        min(school_bonus, 3),
+        0,
+        min(school_bonus, 3),
+        1 if school_bonus >= 3 else 0,
+        1 if school_bonus >= 2 else 0,
+        1 if school_bonus >= 2 else 0,
+    ]
+    specialty_offsets = [0, 0, min(specialty_bonus, 2), 0, 0, 1 if specialty_bonus >= 2 else 0]
+    if specialty_bonus > 0:
+        if major_family in ("工科类", "理科类", "医农类"):
+            specialty_offsets[0] += 1
+        elif major_family in ("文科类", "商科类", "艺术体育类"):
+            specialty_offsets[1] += 1
+        elif major_family == "交叉类":
+            specialty_offsets[0] += 1
+            specialty_offsets[1] += 1
+    return [clamp_int(score + school_offsets[index] + specialty_offsets[index], 25, 85) for index, score in enumerate(adjusted[:6])]
+
+
+def school_quality_hint(education: list[dict[str, Any]], major_name: str, major_text: str) -> dict[str, Any]:
+    if not education:
+        return {
+            "school_tier": "未知",
+            "school_bonus_hint": 0,
+            "school_penalty_hint": 0,
+            "specialty_alignment_hint": "未知",
+            "specialty_bonus_hint": 0,
+        }
+    scored = sorted(
+        [school_quality_for_item(item, major_name, major_text) for item in education],
+        key=lambda item: (item["school_bonus_hint"] - item["school_penalty_hint"], item["specialty_bonus_hint"]),
+        reverse=True,
+    )
+    return combined_school_quality_hint(scored)
+
+
+def combined_school_quality_hint(scored: list[dict[str, Any]]) -> dict[str, Any]:
+    if not scored:
+        return {
+            "school_tier": "未知",
+            "school_bonus_hint": 0,
+            "school_penalty_hint": 0,
+            "specialty_alignment_hint": "未知",
+            "specialty_bonus_hint": 0,
+        }
+    primary = dict(scored[0])
+    primary_tier = str(primary.get("school_tier") or "未知")
+    has_independent_history = any(
+        str(item.get("school_tier") or "") == "独立学院/原三本"
+        for item in scored
+        if item is not scored[0]
+    )
+    if has_independent_history and primary_tier != "独立学院/原三本":
+        existing_penalty = numeric_int(primary.get("school_penalty_hint"), 0)
+        existing_bonus = numeric_int(primary.get("school_bonus_hint"), 0)
+        history_penalty = 2 if existing_bonus > 0 else 3
+        primary["school_penalty_hint"] = clamp_int(existing_penalty + history_penalty, 0, 10)
+        primary["school_tier"] = f"{primary_tier}；含独立学院/原三本学历"
+        if str(primary.get("specialty_alignment_hint") or "") == "未知":
+            primary["specialty_alignment_hint"] = "独立学院背景不继承母校层次"
+    return primary
+
+
+def school_quality_for_item(item: dict[str, Any], major_name: str, major_text: str) -> dict[str, Any]:
+    rank = numeric_int(item.get("ruanke_rank"), 0)
+    is_985 = bool(item.get("is_985"))
+    is_211 = bool(item.get("is_211"))
+    is_double_first_class = bool(item.get("is_double_first_class"))
+    school = str(item.get("school") or "")
+    school_kind = str(item.get("school_kind") or "")
+    independent = school_kind == "independent_college" or independent_college_for(school) is not None
+    bonus = 0
+    penalty = 0
+    if independent:
+        penalty = 10
+    if rank > 0:
+        if is_985 or is_211 or is_double_first_class:
+            if rank <= 50:
+                bonus = 3
+            elif rank <= 150:
+                bonus = 2
+            else:
+                bonus = 1
+        else:
+            penalty = max(penalty, school_penalty_for_rank(rank))
+            if rank <= 100:
+                bonus = max(bonus, 1)
+    elif not (is_985 or is_211 or is_double_first_class):
+        penalty = max(penalty, 2)
+    if is_985:
+        bonus = max(bonus, 3)
+    elif is_211 or is_double_first_class:
+        bonus = max(bonus, 2)
+    specialty_bonus, specialty_label = specialty_alignment_bonus(school, major_name or str(item.get("major") or "") or major_text)
+    if independent:
+        bonus = 0
+        specialty_bonus = min(specialty_bonus, 1)
+        if specialty_label == "未见明确特色专业匹配":
+            specialty_label = "独立学院不继承母校特色"
+    return {
+        "school": school,
+        "school_tier": "独立学院/原三本" if independent else school_tier_label(is_985, is_211, is_double_first_class, rank),
+        "school_bonus_hint": clamp_int(bonus, 0, 3),
+        "school_penalty_hint": penalty,
+        "specialty_alignment_hint": specialty_label,
+        "specialty_bonus_hint": specialty_bonus,
+    }
+
+
+def school_penalty_for_rank(rank: int) -> int:
+    if rank <= 0:
+        return 2
+    if rank <= 100:
+        return 0
+    if rank <= 150:
+        return 1
+    if rank <= 250:
+        return 2
+    if rank <= 400:
+        return 4
+    return 6
+
+
+def school_tier_label(is_985: bool, is_211: bool, is_double_first_class: bool, rank: int) -> str:
+    tags: list[str] = []
+    if is_985:
+        tags.append("985")
+    if is_211:
+        tags.append("211")
+    if is_double_first_class:
+        tags.append("双一流")
+    if rank > 0:
+        tags.append(f"软科#{rank}")
+    return "/".join(tags) if tags else "普通或未知层次"
+
+
+def specialty_alignment_bonus(school: str, major: str) -> tuple[int, str]:
+    text = f"{school}{major}"
+    rules = [
+        (("电子", "邮电", "通信", "信息", "网络", "软件", "科技", "理工", "工业"), ("计算机", "软件", "网络", "信息", "电子", "通信", "自动化", "人工智能", "数据"), "工科/信息类特色较匹配"),
+        (("航空", "航天", "交通", "电力", "矿业", "石油", "建筑", "地质", "海洋"), ("工程", "机械", "交通", "能源", "电气", "土木", "地质", "海洋", "自动化"), "行业工科特色较匹配"),
+        (("农业", "林业", "农林"), ("农学", "园艺", "植物", "动物", "兽医", "食品", "林学", "生物"), "农林生命类特色较匹配"),
+        (("医科", "医学", "中医药", "药科"), ("医学", "临床", "护理", "药学", "口腔", "公共卫生", "中药"), "医药类特色较匹配"),
+        (("财经", "商业", "工商"), ("经济", "金融", "会计", "财务", "管理", "市场营销", "审计"), "财经商科特色较匹配"),
+        (("政法",), ("法学", "法律", "政治", "社会学"), "政法类特色较匹配"),
+        (("师范",), ("教育", "心理", "汉语言", "英语", "数学", "物理", "化学", "生物"), "师范培养特色较匹配"),
+        (("外国语", "外语"), ("英语", "日语", "翻译", "语言", "国际"), "语言类特色较匹配"),
+        (("美术", "音乐", "戏剧", "传媒", "体育"), ("艺术", "设计", "音乐", "表演", "播音", "传媒", "体育"), "艺术体育传媒特色较匹配"),
+    ]
+    for school_signals, major_signals, label in rules:
+        if any(signal in school for signal in school_signals) and any(signal in major for signal in major_signals):
+            return 2, label
+    if any(signal in text for signal in ("国家重点学科", "一流学科", "王牌专业", "特色专业", "优势专业")):
+        return 2, "材料中出现优势专业线索"
+    return 0, "未见明确特色专业匹配"
+
+
+def local_major_baseline_rationale(major_family: str, school_hint: dict[str, Any]) -> str:
+    tier = str(school_hint.get("school_tier") or "未知")
+    alignment = str(school_hint.get("specialty_alignment_hint") or "未知")
+    if tier == "未知" and alignment == "未知":
+        return f"按{major_family}专业培养要求和成绩线索给出保守基础分。"
+    return f"按{major_family}专业、{tier}学校层次和{alignment}给出边际调整。"
+
+
+def local_major_baseline_confidence(major_family: str, school_hint: dict[str, Any]) -> float:
+    confidence = 0.55 if major_family == "未知" else 0.68
+    if numeric_int(school_hint.get("school_bonus_hint"), 0) > 0:
+        confidence += 0.06
+    if numeric_int(school_hint.get("specialty_bonus_hint"), 0) > 0:
+        confidence += 0.04
+    return round(min(confidence, 0.82), 2)
+
+
+def infer_major_family(text: Any) -> str:
+    normalized = str(text or "")
+    if not normalized.strip():
+        return "未知"
+    rules = [
+        ("艺术体育类", ("艺术", "设计", "视觉", "音乐", "美术", "舞蹈", "体育", "播音", "表演")),
+        ("医农类", ("医学", "临床", "护理", "药学", "口腔", "公共卫生", "农学", "园艺", "植物", "动物", "兽医", "食品科学", "林学")),
+        ("工科类", ("计算机", "软件", "网络", "信息安全", "网络空间安全", "人工智能", "数据科学", "电子", "电气", "自动化", "通信", "机械", "土木", "材料", "工程", "车辆", "能源")),
+        ("理科类", ("数学", "物理", "化学", "生物科学", "统计学", "地理信息", "应用统计")),
+        ("商科类", ("经济", "金融", "会计", "财务", "工商管理", "市场营销", "人力资源", "国际贸易", "物流", "电子商务", "审计")),
+        ("文科类", ("汉语言", "中文", "新闻", "传播", "法学", "法律", "历史", "哲学", "外语", "英语", "日语", "教育学", "社会学", "心理学")),
+    ]
+    matched = [family for family, signals in rules if any(signal in normalized for signal in signals)]
+    if not matched:
+        return "未知"
+    if len(set(matched)) > 1:
+        return "交叉类"
+    return matched[0]
+
+
+def academic_base_score_from_transcript(transcript_use: str) -> int:
+    text = str(transcript_use or "")
+    gpa_match = re.search(r"(?:GPA|绩点)[:：]?\s*([0-9]+(?:\.[0-9]+)?)", text, re.IGNORECASE)
+    if not gpa_match:
+        score_match = re.search(r"(?:均分|平均分|平均成绩)[:：]?\s*([0-9]+(?:\.[0-9]+)?)", text)
+        if not score_match:
+            return 50
+        average = numeric_float(score_match.group(1), 80)
+        return academic_average_to_prior(average)
+    raw = numeric_float(gpa_match.group(1), 0)
+    if raw <= 0:
+        return 50
+    if raw <= 4.3:
+        estimated_average = 80 + (raw - 3.0) * 15
+        return academic_average_to_prior(estimated_average)
+    if raw <= 5:
+        estimated_average = 80 + (raw - 3.5) * 10
+        return academic_average_to_prior(estimated_average)
+    return academic_average_to_prior(raw)
+
+
+def academic_average_to_prior(average: float) -> int:
+    if not isinstance(average, (int, float)) or average <= 0:
+        return 50
+    return clamp_int(round(50 + (float(average) - 80) * 1.6), 35, 78)
+
+
+def first_non_empty(values: list[Any]) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def numeric_float(value: Any, default: float) -> float:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def numeric_int(value: Any, default: int) -> int:
+    return int(round(numeric_float(value, default)))
+
+
+def clamp_int(value: int, lower: int, upper: int) -> int:
+    return max(lower, min(int(value), upper))
+
+
+def normalize_benchmark_input_items(raw_items: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_items, list):
+        return []
+    items: list[dict[str, Any]] = []
+    for index, raw_item in enumerate(raw_items):
+        if not isinstance(raw_item, dict):
+            continue
+        kind = str(raw_item.get("kind") or raw_item.get("type") or "award")
+        if kind not in ("award", "experience"):
+            kind = "award"
+        item = {
+            "kind": kind,
+            "key": str(raw_item.get("key") or f"{kind}:{index}"),
+            "name": str(raw_item.get("name") or raw_item.get("role") or raw_item.get("contribution") or ""),
+            "result": str(raw_item.get("result") or ""),
+        }
+        if kind == "experience":
+            item.update(
+                {
+                    "type": str(raw_item.get("experience_type") or raw_item.get("type") or ""),
+                    "role": str(raw_item.get("role") or ""),
+                    "contribution": str(raw_item.get("contribution") or ""),
+                }
+            )
+        level = raw_item.get("level")
+        if isinstance(level, (int, float)) and not isinstance(level, bool):
+            item["level"] = max(0, min(float(level), 10))
+        item["evidence_scope"] = normalize_evidence_scope(raw_item.get("evidence_scope"), item)
+        if item["name"] or item["result"] or item.get("contribution"):
+            items.append(item)
+    return items
+
+
+def benchmark_items_from_certifications(raw_items: Any) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    if not isinstance(raw_items, list):
+        return items
+    for index, raw_item in enumerate(raw_items):
+        if not isinstance(raw_item, dict):
+            continue
+        name = str(raw_item.get("name") or "")
+        result = str(raw_item.get("result") or "")
+        if not name and not result:
+            continue
+        item: dict[str, Any] = {
+            "kind": "award",
+            "key": f"award:{index}",
+            "name": name,
+            "result": result,
+            "evidence_scope": normalize_evidence_scope(raw_item.get("evidence_scope"), raw_item),
+        }
+        level = raw_item.get("level")
+        if isinstance(level, (int, float)) and not isinstance(level, bool):
+            item["level"] = max(0, min(float(level), 10))
+        items.append(item)
+    return items
 
 
 def normalize_item_benchmark(item: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
@@ -1154,11 +1769,18 @@ def normalize_item_benchmark(item: dict[str, Any], data: dict[str, Any]) -> dict
         impact = local_item_impact(item)
     impact = max(0, min(float(impact), 10))
     impact = calibrate_item_impact(item, impact)
+    normalized_item: dict[str, Any] = {
+        "kind": str(item.get("kind", "award")),
+        "key": str(item.get("key", "")),
+        "name": str(item.get("name", "")),
+        "result": str(item.get("result", "")),
+    }
+    for key in ("type", "role", "contribution", "level"):
+        if key in item:
+            normalized_item[key] = item[key]
+    normalized_item["evidence_scope"] = normalize_evidence_scope(item.get("evidence_scope"), normalized_item)
     return {
-        "item": {
-            "name": str(item.get("name", "")),
-            "result": str(item.get("result", "")),
-        },
+        "item": normalized_item,
         "dimensions": list(BENCHMARK_DIMENSIONS),
         "scores": scores,
         "impact_factor": impact,
@@ -1213,6 +1835,11 @@ def calibrate_item_impact(item: dict[str, Any], impact: float) -> float:
         return round(min(impact, 2.5), 1)
     if any(signal in text for signal in ("CET", "英语四级", "英语六级", "NISP一级", "计算机二级")):
         return round(min(impact, 3.0), 1)
+    untitled_project_cap = untitled_professional_project_cap(item)
+    if untitled_project_cap is not None:
+        return round(min(impact, untitled_project_cap), 1)
+    if is_campus_award_or_honor(item):
+        return round(min(impact, 4.0), 1)
     if "强网杯" in text or "信息安全竞赛" in text or "网络安全" in text:
         return round(max(impact, 6.0), 1)
     return round(impact, 1)
@@ -1234,8 +1861,12 @@ def local_item_benchmark(item: dict[str, Any]) -> dict[str, Any]:
         scores = [0.3, 0.25, 0.25, 0.2, 0.25, 0.3]
     return {
         "item": {
+            "kind": str(item.get("kind", "award")),
+            "key": str(item.get("key", "")),
             "name": str(item.get("name", "")),
             "result": str(item.get("result", "")),
+            "evidence_scope": normalize_evidence_scope(item.get("evidence_scope"), item),
+            **{key: item[key] for key in ("type", "role", "contribution", "level") if key in item},
         },
         "dimensions": list(BENCHMARK_DIMENSIONS),
         "scores": normalize_score_distribution(scores),
@@ -1250,8 +1881,125 @@ def local_item_impact(item: dict[str, Any]) -> float:
     return float(score_contest_level(str(item.get("name", "")), str(item.get("result", ""))))
 
 
+def normalize_evidence_scope(value: Any, item: dict[str, Any] | None = None) -> str:
+    text_value = str(value or "").strip()
+    if text_value in EVIDENCE_SCOPES:
+        return text_value
+    text = f"{text_value}{item_text(item or {})}"
+    campus_signals = (
+        "校内",
+        "校级",
+        "院级",
+        "学院",
+        "学校",
+        "校学生会",
+        "院学生会",
+        "学生会",
+        "社团",
+        "协会",
+        "班级",
+        "班长",
+        "团支书",
+        "优秀学生",
+        "优秀学生干部",
+        "三好学生",
+        "奖学金",
+        "实验室",
+        "大学生创新创业训练计划",
+        "大创",
+    )
+    external_signals = (
+        "校外",
+        "全国",
+        "国家级",
+        "省级",
+        "省",
+        "市级",
+        "市",
+        "区域",
+        "赛区",
+        "国际",
+        "企业",
+        "公司",
+        "集团",
+        "实习",
+        "英语四级",
+        "英语六级",
+        "CET",
+        "计算机等级",
+        "蓝桥",
+        "ACM",
+        "ICPC",
+        "CTF",
+        "挑战杯",
+        "互联网+",
+    )
+    if any(signal in text for signal in external_signals):
+        return "校外"
+    if any(signal in text for signal in campus_signals):
+        return "校内"
+    if str((item or {}).get("kind", "")) == "experience" and any(signal in text for signal in ("项目", "科研", "研究")):
+        return "校内"
+    return "校外"
+
+
 def item_text(item: dict[str, Any]) -> str:
-    return f"{item.get('name', '')}{item.get('result', '')}"
+    return (
+        f"{item.get('name', '')}{item.get('result', '')}"
+        f"{item.get('type', '')}{item.get('role', '')}{item.get('contribution', '')}"
+    )
+
+
+def untitled_professional_project_cap(item: dict[str, Any]) -> float | None:
+    if str(item.get("kind", "")) != "experience":
+        return None
+    text = item_text(item)
+    if any(signal in text for signal in ("实习", "比赛", "竞赛", "任职", "社团", "学生会")):
+        return None
+    if not any(signal in text for signal in ("项目", "科研", "研究", "课题", "实验", "系统", "平台", "模型", "算法", "开发", "漏洞", "测试", "数据")):
+        return None
+    if has_concrete_project_title(str(item.get("role", "")), item):
+        return None
+    contribution = str(item.get("contribution", ""))
+    has_detail = len(contribution) >= 8 and any(
+        signal in text
+        for signal in ("开发", "实现", "实验", "模型", "算法", "系统", "平台", "漏洞", "CVE", "RCE", "覆盖率", "数据")
+    )
+    return 4.0 if has_detail else 3.0
+
+
+def has_concrete_project_title(title: str, item: dict[str, Any]) -> bool:
+    title = re.sub(r"\s+", "", str(title or ""))
+    if len(title) < 4:
+        return False
+    contribution = re.sub(r"\s+", "", str(item.get("contribution", "")))
+    type_value = re.sub(r"\s+", "", str(item.get("type", "")))
+    if title in {contribution, type_value}:
+        return False
+    generic_titles = {
+        "项目",
+        "科研项目",
+        "研究项目",
+        "项目经历",
+        "科研经历",
+        "参与者",
+        "参与人",
+        "成员",
+        "队员",
+        "负责人",
+        "核心成员",
+        "角色未解析",
+        "未解析",
+    }
+    return title not in generic_titles
+
+
+def is_campus_award_or_honor(item: dict[str, Any]) -> bool:
+    if str(item.get("kind", "award")) == "experience":
+        return False
+    text = item_text(item)
+    scope = normalize_evidence_scope(item.get("evidence_scope"), item)
+    return scope == "校内" or any(signal in text for signal in ("校级", "院级", "校内", "学院", "学校"))
 
 
 def compact_education_context(resume_text: str) -> str:
@@ -1382,6 +2130,9 @@ def calibrate_llm_experience_level(item: dict[str, Any]) -> int:
     level = int(item.get("level", 0))
     if is_low_value_honor_or_certificate(text):
         return min(level, 2)
+    untitled_project_cap = untitled_professional_project_cap({"kind": "experience", **item})
+    if untitled_project_cap is not None:
+        return min(level, int(untitled_project_cap))
     if any(signal in text for signal in ("标注", "审核", "XML修正", "判断回答")) and not any(
         signal in text for signal in ("开发", "算法", "系统", "平台")
     ):
@@ -1506,6 +2257,17 @@ def education_year_span(text: str) -> int:
 
 
 def school_tags_for(school_name: str) -> dict[str, Any]:
+    independent = independent_college_for(school_name)
+    if independent:
+        return {
+            "matched_school": independent["name"],
+            "is_985": False,
+            "is_211": False,
+            "is_double_first_class": False,
+            "ruanke_rank": None,
+            "school_kind": independent.get("kind", "independent_college"),
+            "parent_school": independent.get("parent_school", ""),
+        }
     matched_school, info = match_school_ranking(school_name)
     return {
         "matched_school": matched_school,
@@ -1538,12 +2300,70 @@ def match_school_ranking(school_name: str) -> tuple[str, dict[str, Any] | None]:
     return matched, rankings[matched]
 
 
+def independent_college_for(school_name: str) -> dict[str, str] | None:
+    normalized = normalize_school_name(school_name)
+    if not normalized:
+        return None
+    index = load_independent_colleges()
+    exact = index.get(normalized)
+    if exact:
+        return exact
+    return None
+
+
 def normalize_school_name(name: str) -> str:
     text = re.sub(r"[\s·•,，。|/\\()（）【】\[\]{}:：;；\-至0-9]+", "", name)
     for suffix in ("本科", "硕士", "博士", "学院", "大学"):
         if text.endswith(suffix) and suffix in ("本科", "硕士", "博士"):
             text = text[: -len(suffix)]
     return text
+
+
+@lru_cache(maxsize=1)
+def load_independent_colleges() -> dict[str, dict[str, str]]:
+    if not INDEPENDENT_COLLEGE_CACHE.exists():
+        return {}
+    with INDEPENDENT_COLLEGE_CACHE.open(encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if isinstance(payload, list):
+        return {
+            normalized: {
+                "name": name,
+                "kind": "independent_college",
+                "parent_school": infer_parent_school_for_independent_college(name),
+            }
+            for raw_name in payload
+            if isinstance(raw_name, str)
+            for name in [raw_name.strip()]
+            for normalized in [normalize_school_name(name)]
+            if normalized
+        }
+    if not isinstance(payload, dict):
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for name, info in payload.items():
+        if not isinstance(info, dict):
+            continue
+        normalized = normalize_school_name(str(name))
+        if not normalized:
+            continue
+        copied = {str(key): str(value) for key, value in info.items()}
+        copied["name"] = str(name)
+        out[normalized] = copied
+    return out
+
+
+def infer_parent_school_for_independent_college(name: str) -> str:
+    normalized = normalize_school_name(name)
+    candidates: list[tuple[int, str]] = []
+    for ranked_name in load_school_rankings():
+        normalized_ranked = normalize_school_name(ranked_name)
+        if normalized_ranked and normalized.startswith(normalized_ranked) and normalized != normalized_ranked:
+            candidates.append((len(normalized_ranked), ranked_name))
+    if not candidates:
+        return ""
+    _, parent = max(candidates)
+    return parent
 
 
 @lru_cache(maxsize=1)

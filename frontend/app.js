@@ -16,9 +16,28 @@ let diagnosis = null;
 let resumeReady = false;
 let toastTimer = 0;
 let diagnosisEvents = null;
+let currentJobId = "";
+let benchmarkRequestInFlight = false;
+let baseJobDone = false;
+let failedRunStep = "";
 let firstResultRevealed = false;
 let activeStep = "upload";
 let scrollSyncFrame = 0;
+
+const benchmarkDimensions = ["逻辑", "语言", "专业", "领导", "抗压", "成长"];
+const radarEvidenceGain = 1.0;
+const radarEvidenceDiminishThreshold = 0.65;
+const radarEvidenceTailThreshold = 0.7;
+const radarEvidenceTailGain = 0.04;
+const radarEvidenceSoftCap = 0.88;
+const cappedEvidenceBucketRules = {
+  lowImpactAwardCertificate: { singleCap: 0.035, totalCap: 0.08 },
+  campusAward: { singleCap: 0.045, totalCap: 0.1 },
+  genericCampusRole: { singleCap: 0.045, totalCap: 0.1 },
+  untitledProject: { singleCap: 0.06, totalCap: 0.15 }
+};
+const academicPriorWeight = 0.28;
+const academicPriorFloorRatio = 0.85;
 
 const agentSteps = ["resume_agent", "transcript_agent", "profile", "matching", "path", "outputs"];
 const moduleLocks = {
@@ -52,6 +71,7 @@ function createDiagnosisShell() {
       awards: [],
       experiences_status: "waiting",
       experiences: [],
+      benchmark_status: "waiting",
       top5_matching_jobs: []
     },
     path_plan: { export_formats: [], stages: [] },
@@ -69,6 +89,7 @@ async function init() {
   setupScrollGradient();
   setupNavIndicator();
   setupUploads();
+  setupRunStepRetries();
   setupExports();
   resetResultModules();
 }
@@ -106,11 +127,11 @@ function setupUploads() {
     const target = link.getAttribute("href").replace("#", "");
     event.preventDefault();
     if (!resumeReady && target !== "upload") {
-      showToast("请先上传简历，再查看后续诊断页面。");
+      showToast("请先上传简历。");
       return;
     }
     if (moduleLocks[target] === false) {
-      showToast("该模块还在生成中，完成后会自动解锁。");
+      showToast("该模块还在生成中。");
       return;
     }
     scrollToModule(target);
@@ -130,6 +151,22 @@ function setupUploads() {
       return;
     }
     await runDiagnosis();
+  });
+}
+
+function setupRunStepRetries() {
+  const runSteps = document.querySelector("#runSteps");
+  runSteps.addEventListener("click", (event) => {
+    const item = event.target.closest("[data-run-step]");
+    if (!item?.classList.contains("is-retryable")) return;
+    retryFromFailedStep(item.dataset.runStep);
+  });
+  runSteps.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    const item = event.target.closest("[data-run-step]");
+    if (!item?.classList.contains("is-retryable")) return;
+    event.preventDefault();
+    retryFromFailedStep(item.dataset.runStep);
   });
 }
 
@@ -165,12 +202,11 @@ function unlockDeck() {
   document.body.classList.add("can-scroll");
   unlockHint.classList.add("is-unlocked");
   lockState.classList.add("is-unlocked");
-  lockState.textContent = "已解锁";
+  lockState.textContent = "简历已就绪";
   runButton.disabled = false;
-  uploadMessage.textContent = "已上传简历，可以继续浏览或生成诊断。";
+  uploadMessage.textContent = "简历已上传，可以生成诊断。";
   document.querySelector("#runDetail").textContent = "材料已就绪，点击生成诊断后会显示实时进度。";
   updateScrollGradient();
-  showToast("简历已上传，页面已解锁。");
 }
 
 function updateScrollGradient() {
@@ -226,6 +262,7 @@ async function runDiagnosis() {
     if (!response.ok) throw new Error("diagnosis request failed");
     const job = await response.json();
     if (job.events_url) {
+      currentJobId = job.job_id || "";
       connectDiagnosisEvents(job.events_url);
       return;
     }
@@ -253,8 +290,11 @@ function resetRunSteps() {
     diagnosisEvents.close();
     diagnosisEvents = null;
   }
+  baseJobDone = false;
+  failedRunStep = "";
   document.querySelectorAll("[data-run-step]").forEach((item) => {
     item.classList.remove("is-done", "is-running", "is-failed");
+    setRunStepRetryable(item.dataset.runStep, false);
   });
   document.querySelector("#runStatus").textContent = "生成中";
   document.querySelector("#runDetail").textContent = "正在创建诊断任务并启动 agent。";
@@ -263,7 +303,7 @@ function resetRunSteps() {
 
 function setRunDone() {
   document.querySelector("#runStatus").textContent = "诊断已生成";
-  document.querySelector("#runDetail").textContent = "所有模块已解锁，可以查看和导出结果。";
+  document.querySelector("#runDetail").textContent = "诊断完成，可以查看和导出结果。";
   document.querySelector(".generation-dock").classList.remove("is-running");
   setRunProgress(100);
   runButton.disabled = false;
@@ -276,6 +316,16 @@ function setRunFailed(message) {
   document.querySelector(".generation-dock").classList.remove("is-running");
   runButton.disabled = false;
   runButton.textContent = "重新生成";
+}
+
+function setRunWaitingForBenchmark() {
+  document.querySelector("#runStatus").textContent = "生成中";
+  document.querySelector("#runDetail").textContent = baseJobDone
+    ? "基础流程已完成，等待 Item Benchmark 返回六维分布。"
+    : "Item Benchmark 正在评估 Impact 和六维分布。";
+  document.querySelector(".generation-dock").classList.add("is-running");
+  runButton.disabled = true;
+  runButton.textContent = "生成中";
 }
 
 function setRunProgress(value) {
@@ -296,6 +346,7 @@ function connectDiagnosisEvents(eventsUrl) {
   });
   diagnosisEvents.addEventListener("job.done", (event) => {
     const payload = JSON.parse(event.data);
+    baseJobDone = true;
     if (payload.data && payload.data.diagnosis) {
       diagnosis = payload.data.diagnosis;
       if (!moduleLocks.profile || !moduleLocks.matching || !moduleLocks.path) {
@@ -306,7 +357,13 @@ function connectDiagnosisEvents(eventsUrl) {
       }
     }
     unlockModule("outputs");
-    setRunDone();
+    if (benchmarkRequestInFlight || diagnosis?.ability_profile?.benchmark_status === "benchmarking") {
+      setRunWaitingForBenchmark();
+    } else if (diagnosis?.ability_profile?.benchmark_status === "failed") {
+      setBenchmarkRunFailed();
+    } else {
+      setRunDone();
+    }
     if (diagnosisEvents) {
       diagnosisEvents.close();
       diagnosisEvents = null;
@@ -350,8 +407,12 @@ function handleDiagnosisEvent(event) {
     diagnosis.ability_profile = data.ability_profile;
     renderBasicInfo(diagnosis);
     renderScores(data.ability_profile.four_dim_scores || []);
-    renderRadar(data.ability_profile.radar_data || []);
+    renderAbilityRadar(data.ability_profile);
     renderResumeEvidence(data.ability_profile);
+    maybeRequestItemBenchmark(data.ability_profile);
+    if (event.step === "profile" && event.status === "failed" && data.ability_profile.benchmark_status === "failed") {
+      setBenchmarkRunFailed(data.error || event.message);
+    }
     unlockModule("profile");
   }
   if (data.matching_result) {
@@ -399,12 +460,14 @@ function markAgentStep(step, status) {
   if (status === "done") {
     item.classList.add("is-done");
     item.classList.remove("is-running", "is-failed");
+    setRunStepRetryable(step, false);
   } else if (status === "failed") {
     item.classList.add("is-failed");
-    item.classList.remove("is-running");
+    item.classList.remove("is-running", "is-done");
   } else if (status === "running" && !alreadyDone) {
     item.classList.add("is-running");
     item.classList.remove("is-failed");
+    setRunStepRetryable(step, false);
   }
   const doneCount = agentSteps.filter((name) => document.querySelector(`[data-run-step="${name}"]`)?.classList.contains("is-done")).length;
   const runningCount = agentSteps.filter((name) => document.querySelector(`[data-run-step="${name}"]`)?.classList.contains("is-running")).length;
@@ -412,8 +475,36 @@ function markAgentStep(step, status) {
   setRunProgress(Math.round((perceivedProgress / agentSteps.length) * 100));
 }
 
+function setRunStepRetryable(step, enabled) {
+  if (!agentSteps.includes(step)) return;
+  const item = document.querySelector(`[data-run-step="${step}"]`);
+  if (!item) return;
+  item.classList.toggle("is-retryable", Boolean(enabled));
+  if (enabled) {
+    item.tabIndex = 0;
+    item.setAttribute("role", "button");
+    item.setAttribute("aria-label", `${stepLabel(step)}失败，点击从此处继续`);
+    item.title = "点击从失败处继续";
+  } else {
+    item.removeAttribute("tabindex");
+    item.removeAttribute("role");
+    item.removeAttribute("aria-label");
+    item.removeAttribute("title");
+  }
+}
+
+function retryFromFailedStep(step) {
+  if (step === "profile" && diagnosis?.ability_profile?.benchmark_status === "failed") {
+    retryItemBenchmark();
+    return;
+  }
+  showToast("该失败阶段暂不支持局部继续，请重新生成诊断。");
+}
+
 function resetResultModules() {
   diagnosis = null;
+  currentJobId = "";
+  benchmarkRequestInFlight = false;
   firstResultRevealed = false;
   Object.keys(moduleLocks).forEach((module) => {
     moduleLocks[module] = false;
@@ -421,13 +512,14 @@ function resetResultModules() {
     if (section) section.classList.add("is-module-locked");
   });
   document.querySelector("#basicInfo").innerHTML = "";
-  document.querySelector("#basicInfoDataState").textContent = "等待结构化数据";
-  document.querySelector("#basicInfoDataState").className = "status-pill is-warning";
+  const basicInfoState = document.querySelector("#basicInfoDataState");
+  basicInfoState.hidden = false;
+  basicInfoState.textContent = "等待结构化数据";
+  basicInfoState.className = "status-pill is-warning";
   document.querySelector("#sourceList").innerHTML = "";
   renderResumeEvidence(createDiagnosisShell().ability_profile);
   document.querySelector("#dimensionScores").innerHTML = "";
-  document.querySelector("#radarChart").innerHTML = "";
-  document.querySelector("#radarText").textContent = "";
+  renderAbilityRadar(createDiagnosisShell().ability_profile);
   document.querySelector("#overallMatch").textContent = "--";
   document.querySelector("#matchLevel").textContent = "等待生成";
   document.querySelector("#overallMeter").style.width = "0%";
@@ -475,8 +567,9 @@ function stepLabel(step) {
 function renderDiagnosis(data) {
   renderBasicInfo(data);
   renderScores(data.ability_profile.four_dim_scores);
-  renderRadar(data.ability_profile.radar_data);
+  renderAbilityRadar(data.ability_profile);
   renderResumeEvidence(data.ability_profile);
+  maybeRequestItemBenchmark(data.ability_profile);
   renderMatching(data.matching_result);
   renderPath(data.path_plan);
   renderTopJobs(data.ability_profile.top5_matching_jobs);
@@ -517,12 +610,14 @@ function renderBasicInfo(data) {
   ].filter((value) => String(value || "").trim()).length;
   const state = document.querySelector("#basicInfoDataState");
   if (education.length > 0 && info.name) {
-    state.textContent = "Legato 已连接";
-    state.className = "status-pill is-real";
+    state.hidden = true;
+    state.textContent = "";
   } else if (parsedCount > 0) {
+    state.hidden = false;
     state.textContent = "部分字段待解析";
     state.className = "status-pill is-warning";
   } else {
+    state.hidden = false;
     state.textContent = "等待结构化数据";
     state.className = "status-pill is-warning";
   }
@@ -530,8 +625,9 @@ function renderBasicInfo(data) {
   const sourceList = document.querySelector("#sourceList");
   sourceList.innerHTML = (data.input_sources || []).map((file) => {
     const size = file.size ? `${Math.round(file.size / 1024)} KB` : "已记录";
-    const parseState = file.kind === "resume" || file.kind === "transcript" ? "Legato 解析" : "未解析";
-    return `<span>${escapeHTML(file.kind)}：${escapeHTML(file.name)}，${size}，${parseState}</span>`;
+    const parts = [`${file.kind}：${file.name}`, size];
+    if (file.kind === "resume" || file.kind === "transcript") parts.push("Legato 解析");
+    return `<span>${parts.map(escapeHTML).join("，")}</span>`;
   }).join("");
 }
 
@@ -578,21 +674,22 @@ function renderEducationCard(item) {
   if (item.is_985) tags.push(`<span class="school-tag is-985">985</span>`);
   if (item.is_211) tags.push(`<span class="school-tag is-211">211</span>`);
   if (Number(item.ruanke_rank) > 0) tags.push(`<span class="school-tag is-rank">#${escapeHTML(item.ruanke_rank)}</span>`);
+  const school = cleanDisplayText(item.school);
   const detailItems = [
     ["学院", item.department],
     ["专业", item.major]
   ].filter(([, value]) => String(value || "").trim());
   return `
     <article class="education-card">
-      <div class="education-head">
-        <strong>${escapeHTML(item.school || "学校未解析")}</strong>
-        <div class="school-tags">${tags.join("")}</div>
-      </div>
-      <div class="education-meta">
-        ${detailItems.length ? detailItems.map(([label, value]) => `
+      ${school || tags.length ? `<div class="education-head">
+        ${school ? `<strong>${escapeHTML(school)}</strong>` : ""}
+        ${tags.length ? `<div class="school-tags">${tags.join("")}</div>` : ""}
+      </div>` : ""}
+      ${detailItems.length ? `<div class="education-meta">
+        ${detailItems.map(([label, value]) => `
           <span><b>${escapeHTML(label)}</b>${escapeHTML(value)}</span>
-        `).join("") : `<span><b>学院</b>未解析</span><span><b>专业</b>未解析</span>`}
-      </div>
+        `).join("")}
+      </div>` : ""}
     </article>
   `;
 }
@@ -613,27 +710,46 @@ function renderScores(scores) {
   `).join("");
 }
 
-function renderRadar(items) {
-  items = items || [];
+function renderAbilityRadar(profile) {
+  profile = profile || {};
   const svg = document.querySelector("#radarChart");
-  if (items.length === 0) {
-    svg.innerHTML = "";
-    document.querySelector("#radarText").textContent = "等待能力画像 agent 返回雷达图数据。";
+  const text = document.querySelector("#radarText");
+  const status = document.querySelector("#radarDataState");
+  const wrap = document.querySelector(".radar-wrap");
+  const evidenceItems = benchmarkedEvidenceItems(profile);
+  const benchmarkStatus = profile.benchmark_status || "waiting";
+  const isFailed = benchmarkStatus === "failed";
+  const isLoading = isBenchmarkLoadingStatus(benchmarkStatus) && evidenceItems.length === 0;
+  wrap.classList.toggle("is-loading", isLoading);
+  wrap.classList.toggle("is-failed", isFailed);
+  if (status) {
+    status.textContent = isFailed ? "Benchmark 失败" : isLoading ? "等待 Benchmark" : evidenceItems.length ? "Legato Benchmark" : "等待证据";
+    status.className = `status-pill ${isFailed ? "is-danger" : evidenceItems.length ? "is-real" : "is-warning"}`;
+  }
+  if (isFailed && evidenceItems.length === 0) {
+    renderRadarFailed(svg);
+    text.textContent = "Item Benchmark 失败，六维分布未生成。点击下方 dock 中红色“画像”可从失败处继续。";
     return;
   }
+  if (isLoading || evidenceItems.length === 0) {
+    renderRadarLoading(svg);
+    text.textContent = "等待 Item Benchmark 返回 Level、Impact 和六维分布后生成能力画像。";
+    return;
+  }
+  const items = benchmarkDimensions.map((name) => ({ name }));
   const center = { x: 180, y: 158 };
   const radius = 104;
   const levels = [0.25, 0.5, 0.75, 1];
-  const points = items.map((item, index) => pointFor(index, items.length, radius * safeScore(item.score) / 100, center));
-  const area = points.map((point) => `${point.x.toFixed(2)},${point.y.toFixed(2)}`).join(" ");
+  const academicBaseline = academicBaselineVector(profile);
+  const series = buildRadarSeries(profile, evidenceItems);
   const maxPolygon = (scale) => items.map((_, index) => {
     const point = pointFor(index, items.length, radius * scale, center);
     return `${point.x.toFixed(2)},${point.y.toFixed(2)}`;
   }).join(" ");
 
   svg.innerHTML = `
-    <title id="radarChartTitle">学生能力雷达图</title>
-    <desc id="radarChartDesc">${escapeHTML(items.map((item) => `${item.name}${item.score}分`).join("，"))}</desc>
+    <title id="radarChartTitle">六维能力雷达图</title>
+    <desc id="radarChartDesc">${escapeHTML(series.map((entry) => `${entry.label}${entry.scores.map((score, index) => `${benchmarkDimensions[index]}${score}分`).join("，")}`).join("；"))}</desc>
     ${levels.map((level) => `<polygon class="radar-grid" points="${maxPolygon(level)}"></polygon>`).join("")}
     ${items.map((item, index) => {
       const outer = pointFor(index, items.length, radius, center);
@@ -643,13 +759,513 @@ function renderRadar(items) {
         <text class="radar-label" x="${label.x.toFixed(2)}" y="${label.y.toFixed(2)}" text-anchor="middle">${escapeHTML(item.name)}</text>
       `;
     }).join("")}
-    <polygon class="radar-area" points="${area}"></polygon>
-    ${points.map((point) => `<circle class="radar-dot" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="4"></circle>`).join("")}
+    ${series.map((entry, seriesIndex) => {
+      const points = entry.scores.map((score, index) => pointFor(index, entry.scores.length, radius * safeScore(score) / 100, center));
+      const area = points.map((point) => `${point.x.toFixed(2)},${point.y.toFixed(2)}`).join(" ");
+      return `
+        <polygon class="radar-area radar-area-${entry.key}" style="--radar-delay:${seriesIndex * 80}ms" points="${area}"></polygon>
+        ${points.map((point) => `<circle class="radar-dot radar-dot-${entry.key}" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="${entry.key === "overall" ? 4 : 3}"></circle>`).join("")}
+      `;
+    }).join("")}
   `;
 
-  const top = [...items].sort((a, b) => b.score - a.score)[0];
-  const bottom = [...items].sort((a, b) => a.score - b.score)[0];
-  document.querySelector("#radarText").textContent = `模拟数据：最高维度为${top.name}${top.score}分，当前优先补强${bottom.name}${bottom.score}分。`;
+  const legend = document.querySelector("#radarLegend");
+  if (legend) {
+    legend.innerHTML = series.map((entry) => `
+      <span class="radar-legend-item radar-legend-${entry.key}" tabindex="0" data-series="${entry.key}">
+        <i></i>${escapeHTML(entry.label)}<b>${entry.count}</b>
+      </span>
+    `).join("");
+  }
+  const overall = series.find((entry) => entry.key === "overall") || series[0];
+  const topIndex = overall.scores.reduce((best, score, index) => score > overall.scores[best] ? index : best, 0);
+  const campusCount = series.find((entry) => entry.key === "campus")?.count || 0;
+  const externalCount = series.find((entry) => entry.key === "external")?.count || 0;
+  const baselineLabel = academicBaseline.major_family || "学业";
+  text.textContent = `综合画像最高维度为${benchmarkDimensions[topIndex]}${overall.scores[topIndex]}分；校内含${baselineLabel}基础${academicBaseline.base}分，当前纳入校内证据 ${campusCount} 条、校外证据 ${externalCount} 条。`;
+}
+
+function renderRadarLoading(svg) {
+  const center = { x: 180, y: 158 };
+  const radius = 104;
+  const items = benchmarkDimensions.map((name) => ({ name }));
+  const maxPolygon = (scale) => items.map((_, index) => {
+    const point = pointFor(index, items.length, radius * scale, center);
+    return `${point.x.toFixed(2)},${point.y.toFixed(2)}`;
+  }).join(" ");
+  svg.innerHTML = `
+    <title id="radarChartTitle">六维能力雷达图加载中</title>
+    <desc id="radarChartDesc">Item Benchmark 正在返回六维分布。</desc>
+    ${[0.25, 0.5, 0.75, 1].map((level) => `<polygon class="radar-grid" points="${maxPolygon(level)}"></polygon>`).join("")}
+    ${items.map((item, index) => {
+      const outer = pointFor(index, items.length, radius, center);
+      const label = pointFor(index, items.length, radius + 28, center);
+      return `
+        <line class="radar-axis" x1="${center.x}" y1="${center.y}" x2="${outer.x.toFixed(2)}" y2="${outer.y.toFixed(2)}"></line>
+        <text class="radar-label" x="${label.x.toFixed(2)}" y="${label.y.toFixed(2)}" text-anchor="middle">${escapeHTML(item.name)}</text>
+      `;
+    }).join("")}
+    <polygon class="radar-loading-area" points="${maxPolygon(0.42)}"></polygon>
+  `;
+  const legend = document.querySelector("#radarLegend");
+  if (legend) {
+    legend.innerHTML = ["综合", "校内", "校外"].map((label, index) => `
+      <span class="radar-legend-item is-loading radar-legend-${["overall", "campus", "external"][index]}">
+        <i></i>${label}<b></b>
+      </span>
+    `).join("");
+  }
+}
+
+function renderRadarFailed(svg) {
+  const center = { x: 180, y: 158 };
+  const radius = 104;
+  const items = benchmarkDimensions.map((name) => ({ name }));
+  const maxPolygon = (scale) => items.map((_, index) => {
+    const point = pointFor(index, items.length, radius * scale, center);
+    return `${point.x.toFixed(2)},${point.y.toFixed(2)}`;
+  }).join(" ");
+  svg.innerHTML = `
+    <title id="radarChartTitle">六维能力雷达图生成失败</title>
+    <desc id="radarChartDesc">Item Benchmark 未返回六维分布。</desc>
+    ${[0.25, 0.5, 0.75, 1].map((level) => `<polygon class="radar-grid" points="${maxPolygon(level)}"></polygon>`).join("")}
+    ${items.map((item, index) => {
+      const outer = pointFor(index, items.length, radius, center);
+      const label = pointFor(index, items.length, radius + 28, center);
+      return `
+        <line class="radar-axis" x1="${center.x}" y1="${center.y}" x2="${outer.x.toFixed(2)}" y2="${outer.y.toFixed(2)}"></line>
+        <text class="radar-label" x="${label.x.toFixed(2)}" y="${label.y.toFixed(2)}" text-anchor="middle">${escapeHTML(item.name)}</text>
+      `;
+    }).join("")}
+    <polygon class="radar-failed-area" points="${maxPolygon(0.38)}"></polygon>
+  `;
+  const legend = document.querySelector("#radarLegend");
+  if (legend) {
+    legend.innerHTML = `<span class="radar-legend-item is-failed"><i></i>Benchmark 失败<b>!</b></span>`;
+  }
+}
+
+function benchmarkedEvidenceItems(profile) {
+  return [
+    ...(Array.isArray(profile.awards) ? profile.awards : []),
+    ...(Array.isArray(profile.experiences) ? profile.experiences : [])
+  ].filter((item) => normalizedBenchmarkScores(item).length === 6 && hasImpactFactor(item));
+}
+
+function buildRadarSeries(profile, items) {
+  const academicBaseline = academicBaselineVector(profile);
+  const campusItems = items.filter((item) => normalizedEvidenceScope(item) === "校内");
+  const externalItems = items.filter((item) => normalizedEvidenceScope(item) === "校外");
+  return [
+    buildRadarSeriesEntry("overall", "综合", items, academicBaseline.scores),
+    buildRadarSeriesEntry("campus", "校内", campusItems, academicBaseline.scores),
+    buildRadarSeriesEntry("external", "校外", externalItems)
+  ];
+}
+
+function buildRadarSeriesEntry(key, label, items, baselineScores = []) {
+  const dimensionContributions = Array.from({ length: 6 }, emptyDimensionContributionBucket);
+  items.forEach((item) => {
+    const distribution = normalizedBenchmarkScores(item);
+    if (distribution.length !== 6) return;
+    const strength = evidenceStrength(item);
+    const bucketKey = cappedEvidenceBucketKey(item);
+    distribution.forEach((share, index) => {
+      const contribution = Math.max(0, Math.min(0.96, share * strength * radarEvidenceGain));
+      const rule = bucketKey ? cappedEvidenceBucketRules[bucketKey] : null;
+      if (rule) {
+        dimensionContributions[index].capped[bucketKey].push(Math.min(contribution, rule.singleCap));
+      } else {
+        dimensionContributions[index].regular.push(contribution);
+      }
+    });
+  });
+  const scores = dimensionContributions.map(({ regular, capped }) => {
+    const cappedContributions = Object.entries(capped)
+      .map(([bucketKey, contributions]) => {
+        const rule = cappedEvidenceBucketRules[bucketKey];
+        return rule ? cappedEvidenceBucket(contributions, rule.totalCap) : 0;
+      })
+      .filter((contribution) => contribution > 0);
+    return diminishingEvidenceScore([
+      ...regular,
+      ...cappedContributions
+    ]);
+  });
+  const scaledScores = scores.map((score, index) => {
+    const evidenceScore = Math.round(score * 100);
+    const baseline = Number(baselineScores[index]);
+    return combineEvidenceWithAcademicPrior(evidenceScore, baseline, items.length);
+  });
+  return {
+    key,
+    label,
+    count: items.length,
+    scores: scaledScores
+  };
+}
+
+function emptyDimensionContributionBucket() {
+  return {
+    regular: [],
+    capped: Object.fromEntries(Object.keys(cappedEvidenceBucketRules).map((bucketKey) => [bucketKey, []]))
+  };
+}
+
+function cappedEvidenceBucket(contributions, cap) {
+  if (!Array.isArray(contributions) || contributions.length === 0) return 0;
+  return Math.min(diminishingEvidenceScore(contributions), cap);
+}
+
+function cappedEvidenceBucketKey(item) {
+  if (isLowImpactAwardOrCertificateEvidence(item)) return "lowImpactAwardCertificate";
+  if (isCampusAwardEvidence(item)) return "campusAward";
+  if (isGenericCampusRoleEvidence(item)) return "genericCampusRole";
+  if (isUntitledProfessionalProjectEvidence(item)) return "untitledProject";
+  return "";
+}
+
+function isLowImpactAwardOrCertificateEvidence(item) {
+  if (evidenceKind(item) !== "award") return false;
+  const text = evidenceText(item);
+  const level = numericMetric(item?.level);
+  const impact = numericMetric(item?.impact_factor);
+  return (
+    (Number.isFinite(impact) && impact <= 3.5) ||
+    (Number.isFinite(level) && level <= 3) ||
+    containsAnyText(text, [
+      "证书",
+      "CET",
+      "英语四级",
+      "英语六级",
+      "计算机二级",
+      "NISP一级",
+      "奖学金",
+      "优秀学生",
+      "优秀学生干部",
+      "三好学生",
+      "标兵"
+    ])
+  );
+}
+
+function isCampusAwardEvidence(item) {
+  return evidenceKind(item) === "award" && normalizedEvidenceScope(item) === "校内";
+}
+
+function isGenericCampusRoleEvidence(item) {
+  if (evidenceKind(item) !== "experience") return false;
+  const text = evidenceText(item);
+  return normalizedEvidenceScope(item) === "校内" && containsAnyText(text, [
+    "学生会",
+    "社团",
+    "班长",
+    "团支书",
+    "部长",
+    "主席",
+    "干部",
+    "优秀学生",
+    "组织活动"
+  ]);
+}
+
+function isUntitledProfessionalProjectEvidence(item) {
+  const type = cleanDisplayText(item?.type || item?.experience_type);
+  const role = cleanDisplayText(item?.role);
+  const contribution = cleanDisplayText(item?.contribution);
+  const text = `${type}${role}${contribution}`;
+  if (!text) return false;
+  if (containsAnyText(text, ["实习", "比赛", "竞赛", "任职", "社团", "学生会", "班长", "部长", "主席"])) return false;
+  const isProfessionalProject = containsAnyText(text, [
+    "项目",
+    "科研",
+    "研究",
+    "课题",
+    "实验",
+    "系统",
+    "平台",
+    "模型",
+    "算法",
+    "开发",
+    "漏洞",
+    "测试",
+    "数据"
+  ]);
+  return isProfessionalProject && !hasConcreteProjectTitle(role);
+}
+
+function hasConcreteProjectTitle(role) {
+  const normalized = cleanDisplayText(role).replace(/\s+/g, "");
+  if (!normalized || normalized.length < 4) return false;
+  const genericTitles = [
+    "项目",
+    "科研项目",
+    "研究项目",
+    "项目经历",
+    "科研经历",
+    "参与者",
+    "参与人",
+    "成员",
+    "队员",
+    "负责人",
+    "核心成员",
+    "角色未解析",
+    "未解析"
+  ];
+  return !genericTitles.includes(normalized);
+}
+
+function evidenceKind(item) {
+  if (cleanDisplayText(item?.type || item?.role || item?.contribution || item?.experience_type)) {
+    return "experience";
+  }
+  return "award";
+}
+
+function evidenceText(item) {
+  return [
+    item?.name,
+    item?.result,
+    item?.type,
+    item?.experience_type,
+    item?.role,
+    item?.contribution,
+    item?.evidence_scope
+  ].map((value) => cleanDisplayText(value)).join("");
+}
+
+function diminishingEvidenceScore(contributions) {
+  return contributions
+    .filter((contribution) => Number.isFinite(contribution) && contribution > 0)
+    .sort((left, right) => right - left)
+    .reduce((score, contribution) => addDiminishingEvidence(score, contribution), 0);
+}
+
+function addDiminishingEvidence(score, contribution) {
+  const rawDelta = (1 - score) * contribution;
+  if (rawDelta <= 0) return score;
+  if (score < radarEvidenceDiminishThreshold) {
+    const roomBeforeThreshold = radarEvidenceDiminishThreshold - score;
+    if (rawDelta <= roomBeforeThreshold) return Math.min(radarEvidenceSoftCap, score + rawDelta);
+    const overflow = rawDelta - roomBeforeThreshold;
+    const nextScore = radarEvidenceDiminishThreshold + overflow * evidenceTailGainAt(radarEvidenceDiminishThreshold);
+    return Math.min(radarEvidenceSoftCap, nextScore);
+  }
+  const nextScore = score + rawDelta * evidenceTailGainAt(score);
+  return Math.min(radarEvidenceSoftCap, nextScore);
+}
+
+function evidenceTailGainAt(score) {
+  if (score <= radarEvidenceDiminishThreshold) return 0.15;
+  if (score >= radarEvidenceTailThreshold) return radarEvidenceTailGain;
+  const progress = (score - radarEvidenceDiminishThreshold) / (radarEvidenceTailThreshold - radarEvidenceDiminishThreshold);
+  return radarEvidenceTailGain + (0.15 - radarEvidenceTailGain) * Math.pow(1 - progress, 2);
+}
+
+function combineEvidenceWithAcademicPrior(evidenceScore, baseline, itemCount) {
+  if (!Number.isFinite(baseline)) return evidenceScore;
+  const academicPrior = Math.round(Math.max(25, Math.min(85, baseline)));
+  if (itemCount === 0) return academicPrior;
+  const blended = evidenceScore * (1 - academicPriorWeight) + academicPrior * academicPriorWeight;
+  const priorFloor = academicPrior * academicPriorFloorRatio;
+  return Math.round(Math.max(priorFloor, blended));
+}
+
+function academicBaselineVector(profile) {
+  const workflowBaseline = workflowAcademicBaseline(profile);
+  if (workflowBaseline) return workflowBaseline;
+  const base = academicBaseScore(profile);
+  const majorText = [
+    profile?.basic_info?.major,
+    ...normalizedEducation(profile).map((item) => item.major)
+  ].join("");
+  const isStem = containsAnyText(majorText, ["计算机", "软件", "数据", "网络", "信息", "数学", "统计", "电子", "电气", "自动化", "工程", "物理", "化学", "生物"]);
+  const hasMajor = majorText.trim().length > 0;
+  const scores = [
+    base + (isStem ? 3 : 0),
+    base + (isStem ? -2 : 3),
+    base + (hasMajor ? 5 : 0),
+    base - 10,
+    base - 4,
+    base
+  ].map((score) => Math.round(Math.max(25, Math.min(85, score))));
+  return { base, scores, major_family: isStem ? "工科类" : "未知", source: "frontend_fallback" };
+}
+
+function workflowAcademicBaseline(profile) {
+  const baseline = profile?.major_baseline;
+  if (!baseline || !Array.isArray(baseline.scores) || baseline.scores.length !== 6) return null;
+  const scores = baseline.scores.map((score) => {
+    const value = Number(score);
+    if (!Number.isFinite(value)) return 0;
+    return Math.round(Math.max(25, Math.min(85, value)));
+  });
+  if (scores.some((score) => score <= 0)) return null;
+  const base = Number(baseline.base_score);
+  return {
+    base: Number.isFinite(base) ? Math.round(Math.max(30, Math.min(85, base))) : 50,
+    scores,
+    major_name: String(baseline.major_name || ""),
+    major_family: String(baseline.major_family || ""),
+    rationale: String(baseline.rationale || ""),
+    source: String(baseline.source || "major_baseline")
+  };
+}
+
+function academicBaseScore(profile) {
+  const transcriptUse = String(profile?.basic_info?.transcript_use || "");
+  const gpaMatch = transcriptUse.match(/GPA[:：]?\s*([0-9]+(?:\.[0-9]+)?)/i);
+  if (!gpaMatch) {
+    const averageMatch = transcriptUse.match(/(?:均分|平均分|平均成绩)[:：]?\s*([0-9]+(?:\.[0-9]+)?)/);
+    return averageMatch ? academicAverageToPrior(Number(averageMatch[1])) : 50;
+  }
+  const raw = Number(gpaMatch[1]);
+  if (!Number.isFinite(raw) || raw <= 0) return 50;
+  if (raw <= 4.3) {
+    return academicAverageToPrior(80 + (raw - 3) * 15);
+  }
+  if (raw <= 5) {
+    return academicAverageToPrior(80 + (raw - 3.5) * 10);
+  }
+  return academicAverageToPrior(raw);
+}
+
+function academicAverageToPrior(average) {
+  if (!Number.isFinite(average) || average <= 0) return 50;
+  return Math.round(Math.max(35, Math.min(78, 50 + (average - 80) * 1.6)));
+}
+
+function evidenceStrength(item) {
+  const rawLevel = numericMetric(item.level);
+  const rawImpact = numericMetric(item.impact_factor);
+  const hasLevel = Number.isFinite(rawLevel);
+  const hasImpact = Number.isFinite(rawImpact);
+  if (!hasLevel && !hasImpact) return 0;
+  const level = hasLevel ? Math.max(0, Math.min(10, rawLevel)) / 10 : 0;
+  const impact = hasImpact ? Math.max(0, Math.min(10, rawImpact)) / 10 : 0;
+  if (!hasImpact) return level;
+  if (!hasLevel) return impact;
+  return Math.max(0, Math.min(1, level * 0.4 + impact * 0.6));
+}
+
+function maybeRequestItemBenchmark(profile, options = {}) {
+  if (!currentJobId || benchmarkRequestInFlight) return;
+  if (!profile) return;
+  const blockedStatuses = options.force
+    ? ["ready", "mock", "benchmarking", "unavailable"]
+    : ["ready", "mock", "benchmarking", "failed", "unavailable"];
+  if (blockedStatuses.includes(profile.benchmark_status)) return;
+  if (!isHybridBenchmarkGateOpen(profile.experiences_status)) return;
+
+  const items = buildBenchmarkItems(profile);
+  if (items.length === 0) {
+    showToast("没有可用于 Item Benchmark 的证据条目。");
+    return;
+  }
+
+  benchmarkRequestInFlight = true;
+  failedRunStep = "";
+  profile.benchmark_status = "benchmarking";
+  setRunStepRetryable("profile", false);
+  document.querySelector(`[data-run-step="profile"]`)?.classList.remove("is-done", "is-failed");
+  markAgentStep("profile", "running");
+  setRunWaitingForBenchmark();
+  renderResumeEvidence(profile);
+  renderAbilityRadar(profile);
+
+  fetch(`/api/diagnosis/${encodeURIComponent(currentJobId)}/benchmark`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items })
+  })
+    .then((response) => {
+      if (!response.ok) {
+        const error = new Error("Item Benchmark request failed");
+        error.status = response.status;
+        throw error;
+      }
+      return response.json();
+    })
+    .then((payload) => {
+      if (!payload.ability_profile) return;
+      diagnosis = diagnosis || createDiagnosisShell();
+      diagnosis.ability_profile = payload.ability_profile;
+      renderBasicInfo(diagnosis);
+      renderScores(payload.ability_profile.four_dim_scores || []);
+      renderAbilityRadar(payload.ability_profile);
+      renderResumeEvidence(payload.ability_profile);
+      if (payload.ability_profile.benchmark_status === "failed" || payload.error) {
+        setBenchmarkRunFailed(payload.error);
+        return;
+      }
+      markAgentStep("profile", "done");
+      if (baseJobDone) setRunDone();
+    })
+    .catch((error) => {
+      if (!diagnosis?.ability_profile) return;
+      diagnosis.ability_profile.benchmark_status = error?.status === 404 ? "unavailable" : "failed";
+      renderResumeEvidence(diagnosis.ability_profile);
+      renderAbilityRadar(diagnosis.ability_profile);
+      setBenchmarkRunFailed();
+    })
+    .finally(() => {
+      benchmarkRequestInFlight = false;
+    });
+}
+
+function setBenchmarkRunFailed(errorMessage = "") {
+  failedRunStep = "profile";
+  benchmarkRequestInFlight = false;
+  markAgentStep("profile", "failed");
+  setRunStepRetryable("profile", true);
+  document.querySelector("#runStatus").textContent = "失败：能力画像";
+  document.querySelector("#runDetail").textContent = errorMessage
+    ? `Item Benchmark 失败：${errorMessage}。点击下方红色“画像”继续。`
+    : "Item Benchmark 失败，点击下方红色“画像”从失败处继续。";
+  document.querySelector(".generation-dock").classList.remove("is-running");
+  runButton.disabled = false;
+  runButton.textContent = "重新生成";
+}
+
+function retryItemBenchmark() {
+  if (!currentJobId || !diagnosis?.ability_profile) {
+    showToast("没有可继续的诊断任务，请重新生成。");
+    return;
+  }
+  diagnosis.ability_profile.benchmark_status = "waiting";
+  setRunStepRetryable("profile", false);
+  showToast("正在从 Item Benchmark 继续。");
+  maybeRequestItemBenchmark(diagnosis.ability_profile, { force: true });
+}
+
+function isHybridBenchmarkGateOpen(status) {
+  return ["ready", "empty", "failed", "mock"].includes(status || "");
+}
+
+function buildBenchmarkItems(profile) {
+  const awards = Array.isArray(profile.awards) ? profile.awards : [];
+  const experiences = Array.isArray(profile.experiences) ? profile.experiences : [];
+  return [
+    ...awards.map((item, index) => ({
+      kind: "award",
+      key: `award:${index}`,
+      name: item.name || "",
+      result: item.result || "",
+      evidence_scope: normalizedEvidenceScope(item),
+      level: numericMetric(item.level)
+    })),
+    ...experiences.map((item, index) => ({
+      kind: "experience",
+      key: `experience:${index}`,
+      name: item.role || item.contribution || item.type || "",
+      result: "",
+      experience_type: item.type || "",
+      role: item.role || "",
+      contribution: item.contribution || "",
+      evidence_scope: normalizedEvidenceScope(item),
+      level: numericMetric(item.level)
+    }))
+  ].filter((item) => item.name || item.result || item.role || item.contribution);
 }
 
 function renderResumeEvidence(profile) {
@@ -658,21 +1274,24 @@ function renderResumeEvidence(profile) {
   const experiences = profile.experiences || [];
   const awardStatus = profile.awards_status || (awards.length ? "ready" : "waiting");
   const experienceStatus = profile.experiences_status || (experiences.length ? "ready" : "waiting");
+  const benchmarkStatus = profile.benchmark_status || "waiting";
   const isAwardLoading = isEvidenceLoadingStatus(awardStatus);
   const isExperienceRefining = experienceStatus === "refining";
+  const isBenchmarkLoading = isBenchmarkLoadingStatus(benchmarkStatus) && (awards.length > 0 || experiences.length > 0);
+  const isBenchmarkFailed = benchmarkStatus === "failed";
 
   setEvidencePill("#awardDataState", awardStatus, {
     waiting: "等待奖项 agent",
     loading: "奖项解析中",
     refining: "奖项解析中",
-    ready: "Legato 已返回",
+    ready: "",
     empty: "未识别到奖项",
     failed: "奖项解析失败",
     mock: "模拟数据"
   });
   setEvidencePill("#experienceDataState", experienceStatus, {
     waiting: "等待经历 agent",
-    ready: "Legato 已返回",
+    ready: "",
     refining: "hybrid 分析中",
     empty: "未识别到经历",
     failed: "经历解析失败",
@@ -680,8 +1299,20 @@ function renderResumeEvidence(profile) {
   });
 
   const overallStatus = evidenceOverallStatus(awardStatus, experienceStatus, awards.length, experiences.length);
-  setEvidencePill("#resumeEvidenceState", overallStatus, {
+  const evidenceState = isBenchmarkLoading
+    ? "benchmarking"
+    : benchmarkStatus === "ready"
+      ? "benchmark_ready"
+      : benchmarkStatus === "unavailable"
+        ? "benchmark_unavailable"
+      : benchmarkStatus === "failed"
+        ? "failed"
+        : overallStatus;
+  setEvidencePill("#resumeEvidenceState", evidenceState, {
     waiting: "等待结构化数据",
+    benchmarking: "Benchmark 评分中",
+    benchmark_ready: "Benchmark 已完成",
+    benchmark_unavailable: "Benchmark 未启用",
     ready: "已有结构化证据",
     empty: "无可用证据",
     failed: "部分解析失败",
@@ -692,66 +1323,202 @@ function renderResumeEvidence(profile) {
   awardList.classList.toggle("is-loading", isAwardLoading);
   const awardSkeleton = isAwardLoading && awards.length === 0 ? renderAwardLoadingSkeleton(false) : "";
   awardList.innerHTML = awards.length
-    ? awards.map((item) => renderAwardItem(item, isAwardLoading)).join("")
+    ? awards.map((item) => renderAwardItem(item, isAwardLoading, isBenchmarkLoading, isBenchmarkFailed)).join("")
     : awardSkeleton || renderEvidenceEmpty(awardStatus, "等待 Resume workflow 返回奖项与证书。", "Legato 未识别到奖项或证书。", "奖项 agent 未返回可用结果。");
 
   const experienceList = document.querySelector("#experienceList");
   experienceList.classList.toggle("is-refining", isExperienceRefining);
   const hybridSkeleton = isExperienceRefining && experiences.length === 0 ? renderExperienceHybridSkeleton(false) : "";
   experienceList.innerHTML = experiences.length
-    ? experiences.map((item) => renderExperienceItem(item, isExperienceRefining)).join("")
+    ? experiences.map((item) => renderExperienceItem(item, isExperienceRefining, isBenchmarkLoading, isBenchmarkFailed)).join("")
     : hybridSkeleton || renderEvidenceEmpty(experienceStatus, "等待 Resume workflow 返回经历评分。", "Legato 未识别到项目、实习或活动经历。", "经历 agent 未返回可用结果。");
 }
 
-function renderAwardItem(item, loading = false) {
-  const score = safeScore(item.score);
+function renderAwardItem(item, loading = false, benchmarkLoading = false, benchmarkFailed = false) {
+  const title = cleanDisplayText(item.name);
+  const result = cleanDisplayText(item.result);
   return `
-    <article class="evidence-item${loading ? " is-loading" : ""}">
+    <article class="evidence-item${loading ? " is-loading" : ""}${benchmarkLoading && !hasImpactFactor(item) ? " is-benchmarking" : ""}${benchmarkFailed && !hasImpactFactor(item) ? " is-benchmark-failed" : ""}">
       <header>
         <div>
-          <strong>${escapeHTML(item.name || "未命名奖项")}</strong>
-          <span>${escapeHTML(item.result || "结果未解析")}</span>
+          ${title ? `<strong>${escapeHTML(title)}</strong>` : ""}
+          ${result && result !== title ? `<span>${escapeHTML(result)}</span>` : ""}
+          ${renderEvidenceScopeTag(item)}
         </div>
-        <div class="evidence-score">
-          <b>${score}</b>
-          <small>/100</small>
-        </div>
+        ${renderEvidenceScorePair(item, benchmarkLoading, loading, benchmarkFailed)}
       </header>
-      <div class="evidence-meter" style="--score:${score}%"><span></span></div>
-      <p><strong>${escapeHTML(item.level || "未评级")}：</strong>${escapeHTML(item.reason || "暂无评分说明。")}</p>
-      <div class="evidence-meta">
-        <span class="${sourceBadgeClass(item.data_source)}">${escapeHTML(item.data_source || "未知来源")}</span>
-        <span class="sim-badge">${escapeHTML(item.score_source || "模拟评分")}</span>
-      </div>
+      ${renderDimensionMeter(item, benchmarkLoading, benchmarkFailed)}
+      ${renderEvidenceReason(item.signal, item.reason)}
     </article>
   `;
 }
 
-function renderExperienceItem(item, refining = false) {
-  const score = safeScore(item.score);
-  const type = item.type || "经历";
-  const role = item.role || "角色未解析";
+function renderExperienceItem(item, refining = false, benchmarkLoading = false, benchmarkFailed = false) {
+  const type = cleanDisplayText(item.type);
+  const role = cleanDisplayText(item.role);
+  const contribution = cleanDisplayText(item.contribution);
+  const title = [type, role].filter(Boolean).join(" · ") || contribution;
+  const subtitle = title && contribution && contribution !== title && contribution !== role ? contribution : "";
   return `
-    <article class="evidence-item${refining ? " is-refining" : ""}">
+    <article class="evidence-item${refining ? " is-refining" : ""}${benchmarkLoading && !hasImpactFactor(item) ? " is-benchmarking" : ""}${benchmarkFailed && !hasImpactFactor(item) ? " is-benchmark-failed" : ""}">
       <header>
         <div>
-          <strong>${escapeHTML(type)} · ${escapeHTML(role)}</strong>
-          <span>Legato level ${Number(item.level || 0)}/10</span>
+          ${title ? `<strong>${escapeHTML(title)}</strong>` : ""}
+          ${subtitle ? `<span>${escapeHTML(subtitle)}</span>` : ""}
+          ${renderEvidenceScopeTag(item)}
         </div>
-        <div class="evidence-score">
-          <b>${score}</b>
-          <small>/100</small>
-        </div>
+        ${renderEvidenceScorePair(item, benchmarkLoading, refining, benchmarkFailed)}
       </header>
-      <div class="evidence-meter" style="--score:${score}%"><span></span></div>
-      <p><strong>${escapeHTML(item.signal || "未评级")}：</strong>${escapeHTML(item.contribution || "贡献描述未解析。")}</p>
-      <p>${escapeHTML(item.reason || "暂无评分说明。")}</p>
-      <div class="evidence-meta">
-        <span class="${sourceBadgeClass(item.data_source)}">${escapeHTML(item.data_source || "未知来源")}</span>
-        <span class="sim-badge">${escapeHTML(item.score_source || "模拟评分")}</span>
-      </div>
+      ${renderDimensionMeter(item, benchmarkLoading, benchmarkFailed)}
+      ${renderEvidenceReason("", item.reason)}
     </article>
   `;
+}
+
+function renderEvidenceReason(signal, reason) {
+  const cleanSignal = cleanDisplayText(signal);
+  const cleanReason = cleanDisplayText(reason);
+  if (cleanSignal && cleanReason) {
+    return `<p><strong>${escapeHTML(cleanSignal)}：</strong>${escapeHTML(cleanReason)}</p>`;
+  }
+  if (cleanReason) return `<p>${escapeHTML(cleanReason)}</p>`;
+  if (cleanSignal) return `<p><strong>${escapeHTML(cleanSignal)}</strong></p>`;
+  return "";
+}
+
+function renderEvidenceScopeTag(item) {
+  return `
+    <div class="evidence-scope-row">
+      <span class="${scopeBadgeClass(item)}">${escapeHTML(normalizedEvidenceScope(item))}</span>
+    </div>
+  `;
+}
+
+function renderEvidenceScorePair(item, benchmarkLoading, levelLoading = false, benchmarkFailed = false) {
+  const level = numericMetric(item.level);
+  const impact = numericMetric(item.impact_factor);
+  return `
+    <div class="evidence-score-pair" aria-label="证据双评分">
+      ${renderMetricChip("Level", level, levelLoading || !hasMetricValue(level))}
+      ${renderMetricChip("Impact", impact, benchmarkLoading || (!benchmarkFailed && !hasMetricValue(impact)), benchmarkFailed && !hasMetricValue(impact))}
+    </div>
+  `;
+}
+
+function renderMetricChip(label, value, loading, failed = false) {
+  if (failed && !hasMetricValue(value)) {
+    return `
+      <div class="metric-chip is-failed" aria-label="${escapeAttribute(label)} 评分失败">
+        <span>${escapeHTML(label)}</span>
+        <b>失败</b>
+      </div>
+    `;
+  }
+  if (loading && !hasMetricValue(value)) {
+    return `
+      <div class="metric-chip is-loading" aria-label="${escapeAttribute(label)} 正在评分">
+        <span>${escapeHTML(label)}</span>
+        <b></b>
+      </div>
+    `;
+  }
+  if (!hasMetricValue(value)) {
+    return `
+      <div class="metric-chip is-loading" aria-label="${escapeAttribute(label)} 正在评分">
+        <span>${escapeHTML(label)}</span>
+        <b></b>
+      </div>
+    `;
+  }
+  return `
+    <div class="metric-chip">
+      <span>${escapeHTML(label)}</span>
+      <b>${formatMetric(value)}</b>
+      <small>/10</small>
+    </div>
+  `;
+}
+
+function renderDimensionMeter(item, benchmarkLoading, benchmarkFailed = false) {
+  const scores = normalizedBenchmarkScores(item);
+  if (scores.length === 0) {
+    if (benchmarkFailed) {
+      return `
+        <div class="dimension-meter is-failed" aria-label="六维 Benchmark 评分失败">
+          <span class="dimension-failed"></span>
+        </div>
+      `;
+    }
+    return `
+      <div class="dimension-meter is-loading" aria-label="六维 Benchmark 正在评分">
+        <span class="dimension-skeleton"></span>
+      </div>
+    `;
+  }
+  const dimensions = Array.isArray(item.benchmark_dimensions) && item.benchmark_dimensions.length === scores.length
+    ? item.benchmark_dimensions
+    : benchmarkDimensions;
+  const visualShares = visualBenchmarkShares(scores);
+  return `
+    <div class="dimension-meter" aria-label="${escapeAttribute(dimensions.map((name, index) => `${name}${Math.round(scores[index] * 100)}%`).join("，"))}">
+      ${scores.map((score, index) => {
+        const tooltip = dimensionTooltip(dimensions[index] || benchmarkDimensions[index] || "维度", score);
+        return `
+        <span
+          class="dimension-segment dim-${index}"
+          style="--share:${(visualShares[index] * 100).toFixed(4)}%; --segment-delay:${index * 22}ms"
+          tabindex="0"
+          role="img"
+          aria-label="${escapeAttribute(tooltip)}"
+          data-tooltip="${escapeAttribute(tooltip)}"
+        ></span>
+      `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function dimensionTooltip(name, score) {
+  return `${name} ${Math.round(score * 100)}%`;
+}
+
+function normalizedBenchmarkScores(item) {
+  const raw = Array.isArray(item?.benchmark_scores) ? item.benchmark_scores : Array.isArray(item?.scores) ? item.scores : [];
+  const values = raw.slice(0, 6).map((value) => {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? Math.min(number, 1) : 0;
+  });
+  const total = values.reduce((sum, value) => sum + value, 0);
+  if (values.length !== 6 || total <= 0) return [];
+  return values.map((value) => value / total);
+}
+
+function visualBenchmarkShares(scores) {
+  const floor = 0.018;
+  const remaining = Math.max(0, 1 - floor * scores.length);
+  const shares = scores.map((score) => floor + score * remaining);
+  const total = shares.reduce((sum, value) => sum + value, 0);
+  if (total <= 0) return scores.map(() => 1 / scores.length);
+  return shares.map((value) => value / total);
+}
+
+function hasImpactFactor(item) {
+  return hasMetricValue(numericMetric(item?.impact_factor));
+}
+
+function hasMetricValue(value) {
+  return Number.isFinite(value) && value >= 0;
+}
+
+function numericMetric(value) {
+  if (value === null || value === undefined || value === "") return NaN;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : NaN;
+}
+
+function formatMetric(value) {
+  const rounded = Math.round(value * 10) / 10;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
 }
 
 function renderAwardLoadingSkeleton(subtle) {
@@ -792,6 +1559,10 @@ function isEvidenceLoadingStatus(status) {
   return ["waiting", "loading", "running", "refining"].includes(status || "waiting");
 }
 
+function isBenchmarkLoadingStatus(status) {
+  return ["waiting", "loading", "running", "benchmarking"].includes(status || "waiting");
+}
+
 function evidenceOverallStatus(awardStatus, experienceStatus, awardCount, experienceCount) {
   if (awardStatus === "mock" || experienceStatus === "mock") return "mock";
   if (awardCount > 0 || experienceCount > 0) return "ready";
@@ -804,19 +1575,51 @@ function setEvidencePill(selector, status, labels) {
   const element = document.querySelector(selector);
   if (!element) return;
   const normalized = status || "waiting";
-  element.textContent = labels[normalized] || labels.waiting;
+  const label = Object.prototype.hasOwnProperty.call(labels, normalized) ? labels[normalized] : labels.waiting;
+  if (label === "") {
+    element.hidden = true;
+    element.textContent = "";
+    return;
+  }
+  element.hidden = false;
+  element.textContent = label;
   element.className = `status-pill ${statusPillClass(normalized)}`;
 }
 
 function statusPillClass(status) {
-  if (status === "ready") return "is-real";
+  if (status === "ready" || status === "benchmark_ready") return "is-real";
   if (status === "mock") return "is-simulated";
   if (status === "failed") return "is-danger";
   return "is-warning";
 }
 
-function sourceBadgeClass(source) {
-  return String(source || "").includes("模拟") ? "sim-badge" : "status-pill is-real";
+function normalizedEvidenceScope(item) {
+  const explicit = String(item?.evidence_scope || "").trim();
+  if (explicit === "校内" || explicit === "校外") return explicit;
+  const text = [
+    item?.name,
+    item?.result,
+    item?.type,
+    item?.role,
+    item?.contribution
+  ].join("");
+  const lower = text.toLowerCase();
+  if (containsAnyText(lower, ["校外", "全国", "国家级", "省级", "省", "市级", "市", "区域", "赛区", "国际", "企业", "公司", "集团", "实习", "英语四级", "英语六级", "cet", "计算机等级", "蓝桥", "acm", "icpc", "ctf", "挑战杯", "互联网+"])) {
+    return "校外";
+  }
+  if (containsAnyText(text, ["校内", "校级", "院级", "学院", "学校", "学生会", "社团", "协会", "班级", "班长", "团支书", "优秀学生", "优秀学生干部", "三好学生", "奖学金", "实验室", "大创"])) {
+    return "校内";
+  }
+  if (containsAnyText(text, ["项目", "科研", "研究"])) return "校内";
+  return "校外";
+}
+
+function scopeBadgeClass(item) {
+  return normalizedEvidenceScope(item) === "校内" ? "scope-badge is-campus" : "scope-badge is-external";
+}
+
+function containsAnyText(text, needles) {
+  return needles.some((needle) => needle && text.includes(needle));
 }
 
 function pointFor(index, total, radius, center) {
@@ -873,7 +1676,7 @@ function renderPath(plan) {
         ${stage.standards.map((standard) => `<li>${escapeHTML(standard)}</li>`).join("")}
       </ul>
       <div class="resource-list">
-        ${stage.resources.map((resource) => `<a href="${escapeAttribute(resource.url)}" target="_blank" rel="noreferrer">${escapeHTML(resource.label)}</a>`).join("")}
+        ${stage.resources.map((resource) => `<a href="${safeURLAttribute(resource.url)}" target="_blank" rel="noreferrer">${escapeHTML(resource.label)}</a>`).join("")}
       </div>
     </article>
   `).join("");
@@ -965,6 +1768,10 @@ function showToast(message) {
   toastTimer = window.setTimeout(() => toast.classList.remove("is-visible"), 2600);
 }
 
+function cleanDisplayText(value) {
+  return String(value ?? "").trim();
+}
+
 function safeScore(value) {
   const score = Number(value);
   if (!Number.isFinite(score)) return 0;
@@ -981,6 +1788,10 @@ function escapeHTML(value) {
 }
 
 function escapeAttribute(value) {
+  return escapeHTML(value);
+}
+
+function safeURLAttribute(value) {
   const text = String(value ?? "");
   try {
     const parsed = new URL(text);

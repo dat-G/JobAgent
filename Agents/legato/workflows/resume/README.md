@@ -83,6 +83,7 @@ prompts/common.md      shared short rules for JSON and accuracy
 prompts/profile.md     identity + education in one request
 prompts/certifications_awards.md certificates and awards
 prompts/item_benchmark.md six-dimensional item scoring
+prompts/major_baseline.md major-family academic baseline scoring
 prompts/combined.md    profile + certifications_awards + experience in one request
 prompts/merge.md       final schema merge
 prompts/retry_json.md  short retry instruction for invalid JSON
@@ -105,6 +106,7 @@ To avoid double counting, `experience` keeps only described work/project/role/co
 Ability assessment should rely primarily on `contribution` and `level`.
 
 Education school tags are generated locally from `cache/ruanke_china_university_ranking_2026_structured.json`. Matching uses exact school name first, then a conservative contains match for extracted names such as `东北农业大学 · 本科`.
+Before ranking matching, `cache/independent_colleges.json` is checked for independent colleges or similar standalone entities that should not inherit the parent university's ranking tags. For example, `杭州电子科技大学信息工程学院` is treated as its own institution, while normal internal departments such as `东北农业大学电气与信息学院` can still inherit the parent school tag.
 Each education item gets `degree_level` as one of `专科` / `本科` / `硕士` / `博士` / `""`. If there is only one education item and its degree is missing, the local `education_degree_inference_agent` infers it from study years and school name, defaulting toward `本科`.
 
 Comparison mode:
@@ -119,15 +121,30 @@ No contact extraction in this workflow version.
 
 ## Item Benchmark
 
-`--workflow-stage item_benchmark` first extracts `certifications_awards`, then benchmarks each item concurrently through Presto.
+`--workflow-stage item_benchmark` benchmarks evidence items concurrently through Presto.
+The recommended production path is to run it after `experience_hybrid`, with caller-assembled items passed by `--workflow-stage-input`.
+If no input file is provided, it falls back to extracting `certifications_awards` first for CLI compatibility.
 Each item request includes an education context summary: school, degree level, major, and research direction lines when present.
+
+Input shape:
+
+```json
+{
+  "items": [
+    {"kind": "award", "key": "award:0", "name": "", "result": "", "level": 0, "evidence_scope": "校外"},
+    {"kind": "experience", "key": "experience:0", "type": "", "role": "", "contribution": "", "level": 0, "evidence_scope": "校内"}
+  ]
+}
+```
 
 Each output item contains:
 
-- `item`: original `name` and `result`.
+- `item`: original item identity, including `kind`, `key`, `name`, `result`, `evidence_scope`, and experience fields when provided.
 - `dimensions`: fixed order `逻辑`, `语言`, `专业`, `领导`, `抗压`, `成长`.
 - `scores`: normalized six-dimensional weight vector, each value in `0.0-1.0`, and the six values sum to `1.0`.
 - `impact_factor`: `0-10`, similar to `experience.level`, measuring how strongly the item proves ability.
+
+`evidence_scope` is `校内` only for school, college, class, student-union, society, internal honor, or campus project evidence. Certificates, internships, company evidence, public competitions, regional/provincial/national awards, and unclear external organizers are `校外`.
 
 Dimension definitions:
 
@@ -139,6 +156,46 @@ Dimension definitions:
 - `成长`: learning potential, initiative, improvement, and exploration.
 
 `impact_factor` considers contest or organizer value, participation depth, technical evidence in the description, company/organization credibility, and how meaningful the item is for the student's education level, school tier, degree, and major.
+
+## Major Baseline
+
+`--workflow-stage major_baseline` evaluates how the student's major and academic record should set the six-dimensional academic prior before item evidence is added.
+It is intended to run together with `item_benchmark` after `profile` has returned. The backend passes `basic_info`, `education`, and `transcript_use` through `--workflow-stage-input`; the prompt then adds compact Markdown education context through a `{{context}}` slot.
+
+Output shape:
+
+```json
+{
+  "major_baseline": {
+    "major_name": "计算机科学与技术",
+    "major_family": "工科类",
+    "base_score": 51,
+    "dimensions": ["逻辑", "语言", "专业", "领导", "抗压", "成长"],
+    "scores": [56, 46, 59, 42, 49, 53],
+    "rationale": "按工科类专业、211/双一流/软科#120学校层次给出能力prior。",
+    "confidence": 0.68,
+    "source": "presto_major_baseline"
+  }
+}
+```
+
+`major_family` is one of `文科类`, `理科类`, `工科类`, `商科类`, `医农类`, `艺术体育类`, `交叉类`, or `未知`.
+The model uses thinking mode internally but must return only JSON. If Presto or the model fails, the stage returns an error so the caller can retry instead of silently mixing in a local fallback.
+School tier is passed as context from the local ranking cache: `985`, `211`, `双一流`, and `ruanke_rank`.
+It is a visible prior: `985`/top-50 receives a clear positive adjustment, `211`/`双一流`/top-150 receives a moderate positive adjustment, and non-双一流 schools below top-150 receive a small-to-medium debuff by rank bucket.
+Independent colleges, private colleges, and former third-tier colleges are treated as separate institutions and should not inherit the parent university's `985` / `211` / ranking tags. With missing GPA or an average around 80, their academic prior is normally around 38-43.
+When multiple education records exist, the stage should not simply pick the strongest school. A later master's degree can partially offset a weak undergraduate school, but an independent/private/former-third-tier undergraduate background remains a negative academic-prior signal.
+If the school has a clear field specialty or the context mentions `王牌专业` / `特色专业` / `优势专业` / `一流学科`, the stage can slightly raise `专业` and adjacent dimensions, but it should not erase the school-tier debuff.
+The scores are ability priors, not raw grade scores. A missing GPA or transcript average near 80 maps to an ability prior around 50.
+
+Frontend radar aggregation uses the current item scores:
+
+- Evidence strength = `0.4 * level/10 + 0.6 * impact_factor/10`.
+- Per-dimension contribution = `six_dim_score * evidence_strength`, capped at `0.96`.
+- Multiple items combine with strong diminishing returns: after evidence score reaches about 65, marginal gain drops below 16%; after about 70, marginal gain is about 4%.
+- Low-confidence evidence is capped twice: each item has a low contribution cap, and its bucket has a strict per-dimension total cap. Current capped buckets include untitled professional projects, campus/internal awards, low-impact awards/basic certificates, and generic campus roles. Quantity cannot replace concrete project titles, strong competitions, internships, or measured outcomes.
+- 校内 and 综合 blend the `major_baseline` academic prior with evidence scores. If no usable transcript GPA exists, the academic prior defaults near 50 rather than 80.
+- Three radar series are rendered: `综合` over all items plus academic baseline, `校内` over campus/internal items plus academic baseline, and `校外` over external items.
 
 For DeepSeek thinking mode, run Presto with:
 

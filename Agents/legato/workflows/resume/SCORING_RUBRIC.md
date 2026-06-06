@@ -54,6 +54,68 @@ Apply these after the base score.
 - `role`: identity of the experience. Prefer `organization/company/event / role` when both parts are explicit. Keep it empty when only a vague project description is available.
 - `contribution`: concise evidence of what the student did. Do not use it to restate company, school, or contest names unless that is the only meaningful evidence.
 - `level`: score the contribution evidence first, then adjust by organization/contest/school scope. Brand or title alone should not produce a high score.
+- `evidence_scope`: `校内` for school, college, class, student-union, society, internal honor, or campus project evidence; `校外` for internships, certificates, public competitions, external organizers, and company evidence. Scope is used for grouping, not as a direct score cap.
+
+## Six-Dimension Radar
+
+`item_benchmark` returns a six-dimensional distribution and an `impact_factor`. The frontend derives radar scores from item evidence:
+
+1. Evidence strength = `0.4 * level/10 + 0.6 * impact_factor/10`.
+2. Dimension contribution = `six_dim_score * evidence_strength * 1.85`, capped at `0.96`.
+3. Multiple items combine with diminishing returns: `combined = 1 - product(1 - contribution_i)`.
+4. 校内 and 综合 blend an academic prior from the `major_baseline` workflow. A missing GPA or transcript average around 80 maps to an ability prior around 50, not ability 80.
+5. Low-confidence evidence buckets have both single-item and total-bucket caps. Untitled professional projects, campus/internal awards, low-impact awards/basic certificates, and generic campus roles can support a profile, but cannot stack into strong evidence without concrete titles, formal external selection, or measured outcomes.
+5. Render three overlays: `综合` for all items plus academic baseline, `校内` for campus/internal items plus academic baseline, `校外` for external items.
+
+This keeps low-value certificates from dominating while letting repeated high-quality evidence accumulate.
+
+## Major Baseline Calibration
+
+`major_baseline` is a separate Presto-backed stage. It classifies the major family and returns 0-100 ability prior scores for the same six dimensions.
+
+Major family is one of `文科类`, `理科类`, `工科类`, `商科类`, `医农类`, `艺术体育类`, `交叉类`, or `未知`.
+
+Grade-to-ability mapping:
+
+| Academic signal | Ability prior |
+| --- | ---: |
+| missing transcript or average around 80 | around 50 |
+| average around 85 | around 58 |
+| average around 90 | around 66 |
+| average around 95 | around 74 |
+
+Do not treat raw grades as ability scores. An average score of 80 is normal academic completion, not 80/100 ability proof.
+
+Use mild offsets from `base_score`:
+
+| Major family | Higher baseline dimensions | Lower/conservative dimensions |
+| --- | --- | --- |
+| 工科类 | 逻辑, 专业 | 语言, 领导 |
+| 理科类 | 逻辑, 专业 | 语言, 领导 |
+| 文科类 | 语言, 专业 | 领导 unless trained by role evidence |
+| 商科类 | 语言, 专业, mild 领导 | none high without evidence |
+| 医农类 | 专业, 抗压 | 领导 |
+| 艺术体育类 | 专业, 抗压, 语言 when expression-heavy | 逻辑 |
+| 交叉类 | 逻辑/语言/专业 balanced | 领导 conservative |
+| 未知 | near `base_score` | 领导 and 抗压 conservative |
+
+Major alone should not create extreme scores. Keep most academic priors between 35 and 70; use 70-80 only for strong academic evidence. Leadership should generally remain conservative unless management/organization training is explicit.
+
+School tier is a visible academic prior, not a ranking contest:
+
+| School evidence | Suggested effect |
+| --- | --- |
+| 985 or soft-rank <= 50 | clear positive, usually around +3 on affected dimensions |
+| 211 / 双一流 / soft-rank <= 150 | moderate positive, usually around +2 on affected dimensions |
+| non-双一流 soft-rank 151-250 | light debuff, around -2 before specialty offset |
+| non-双一流 soft-rank 251-400 | medium debuff, around -4 before specialty offset |
+| ordinary / unknown / lower rank | medium debuff; do not collapse the score, but avoid treating it as neutral |
+| independent/private/former third-tier college | separate from parent school; missing GPA or average around 80 usually maps to 38-43 prior |
+
+Apply school tier mainly to `逻辑`, `专业`, `抗压`, and `成长`; do not raise `领导` from school tier alone.
+If the school's known field orientation or resume context suggests a strong specialty match, add a small extra lift to `专业` and one adjacent dimension, but do not erase a below-tier debuff.
+Do not invent a specialty. Use explicit context such as `王牌专业`, `特色专业`, `优势专业`, `一流学科`, or broad school-domain alignment such as electronic-information schools with computing/electronics majors.
+Independent/private/former third-tier colleges do not inherit the parent university's ranking or specialty strength. Their real projects, internships, and competitions can still raise final ability scores normally.
 
 ## Contest Calibration
 

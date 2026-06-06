@@ -34,7 +34,9 @@
               "is_985": { "type": "boolean" },
               "is_211": { "type": "boolean" },
               "is_double_first_class": { "type": "boolean" },
-              "ruanke_rank": { "type": ["number", "null"] }
+              "ruanke_rank": { "type": ["number", "null"] },
+              "school_kind": { "type": "string" },
+              "parent_school": { "type": "string" }
             }
           }
         }
@@ -45,10 +47,12 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name", "result"],
+        "required": ["name", "result", "level", "evidence_scope"],
         "properties": {
           "name": { "type": "string" },
-          "result": { "type": "string" }
+          "result": { "type": "string" },
+          "level": { "type": "number", "minimum": 0, "maximum": 10 },
+          "evidence_scope": { "type": "string", "enum": ["校内", "校外"] }
         }
       }
     },
@@ -57,12 +61,13 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["type", "role", "contribution", "level"],
+        "required": ["type", "role", "contribution", "level", "evidence_scope"],
         "properties": {
           "type": { "type": "string" },
           "role": { "type": "string" },
           "contribution": { "type": "string" },
-          "level": { "type": "number", "minimum": 0, "maximum": 10 }
+          "level": { "type": "number", "minimum": 0, "maximum": 10 },
+          "evidence_scope": { "type": "string", "enum": ["校内", "校外"] }
         }
       }
     }

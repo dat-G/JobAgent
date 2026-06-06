@@ -20,6 +20,7 @@ import (
 )
 
 const defaultDiagnosisTimeout = 120 * time.Second
+const defaultDiagnosisTempRetention = 2 * time.Hour
 
 type JobStore struct {
 	seq  uint64
@@ -75,6 +76,22 @@ type legatoStageResult struct {
 	target string
 	result *LegatoEnvelope
 	err    error
+}
+
+type BenchmarkRequest struct {
+	Items []BenchmarkEvidenceInput `json:"items"`
+}
+
+type BenchmarkEvidenceInput struct {
+	Kind           string  `json:"kind"`
+	Key            string  `json:"key"`
+	Name           string  `json:"name"`
+	Result         string  `json:"result"`
+	EvidenceScope  string  `json:"evidence_scope,omitempty"`
+	ExperienceType string  `json:"experience_type,omitempty"`
+	Role           string  `json:"role,omitempty"`
+	Contribution   string  `json:"contribution,omitempty"`
+	Level          float64 `json:"level,omitempty"`
 }
 
 func NewJobStore() *JobStore {
@@ -180,6 +197,12 @@ func (j *DiagnosisJob) Snapshot() map[string]any {
 	}
 }
 
+func (j *DiagnosisJob) CurrentDiagnosis() Diagnosis {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.Diagnosis
+}
+
 func eventsAfter(events []DiagnosisEvent, lastEventID string) []DiagnosisEvent {
 	if lastEventID == "" {
 		return append([]DiagnosisEvent(nil), events...)
@@ -231,6 +254,14 @@ func (s Server) handleDiagnosisJob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		streamDiagnosisEvents(w, r, job)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "benchmark" {
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, http.MethodPost)
+			return
+		}
+		s.handleDiagnosisBenchmark(w, r, job)
 		return
 	}
 	if len(parts) == 1 && r.Method == http.MethodGet {
@@ -287,6 +318,134 @@ func streamDiagnosisEvents(w http.ResponseWriter, r *http.Request, job *Diagnosi
 	}
 }
 
+func (s Server) handleDiagnosisBenchmark(w http.ResponseWriter, r *http.Request, job *DiagnosisJob) {
+	var req BenchmarkRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid benchmark request")
+		return
+	}
+	items := sanitizeBenchmarkInputs(req.Items)
+	diagnosis := job.CurrentDiagnosis()
+	if len(items) == 0 {
+		diagnosis.AbilityProfile.BenchmarkStatus = "empty"
+		job.SetDiagnosis(diagnosis)
+		writeJSON(w, http.StatusOK, map[string]any{"ability_profile": diagnosis.AbilityProfile})
+		return
+	}
+	if err := ensureResumeFileAvailable(job); err != nil {
+		diagnosis.AbilityProfile.BenchmarkStatus = "failed"
+		diagnosis.AbilityProfile.MajorBaselineStatus = "failed"
+		diagnosis.ProductionLimitations = append(diagnosis.ProductionLimitations, err.Error())
+		job.SetDiagnosis(diagnosis)
+		job.Emit(DiagnosisEvent{
+			Type:    "step.update",
+			Step:    "profile",
+			Status:  "failed",
+			Message: "benchmark 无法继续，上传简历临时文件不可用",
+			Data: map[string]any{
+				"ability_profile":        diagnosis.AbilityProfile,
+				"production_limitations": diagnosis.ProductionLimitations,
+				"error":                  err.Error(),
+			},
+		})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ability_profile":        diagnosis.AbilityProfile,
+			"production_limitations": diagnosis.ProductionLimitations,
+			"error":                  err.Error(),
+		})
+		return
+	}
+
+	diagnosis.AbilityProfile.BenchmarkStatus = "benchmarking"
+	diagnosis.AbilityProfile.MajorBaselineStatus = "benchmarking"
+	job.SetDiagnosis(diagnosis)
+	job.Emit(DiagnosisEvent{
+		Type:    "step.update",
+		Step:    "profile",
+		Status:  "running",
+		Message: "benchmark 正在并发评估证据影响因子和专业基础分布",
+		Data:    map[string]any{"ability_profile": diagnosis.AbilityProfile},
+	})
+
+	ctx, cancel := context.WithTimeout(r.Context(), diagnosisTimeout())
+	defer cancel()
+	majorBaselineInput := buildMajorBaselineStageInput(diagnosis)
+	type benchmarkStageCall struct {
+		result *LegatoEnvelope
+		err    error
+	}
+	itemBenchmarkCh := make(chan benchmarkStageCall, 1)
+	majorBaselineCh := make(chan benchmarkStageCall, 1)
+	go func() {
+		result, err := s.runResumeWorkflowStageWithInput(
+			ctx,
+			job,
+			"item_benchmark",
+			"简历 item_benchmark 正在结合教育背景评估证据影响因子",
+			map[string]any{"items": items},
+		)
+		itemBenchmarkCh <- benchmarkStageCall{result: result, err: err}
+	}()
+	go func() {
+		result, err := s.runResumeWorkflowStageWithInput(
+			ctx,
+			job,
+			"major_baseline",
+			"简历 major_baseline 正在思考专业对六维基础分布的影响",
+			majorBaselineInput,
+		)
+		majorBaselineCh <- benchmarkStageCall{result: result, err: err}
+	}()
+	itemBenchmarkCall := <-itemBenchmarkCh
+	majorBaselineCall := <-majorBaselineCh
+	diagnosis = job.CurrentDiagnosis()
+	if itemBenchmarkCall.err != nil || majorBaselineCall.err != nil {
+		var benchmarkErrors []string
+		if itemBenchmarkCall.err != nil {
+			benchmarkErrors = append(benchmarkErrors, "item_benchmark: "+itemBenchmarkCall.err.Error())
+			log.Printf("diagnosis %s legato item_benchmark failed: %v", job.ID, itemBenchmarkCall.err)
+		}
+		if majorBaselineCall.err != nil {
+			benchmarkErrors = append(benchmarkErrors, "major_baseline: "+majorBaselineCall.err.Error())
+			log.Printf("diagnosis %s legato major_baseline failed: %v", job.ID, majorBaselineCall.err)
+		}
+		errMessage := strings.Join(benchmarkErrors, "；")
+		diagnosis.AbilityProfile.BenchmarkStatus = "failed"
+		diagnosis.AbilityProfile.MajorBaselineStatus = "failed"
+		diagnosis.ProductionLimitations = append(diagnosis.ProductionLimitations, "benchmark 失败，六维分布、impact_factor 或专业基础基线未生成，可从失败阶段重试。")
+		job.SetDiagnosis(diagnosis)
+		job.Emit(DiagnosisEvent{
+			Type:    "step.update",
+			Step:    "profile",
+			Status:  "failed",
+			Message: "benchmark 失败，点击 dock 中红色画像阶段可继续重试",
+			Data: map[string]any{
+				"ability_profile":        diagnosis.AbilityProfile,
+				"production_limitations": diagnosis.ProductionLimitations,
+				"error":                  errMessage,
+			},
+		})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ability_profile":        diagnosis.AbilityProfile,
+			"production_limitations": diagnosis.ProductionLimitations,
+			"error":                  errMessage,
+		})
+		return
+	}
+
+	applyResumeWorkflowMajorBaseline(&diagnosis, majorBaselineCall.result)
+	applyResumeWorkflowItemBenchmark(&diagnosis, itemBenchmarkCall.result)
+	job.SetDiagnosis(diagnosis)
+	job.Emit(DiagnosisEvent{
+		Type:    "step.update",
+		Step:    "profile",
+		Status:  "done",
+		Message: "benchmark 已返回，证据卡片已补充 impact_factor，雷达图已补充专业基础基线",
+		Data:    map[string]any{"ability_profile": diagnosis.AbilityProfile},
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"ability_profile": diagnosis.AbilityProfile})
+}
+
 func writeDiagnosisSSE(w io.Writer, event DiagnosisEvent) error {
 	data, err := json.Marshal(event)
 	if err != nil {
@@ -307,7 +466,7 @@ func writeDiagnosisSSE(w io.Writer, event DiagnosisEvent) error {
 func (s Server) runDiagnosisJob(job *DiagnosisJob) {
 	ctx, cancel := context.WithTimeout(context.Background(), diagnosisTimeout())
 	defer cancel()
-	defer cleanupDiagnosisTempDir(job.TempDir)
+	defer scheduleDiagnosisTempCleanup(job.TempDir)
 
 	files := sourceFiles(job.Files)
 	diagnosis := mockDiagnosis(DiagnosisRequest{Files: files})
@@ -321,10 +480,16 @@ func (s Server) runDiagnosisJob(job *DiagnosisJob) {
 		TranscriptUse: transcriptUse,
 	}
 	diagnosis.AbilityProfile.Education = []EducationItem{}
+	diagnosis.AbilityProfile.FourDimScores = []ScoreDimension{}
+	diagnosis.AbilityProfile.RadarData = []ScoreDimension{}
+	diagnosis.AbilityProfile.EvidenceSummary = []EvidenceItem{}
 	diagnosis.AbilityProfile.AwardsStatus = "waiting"
 	diagnosis.AbilityProfile.Awards = []AwardItem{}
 	diagnosis.AbilityProfile.ExperiencesStatus = "waiting"
 	diagnosis.AbilityProfile.Experiences = []ExperienceItem{}
+	diagnosis.AbilityProfile.BenchmarkStatus = "waiting"
+	diagnosis.AbilityProfile.MajorBaselineStatus = "waiting"
+	diagnosis.AbilityProfile.MajorBaseline = MajorBaseline{}
 	diagnosis.ProductionLimitations = []string{
 		"简历必须由 Legato 后端成功解析，否则诊断任务失败。",
 		"成绩单是可选增强材料；如解析失败，本次诊断会跳过成绩单证据并继续生成结果。",
@@ -690,7 +855,80 @@ func (s Server) runResumeWorkflowStage(ctx context.Context, job *DiagnosisJob, w
 	return result, nil
 }
 
+func (s Server) runResumeWorkflowStageWithInput(ctx context.Context, job *DiagnosisJob, workflowStage string, runningMessage string, stageInput any) (*LegatoEnvelope, error) {
+	file, ok := firstFileByKind(job.Files, "resume")
+	step := "profile"
+	if !ok || file.Path == "" {
+		err := errors.New("缺少简历文件，无法调用 Legato resume workflow")
+		job.Emit(DiagnosisEvent{Type: "step.update", Step: step, Status: "failed", Message: err.Error()})
+		return nil, err
+	}
+
+	inputFile, err := os.CreateTemp("", "jobagent-legato-stage-input-*.json")
+	if err != nil {
+		return nil, err
+	}
+	inputPath := inputFile.Name()
+	defer os.Remove(inputPath)
+	encoder := json.NewEncoder(inputFile)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(stageInput); err != nil {
+		inputFile.Close()
+		return nil, err
+	}
+	if err := inputFile.Close(); err != nil {
+		return nil, err
+	}
+
+	job.Emit(DiagnosisEvent{
+		Type:    "step.update",
+		Step:    step,
+		Status:  "running",
+		Message: runningMessage,
+		Data: map[string]any{
+			"source": file.SourceFile,
+			"stage":  workflowStage,
+		},
+	})
+	result, err := runLegatoWithWorkflowStageInput(ctx, file.Path, "resume", workflowStage, inputPath)
+	if err != nil {
+		job.Emit(DiagnosisEvent{
+			Type:    "step.update",
+			Step:    step,
+			Status:  "failed",
+			Message: "Legato resume workflow " + workflowStage + " 解析失败",
+			Data: map[string]any{
+				"source": file.SourceFile,
+				"stage":  workflowStage,
+				"error":  err.Error(),
+			},
+		})
+		return nil, err
+	}
+	job.Emit(DiagnosisEvent{
+		Type:    "step.update",
+		Step:    step,
+		Status:  "running",
+		Message: "Legato " + legatoTargetLabel("resume_"+workflowStage) + "已返回结构化数据",
+		Data: map[string]any{
+			"source": file.SourceFile,
+			"stage":  workflowStage,
+			"legato": result,
+		},
+	})
+	return result, nil
+}
+
 func runLegato(ctx context.Context, sourcePath string, target string, workflowStage ...string) (*LegatoEnvelope, error) {
+	workflowStageInput := ""
+	return runLegatoWithOptions(ctx, sourcePath, target, workflowStageInput, workflowStage...)
+}
+
+func runLegatoWithWorkflowStageInput(ctx context.Context, sourcePath string, target string, workflowStage string, workflowStageInput string) (*LegatoEnvelope, error) {
+	return runLegatoWithOptions(ctx, sourcePath, target, workflowStageInput, workflowStage)
+}
+
+func runLegatoWithOptions(ctx context.Context, sourcePath string, target string, workflowStageInput string, workflowStage ...string) (*LegatoEnvelope, error) {
 	root := legatoRoot()
 	if root == "" {
 		return nil, errors.New("cannot locate Agents/legato")
@@ -706,6 +944,9 @@ func runLegato(ctx context.Context, sourcePath string, target string, workflowSt
 		args = append(args, "--workflow", "resume")
 		if len(workflowStage) > 0 && strings.TrimSpace(workflowStage[0]) != "" {
 			args = append(args, "--workflow-stage", strings.TrimSpace(workflowStage[0]))
+		}
+		if strings.TrimSpace(workflowStageInput) != "" {
+			args = append(args, "--workflow-stage-input", workflowStageInput)
 		}
 	}
 	if legatoUsePresto() {
@@ -829,6 +1070,38 @@ func tempDirFromFiles(files []SavedUpload) string {
 	return ""
 }
 
+func ensureResumeFileAvailable(job *DiagnosisJob) error {
+	file, ok := firstFileByKind(job.Files, "resume")
+	if !ok || file.Path == "" {
+		return errors.New("缺少简历文件，无法继续 benchmark")
+	}
+	if _, err := os.Stat(file.Path); err != nil {
+		name := strings.TrimSpace(file.SourceFile.Name)
+		if name == "" {
+			name = filepath.Base(file.Path)
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("上传简历临时文件已过期或被清理，无法从当前任务继续 benchmark：%s；请重新生成诊断", name)
+		}
+		return fmt.Errorf("上传简历文件不可读取，无法继续 benchmark：%w", err)
+	}
+	return nil
+}
+
+func scheduleDiagnosisTempCleanup(tempDir string) {
+	if tempDir == "" {
+		return
+	}
+	retention := diagnosisTempRetention()
+	if retention <= 0 {
+		cleanupDiagnosisTempDir(tempDir)
+		return
+	}
+	time.AfterFunc(retention, func() {
+		cleanupDiagnosisTempDir(tempDir)
+	})
+}
+
 func cleanupDiagnosisTempDir(tempDir string) {
 	if tempDir == "" {
 		return
@@ -836,6 +1109,22 @@ func cleanupDiagnosisTempDir(tempDir string) {
 	if err := os.RemoveAll(tempDir); err != nil {
 		log.Printf("cleanup diagnosis temp dir failed: %v", err)
 	}
+}
+
+func diagnosisTempRetention() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("JOBAGENT_TEMP_RETENTION_MINUTES"))
+	if raw == "" {
+		return defaultDiagnosisTempRetention
+	}
+	minutes, err := strconv.Atoi(raw)
+	if err != nil {
+		log.Printf("invalid JOBAGENT_TEMP_RETENTION_MINUTES=%q, using default %s", raw, defaultDiagnosisTempRetention)
+		return defaultDiagnosisTempRetention
+	}
+	if minutes <= 0 {
+		return 0
+	}
+	return time.Duration(minutes) * time.Minute
 }
 
 func legatoRoot() string {
@@ -940,6 +1229,10 @@ func legatoTargetLabel(target string) string {
 		return "简历经历"
 	case "resume_experience_hybrid":
 		return "简历经历 hybrid"
+	case "resume_item_benchmark":
+		return "简历 item benchmark"
+	case "resume_major_baseline":
+		return "简历专业基础基线"
 	case "transcript":
 		return "成绩单解析"
 	default:
@@ -1029,6 +1322,8 @@ func buildEducationItems(items []map[string]any) []EducationItem {
 			Is211:              boolValue(tags["is_211"]),
 			IsDoubleFirstClass: boolValue(tags["is_double_first_class"]),
 			RuankeRank:         intValue(tags["ruanke_rank"]),
+			SchoolKind:         stringValue(tags["school_kind"]),
+			ParentSchool:       stringValue(tags["parent_school"]),
 		})
 	}
 	return education
@@ -1101,6 +1396,126 @@ func applyResumeWorkflowExperience(diagnosis *Diagnosis, result *LegatoEnvelope,
 	applyLegatoWarnings(diagnosis, warningLabel, result)
 }
 
+func applyResumeWorkflowItemBenchmark(diagnosis *Diagnosis, result *LegatoEnvelope) {
+	items := objectArray(result.Data["item_benchmark"])
+	if len(items) == 0 {
+		diagnosis.AbilityProfile.BenchmarkStatus = "empty"
+		return
+	}
+
+	applied := 0
+	for _, benchmark := range items {
+		item := objectValue(benchmark["item"])
+		kind := stringValue(item["kind"])
+		key := stringValue(item["key"])
+		dimensions := stringArrayValue(benchmark["dimensions"])
+		if len(dimensions) == 0 {
+			dimensions = benchmarkDimensionNames()
+		}
+		scores := floatArrayValue(benchmark["scores"])
+		if len(scores) != len(dimensions) || len(scores) == 0 {
+			continue
+		}
+		impact := clampFloat(floatValue(benchmark["impact_factor"]), 0, 10)
+		scope := normalizeEvidenceScope(stringValue(item["evidence_scope"]), kind, stringValue(item["name"]), stringValue(item["result"]), stringValue(item["type"]), stringValue(item["role"]), stringValue(item["contribution"]))
+		if kind == "experience" {
+			if index, ok := benchmarkIndexFromKey(key, "experience", len(diagnosis.AbilityProfile.Experiences)); ok {
+				diagnosis.AbilityProfile.Experiences[index].ImpactFactor = floatPtr(impact)
+				diagnosis.AbilityProfile.Experiences[index].BenchmarkDimensions = dimensions
+				diagnosis.AbilityProfile.Experiences[index].BenchmarkScores = scores
+				diagnosis.AbilityProfile.Experiences[index].EvidenceScope = scope
+				diagnosis.AbilityProfile.Experiences[index].ScoreSource = "Legato level + item_benchmark impact_factor"
+				applied++
+			}
+			continue
+		}
+		if index, ok := benchmarkIndexFromKey(key, "award", len(diagnosis.AbilityProfile.Awards)); ok {
+			diagnosis.AbilityProfile.Awards[index].ImpactFactor = floatPtr(impact)
+			diagnosis.AbilityProfile.Awards[index].BenchmarkDimensions = dimensions
+			diagnosis.AbilityProfile.Awards[index].BenchmarkScores = scores
+			diagnosis.AbilityProfile.Awards[index].EvidenceScope = scope
+			diagnosis.AbilityProfile.Awards[index].ScoreSource = "Legato level + item_benchmark impact_factor"
+			applied++
+		}
+	}
+
+	if applied == 0 {
+		diagnosis.AbilityProfile.BenchmarkStatus = "empty"
+		return
+	}
+	diagnosis.AbilityProfile.BenchmarkStatus = "ready"
+	diagnosis.AbilityProfile.EvidenceSummary = append(diagnosis.AbilityProfile.EvidenceSummary, EvidenceItem{
+		Category: "Legato item_benchmark",
+		Summary:  fmt.Sprintf("已为 %d 条证据补充六维分布和 impact_factor。", applied),
+		Signal:   "证据影响因子已结构化",
+	})
+	applyLegatoWarnings(diagnosis, "item_benchmark", result)
+}
+
+func buildMajorBaselineStageInput(diagnosis Diagnosis) map[string]any {
+	return map[string]any{
+		"basic_info":     diagnosis.AbilityProfile.BasicInfo,
+		"education":      diagnosis.AbilityProfile.Education,
+		"transcript_use": diagnosis.AbilityProfile.BasicInfo.TranscriptUse,
+	}
+}
+
+func applyResumeWorkflowMajorBaseline(diagnosis *Diagnosis, result *LegatoEnvelope) {
+	baseline := objectValue(result.Data["major_baseline"])
+	if len(baseline) == 0 {
+		diagnosis.AbilityProfile.MajorBaselineStatus = "empty"
+		return
+	}
+	dimensions := stringArrayValue(baseline["dimensions"])
+	if len(dimensions) == 0 {
+		dimensions = benchmarkDimensionNames()
+	}
+	scores := intArrayValue(baseline["scores"])
+	if len(scores) != len(dimensions) || len(scores) == 0 {
+		diagnosis.AbilityProfile.MajorBaselineStatus = "empty"
+		return
+	}
+	baseScore := intValue(baseline["base_score"])
+	if baseScore == 0 {
+		baseScore = 50
+	} else {
+		baseScore = clampInt(baseScore, 30, 85)
+	}
+	diagnosis.AbilityProfile.MajorBaseline = MajorBaseline{
+		MajorName:   stringValue(baseline["major_name"]),
+		MajorFamily: stringValue(baseline["major_family"]),
+		BaseScore:   baseScore,
+		Dimensions:  dimensions,
+		Scores:      scores,
+		Rationale:   stringValue(baseline["rationale"]),
+		Confidence:  clampFloat(floatValue(baseline["confidence"]), 0, 1),
+		Source:      stringValue(baseline["source"]),
+	}
+	diagnosis.AbilityProfile.MajorBaselineStatus = "ready"
+	majorFamily := diagnosis.AbilityProfile.MajorBaseline.MajorFamily
+	if majorFamily == "" {
+		majorFamily = "未知"
+	}
+	diagnosis.AbilityProfile.EvidenceSummary = append(diagnosis.AbilityProfile.EvidenceSummary, EvidenceItem{
+		Category: "Legato major_baseline",
+		Summary:  fmt.Sprintf("已根据%s专业背景生成六维能力 prior。", majorFamily),
+		Signal:   "专业培养 prior 已结构化",
+	})
+	applyLegatoWarnings(diagnosis, "major_baseline", result)
+}
+
+func benchmarkIndexFromKey(key string, prefix string, length int) (int, bool) {
+	needle := prefix + ":"
+	if !strings.HasPrefix(key, needle) {
+		return 0, false
+	}
+	index, err := strconv.Atoi(strings.TrimPrefix(key, needle))
+	if err != nil || index < 0 || index >= length {
+		return 0, false
+	}
+	return index, true
+}
+
 func markResumeEvidenceStatus(diagnosis *Diagnosis, target string, status string) {
 	switch target {
 	case "resume_certifications_awards":
@@ -1122,15 +1537,21 @@ func buildAwardItems(items []map[string]any) []AwardItem {
 		if name == "" && result == "" {
 			continue
 		}
-		score, level, reason := scoreAwardEvidence(name, result)
+		score, signal, reason := scoreAwardEvidence(name, result)
+		level := floatValue(item["level"])
+		if level <= 0 {
+			level = float64(score) / 10
+		}
+		level = clampFloat(level, 0, 10)
 		awards = append(awards, AwardItem{
-			Name:        name,
-			Result:      result,
-			Score:       score,
-			Level:       level,
-			Reason:      reason,
-			DataSource:  "Legato Resume workflow",
-			ScoreSource: "规则评分，模拟能力模型",
+			Name:          name,
+			Result:        result,
+			EvidenceScope: normalizeEvidenceScope(stringValue(item["evidence_scope"]), "award", name, result, "", "", ""),
+			Level:         level,
+			Signal:        signal,
+			Reason:        reason,
+			DataSource:    "Legato Resume workflow",
+			ScoreSource:   "Legato fast level，benchmark impact_factor 待返回",
 		})
 	}
 	return awards
@@ -1155,15 +1576,15 @@ func buildExperienceItems(items []map[string]any) []ExperienceItem {
 		score := level * 10
 		signal, reason := experienceSignal(score)
 		experiences = append(experiences, ExperienceItem{
-			Type:         experienceType,
-			Role:         role,
-			Contribution: contribution,
-			Level:        level,
-			Score:        score,
-			Signal:       signal,
-			Reason:       reason,
-			DataSource:   "Legato Resume workflow",
-			ScoreSource:  "Legato level 转百分制，模拟能力模型",
+			Type:          experienceType,
+			Role:          role,
+			Contribution:  contribution,
+			EvidenceScope: normalizeEvidenceScope(stringValue(item["evidence_scope"]), "experience", "", "", experienceType, role, contribution),
+			Level:         level,
+			Signal:        signal,
+			Reason:        reason,
+			DataSource:    "Legato Resume workflow",
+			ScoreSource:   "Legato fast level，benchmark impact_factor 待返回",
 		})
 	}
 	return experiences
@@ -1381,6 +1802,36 @@ func visibleLegatoWarnings(warnings []string) []string {
 	return out
 }
 
+func sanitizeBenchmarkInputs(items []BenchmarkEvidenceInput) []BenchmarkEvidenceInput {
+	out := make([]BenchmarkEvidenceInput, 0, len(items))
+	for index, item := range items {
+		kind := strings.TrimSpace(item.Kind)
+		if kind != "award" && kind != "experience" {
+			continue
+		}
+		key := strings.TrimSpace(item.Key)
+		if key == "" {
+			key = fmt.Sprintf("%s:%d", kind, index)
+		}
+		clean := BenchmarkEvidenceInput{
+			Kind:           kind,
+			Key:            key,
+			Name:           cleanLegatoText(item.Name),
+			Result:         cleanLegatoText(item.Result),
+			EvidenceScope:  normalizeEvidenceScope(item.EvidenceScope, kind, item.Name, item.Result, item.ExperienceType, item.Role, item.Contribution),
+			ExperienceType: cleanLegatoText(item.ExperienceType),
+			Role:           cleanLegatoText(item.Role),
+			Contribution:   cleanLegatoText(item.Contribution),
+			Level:          clampFloat(item.Level, 0, 10),
+		}
+		if clean.Name == "" && clean.Result == "" && clean.Role == "" && clean.Contribution == "" {
+			continue
+		}
+		out = append(out, clean)
+	}
+	return out
+}
+
 func nestedString(data map[string]any, objectKey string, fieldKey string) string {
 	object, ok := data[objectKey].(map[string]any)
 	if !ok {
@@ -1414,6 +1865,44 @@ func objectArray(value any) []map[string]any {
 	return out
 }
 
+func objectValue(value any) map[string]any {
+	object, _ := value.(map[string]any)
+	if object == nil {
+		return map[string]any{}
+	}
+	return object
+}
+
+func stringArrayValue(value any) []string {
+	items := arrayValue(value)
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		text := stringValue(item)
+		if text != "" {
+			out = append(out, text)
+		}
+	}
+	return out
+}
+
+func floatArrayValue(value any) []float64 {
+	items := arrayValue(value)
+	out := make([]float64, 0, len(items))
+	for _, item := range items {
+		out = append(out, clampFloat(floatValue(item), 0, 1))
+	}
+	return out
+}
+
+func intArrayValue(value any) []int {
+	items := arrayValue(value)
+	out := make([]int, 0, len(items))
+	for _, item := range items {
+		out = append(out, clampInt(intValue(item), 0, 100))
+	}
+	return out
+}
+
 func stringValue(value any) string {
 	text, _ := value.(string)
 	return strings.TrimSpace(text)
@@ -1438,6 +1927,25 @@ func intValue(value any) int {
 	}
 }
 
+func floatValue(value any) float64 {
+	switch typed := value.(type) {
+	case int:
+		return float64(typed)
+	case int64:
+		return float64(typed)
+	case float64:
+		return typed
+	case json.Number:
+		number, _ := typed.Float64()
+		return number
+	case string:
+		number, _ := strconv.ParseFloat(strings.TrimSpace(typed), 64)
+		return number
+	default:
+		return 0
+	}
+}
+
 func boolValue(value any) bool {
 	typed, _ := value.(bool)
 	return typed
@@ -1450,6 +1958,25 @@ func containsAny(text string, needles ...string) bool {
 		}
 	}
 	return false
+}
+
+func normalizeEvidenceScope(value string, kind string, name string, result string, experienceType string, role string, contribution string) string {
+	value = strings.TrimSpace(value)
+	if value == "校内" || value == "校外" {
+		return value
+	}
+	text := value + name + result + experienceType + role + contribution
+	lowered := strings.ToLower(text)
+	if containsAny(lowered, "校外", "全国", "国家级", "省级", "省", "市级", "市", "区域", "赛区", "国际", "企业", "公司", "集团", "实习", "英语四级", "英语六级", "cet", "计算机等级", "蓝桥", "acm", "icpc", "ctf", "挑战杯", "互联网+") {
+		return "校外"
+	}
+	if containsAny(lowered, "校内", "校级", "院级", "学院", "学校", "校学生会", "院学生会", "学生会", "社团", "协会", "班级", "班长", "团支书", "优秀学生", "优秀学生干部", "三好学生", "奖学金", "实验室", "大学生创新创业训练计划", "大创") {
+		return "校内"
+	}
+	if kind == "experience" && containsAny(lowered, "项目", "科研", "研究") {
+		return "校内"
+	}
+	return "校外"
 }
 
 func minInt(a int, b int) int {
@@ -1467,6 +1994,16 @@ func maxInt(a int, b int) int {
 }
 
 func clampInt(value int, minValue int, maxValue int) int {
+	if value < minValue {
+		return minValue
+	}
+	if value > maxValue {
+		return maxValue
+	}
+	return value
+}
+
+func clampFloat(value float64, minValue float64, maxValue float64) float64 {
 	if value < minValue {
 		return minValue
 	}

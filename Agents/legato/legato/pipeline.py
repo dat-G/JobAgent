@@ -49,6 +49,7 @@ def process(
     ocr_render_scale: float = 1.0,
     workflow: str | None = None,
     workflow_stage: str | None = None,
+    workflow_stage_input: dict[str, Any] | None = None,
     workflow_combine_agents: bool = False,
     debug: bool = False,
 ) -> LegatoResult:
@@ -131,6 +132,7 @@ def process(
         formatter = ResumeWorkflowFormatter(
             presto_url=presto_url,
             timeout_seconds=remaining,
+            stage_input=workflow_stage_input,
             combine_agents=workflow_combine_agents,
         )
         if workflow_stage:

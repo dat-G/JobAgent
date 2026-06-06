@@ -24,7 +24,13 @@ class CleaningTest(unittest.TestCase):
         self.assertEqual(parsed["contacts"]["phone"], "18702033459")
         self.assertEqual(parsed["contacts"]["email"], "mcfun@example.com")
 
+    def test_clean_markdown_repairs_common_chinese_technical_word_wraps(self) -> None:
+        raw = "基于视觉与时序模\r\n型的农机GNSS轨迹研究\n开发数据清洗方\n法与自动化系\n统\n"
+        cleaned = clean_markdown(raw)
+        self.assertIn("时序模型的农机GNSS轨迹研究", cleaned.markdown)
+        self.assertIn("数据清洗方法与自动化系统", cleaned.markdown)
+        self.assertNotIn("时序模\n型", cleaned.markdown)
+
 
 if __name__ == "__main__":
     unittest.main()
-

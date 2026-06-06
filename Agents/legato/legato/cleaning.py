@@ -20,6 +20,26 @@ SECTION_ALIASES = {
     "在校经历",
     "社团组织",
 }
+CJK_WORD_WRAP_PAIRS = (
+    ("模", "型"),
+    ("方", "法"),
+    ("系", "统"),
+    ("算", "法"),
+    ("框", "架"),
+    ("模", "块"),
+    ("数", "据"),
+    ("研", "究"),
+    ("实", "验"),
+    ("项", "目"),
+    ("平", "台"),
+    ("功", "能"),
+    ("管", "理"),
+    ("分", "析"),
+    ("评", "估"),
+    ("复", "现"),
+    ("构", "建"),
+    ("验", "证"),
+)
 
 
 @dataclass(frozen=True)
@@ -37,6 +57,7 @@ def clean_markdown(markdown: str) -> CleanedMarkdown:
 
     text = unicodedata.normalize("NFKC", markdown)
     text = CONTROL_CHARS_RE.sub("", text)
+    text = repair_common_cjk_word_wraps(text)
     text = normalize_lines(text)
     text = normalize_contact_labels(text)
     text = promote_cn_section_lines(text)
@@ -69,6 +90,12 @@ def normalize_lines(text: str) -> str:
         stripped = WHITESPACE_RE.sub(" ", line).strip()
         out.append(stripped)
     return "\n".join(out).strip()
+
+
+def repair_common_cjk_word_wraps(text: str) -> str:
+    for left, right in CJK_WORD_WRAP_PAIRS:
+        text = re.sub(rf"{left}[ \t]*(?:\r\n|\r|\n)[ \t]*{right}", left + right, text)
+    return text
 
 
 def normalize_contact_labels(text: str) -> str:
@@ -105,4 +132,3 @@ def restore_common_email_artifacts(text: str) -> str:
 
 def collapse_excess_blank_lines(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip() + "\n"
-

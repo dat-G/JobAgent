@@ -23,7 +23,7 @@
         <a href="#path" class="step-dot" data-step-link="path">路径</a>
         <a href="#outputs" class="step-dot" data-step-link="outputs">输出</a>
       </nav>
-      <div class="lock-state" id="lockState" role="status">上传简历后解锁</div>
+      <div class="lock-state" id="lockState" role="status">等待简历</div>
     </header>
 
     <main id="deck" class="deck is-locked" tabindex="-1">
@@ -32,17 +32,17 @@
           <div class="intro-panel reveal">
             <p class="section-label">第一步</p>
             <h1 id="uploadTitle">上传材料，启动成长诊断</h1>
-            <p class="lede">简历是必传材料。上传后页面会解锁向下浏览，生成诊断必须由 Legato 后端完成真实解析。</p>
+            <p class="lede">简历是必传材料。生成诊断必须由 Legato 后端完成真实解析。</p>
             <div class="recommendation-box" aria-label="推荐岗位说明">
               <div>
                 <span>推荐方式</span>
                 <strong>系统自动推荐岗位</strong>
               </div>
-              <p>首页只负责上传材料。上传后，推荐岗位和能力匹配度会在后续结果页展示，其中非真实解析生成的内容会标记为模拟数据。</p>
+              <p>首页只负责上传材料。推荐岗位和能力匹配度会在后续结果页展示，其中非真实解析生成的内容会标记为模拟数据。</p>
             </div>
             <div class="unlock-hint" id="unlockHint">
               <span class="pulse-line" aria-hidden="true"></span>
-              <span>等待简历上传</span>
+              <span>等待简历</span>
             </div>
           </div>
 
@@ -79,28 +79,25 @@
 
             <div class="form-actions">
               <button class="primary-action" id="runButton" type="submit" disabled>生成诊断</button>
-              <p id="uploadMessage" class="form-message">上传简历后可以继续浏览页面。</p>
+              <p id="uploadMessage" class="form-message">请上传简历开始诊断。</p>
             </div>
           </form>
         </div>
       </section>
 
-      <section class="slide module-slide is-module-locked" id="profile" data-step="profile" data-lock-message="能力画像 agent 完成后解锁" aria-labelledby="profileTitle">
+      <section class="slide module-slide is-module-locked" id="profile" data-step="profile" data-lock-message="能力画像 agent 正在生成" aria-labelledby="profileTitle">
         <div class="slide-shell profile-layout">
           <div class="section-copy reveal">
             <p class="section-label">能力画像</p>
-            <h2 id="profileTitle">四维分值与雷达图数据</h2>
-            <p>基础信息来自 Legato 解析；当前四维分值、雷达图数据和 TOP5 匹配岗位仍为模拟数据。</p>
+            <h2 id="profileTitle">基础信息与六维能力画像</h2>
+            <p>基础信息来自 Legato 解析；六维雷达由奖项、证书和经历的 Level、Impact 与六维分布聚合生成。</p>
           </div>
 
           <div class="profile-grid">
             <section class="data-panel reveal" aria-labelledby="basicInfoTitle">
               <div class="panel-heading">
                 <h3 id="basicInfoTitle">基础信息</h3>
-                <div class="pill-row">
-                  <span class="status-pill is-real">Legato 解析</span>
-                  <span class="status-pill is-warning" id="basicInfoDataState">等待结构化数据</span>
-                </div>
+                <span class="status-pill is-warning" id="basicInfoDataState">等待结构化数据</span>
               </div>
               <div class="basic-list" id="basicInfo"></div>
               <div class="source-list" id="sourceList" aria-label="上传材料"></div>
@@ -108,12 +105,13 @@
 
             <section class="data-panel reveal radar-panel" aria-labelledby="radarTitle">
               <div class="panel-heading">
-                <h3 id="radarTitle">雷达图</h3>
-                <span class="status-pill is-simulated">模拟数据</span>
+                <h3 id="radarTitle">六维能力雷达</h3>
+                <span class="status-pill is-warning" id="radarDataState">等待 Benchmark</span>
               </div>
               <div class="radar-wrap">
                 <svg id="radarChart" viewBox="0 0 360 320" role="img" aria-labelledby="radarChartTitle radarChartDesc"></svg>
               </div>
+              <div class="radar-legend" id="radarLegend" aria-label="雷达图图例"></div>
               <p class="chart-caption" id="radarText"></p>
             </section>
           </div>
@@ -121,17 +119,14 @@
           <section class="resume-evidence reveal" aria-labelledby="resumeEvidenceTitle">
             <div class="panel-heading">
               <h3 id="resumeEvidenceTitle">奖项与经历证据</h3>
-              <div class="pill-row">
-                <span class="status-pill is-real">Resume workflow</span>
-                <span class="status-pill is-warning" id="resumeEvidenceState">等待结构化数据</span>
-              </div>
+              <span class="status-pill is-warning" id="resumeEvidenceState">等待结构化数据</span>
             </div>
             <div class="evidence-columns">
               <section class="evidence-lane" aria-labelledby="awardTitle">
                 <div class="evidence-lane-header">
                   <div>
                     <h4 id="awardTitle">奖项与证书</h4>
-                    <p>按选择性、结果和岗位相关性保守评分。</p>
+                    <p>Level 快速给出，Impact 等待 Benchmark。</p>
                   </div>
                   <span class="status-pill is-warning" id="awardDataState">等待奖项 agent</span>
                 </div>
@@ -141,7 +136,7 @@
                 <div class="evidence-lane-header">
                   <div>
                     <h4 id="experienceTitle">经历评分</h4>
-                    <p>沿用 Legato level，转为百分制展示。</p>
+                    <p>保留 hybrid level，再补充 impact。</p>
                   </div>
                   <span class="status-pill is-warning" id="experienceDataState">等待经历 agent</span>
                 </div>
@@ -152,7 +147,7 @@
 
           <section class="score-board reveal" aria-labelledby="scoreTitle">
             <div class="panel-heading">
-              <h3 id="scoreTitle">四维分值</h3>
+              <h3 id="scoreTitle">基础分值</h3>
               <span class="status-pill is-simulated">模拟数据</span>
             </div>
             <div id="dimensionScores" class="score-list"></div>
@@ -160,7 +155,7 @@
         </div>
       </section>
 
-      <section class="slide module-slide is-module-locked" id="matching" data-step="matching" data-lock-message="岗位匹配 agent 完成后解锁" aria-labelledby="matchingTitle">
+      <section class="slide module-slide is-module-locked" id="matching" data-step="matching" data-lock-message="岗位匹配 agent 正在生成" aria-labelledby="matchingTitle">
         <div class="slide-shell matching-layout">
           <div class="section-copy reveal">
             <p class="section-label">岗位能力匹配</p>
@@ -207,7 +202,7 @@
         </div>
       </section>
 
-      <section class="slide module-slide is-module-locked" id="path" data-step="path" data-lock-message="路径规划 agent 完成后解锁" aria-labelledby="pathTitle">
+      <section class="slide module-slide is-module-locked" id="path" data-step="path" data-lock-message="路径规划 agent 正在生成" aria-labelledby="pathTitle">
         <div class="slide-shell path-layout">
           <div class="section-copy reveal">
             <p class="section-label">路径规划</p>
@@ -218,7 +213,7 @@
         </div>
       </section>
 
-      <section class="slide module-slide is-module-locked" id="outputs" data-step="outputs" data-lock-message="结构化输出整理完成后解锁" aria-labelledby="outputsTitle">
+      <section class="slide module-slide is-module-locked" id="outputs" data-step="outputs" data-lock-message="结构化输出正在整理" aria-labelledby="outputsTitle">
         <div class="slide-shell outputs-layout">
           <div class="section-copy reveal">
             <p class="section-label">结构化输出</p>

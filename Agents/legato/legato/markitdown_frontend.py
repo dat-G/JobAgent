@@ -15,7 +15,7 @@ class MarkItDownFrontend:
     def convert(self, source: str | Path) -> MarkdownDocument:
         path = Path(source)
         if not path.exists():
-            raise FileNotFoundError(str(path))
+            raise FileNotFoundError(f"source file not found: {path}")
 
         if path.suffix.lower() in {".md", ".markdown"}:
             return MarkdownDocument(
@@ -36,4 +36,3 @@ class MarkItDownFrontend:
         markdown = getattr(result, "text_content", None) or getattr(result, "markdown", "")
         title = getattr(result, "title", None)
         return MarkdownDocument(markdown=str(markdown), title=title, source_path=str(path))
-

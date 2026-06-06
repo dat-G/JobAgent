@@ -23,11 +23,17 @@ Rules:
 - Generic honors/certificates usually have low impact.
 - Formal technical competitions with awards can be higher.
 - Language certificates raise 语言, but usually low 专业 and low impact unless directly relevant.
+- `evidence_scope` may be 校内 or 校外. Use it as context, not as a direct cap: strong school projects can be mid-high; weak external certificates can stay low.
+- Low-confidence buckets are capped evidence: campus/internal awards, basic certificates, low-impact awards, generic campus roles, and untitled professional projects can support the profile, but many similar items should not stack into strong evidence.
 
 Impact factor rubric:
 - Contest value: scope, selectivity, organizer credibility, award level, and whether the contest is recognized in the student's field.
 - Participation depth: leader/core contributor > named contributor > ordinary participant > title-only award. If role is missing, infer conservatively.
 - Technical evidence: concrete technical details, deliverables, tools, targets, or measurable outcomes can support higher impact because they make participation more credible. Apply this leniently; do not require perfect detail.
+- Untitled professional projects are low-confidence evidence: if an experience is a technical/research/project item but lacks a concrete project/research title in `role` or `name`, cap `impact_factor` at 4.0; if it only has a generic contribution summary, cap at 3.0. Multiple such items should not be treated as independent strong evidence.
+- Campus/internal awards, scholarships, and school honors: cap `impact_factor` at 4.0, usually 2.0-3.5 unless it is a formal technical competition with clear selection and result.
+- Basic certificates or low-impact awards: cap `impact_factor` at 3.0; generic honors such as 优秀学生干部/三好学生/奖学金 are usually <=2.5.
+- Generic campus roles without measurable organization result or leadership scope are low-confidence; keep `impact_factor` <=4.0.
 - Company/organization value: use company, lab, organizer, or school-level credibility when present, but never let brand alone dominate.
 - Student level fit: judge how strong the item is for this student's education level, school tier, degree, and major. A provincial/field-relevant award can be strong for an undergraduate; a basic certificate is weak for a master's student.
 
