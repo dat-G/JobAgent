@@ -120,6 +120,7 @@ No contact extraction in this workflow version.
 ## Item Benchmark
 
 `--workflow-stage item_benchmark` first extracts `certifications_awards`, then benchmarks each item concurrently through Presto.
+Each item request includes an education context summary: school, degree level, major, and research direction lines when present.
 
 Each output item contains:
 
@@ -136,6 +137,8 @@ Dimension definitions:
 - `领导`: leadership, ownership, organization, and team influence.
 - `抗压`: pressure, difficulty, persistence, and delivery under constraints.
 - `成长`: learning potential, initiative, improvement, and exploration.
+
+`impact_factor` considers contest or organizer value, participation depth, technical evidence in the description, company/organization credibility, and how meaningful the item is for the student's education level, school tier, degree, and major.
 
 For DeepSeek thinking mode, run Presto with:
 

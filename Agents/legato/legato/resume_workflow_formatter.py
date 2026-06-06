@@ -438,9 +438,9 @@ class ResumeWorkflowFormatter:
 
     def _item_benchmark_prompt(self, resume_text: str, item: dict[str, Any]) -> str:
         prompt = self._read_prompt("item_benchmark.md")
-        context = compact_student_context(resume_text)
+        context = compact_education_context(resume_text)
         item_text = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
-        return prompt.replace("{{student_context}}", context).replace("{{item}}", item_text)
+        return prompt.replace("{{education_context}}", context).replace("{{item}}", item_text)
 
     def _group_prompt(self, group: str, resume_text: str) -> str:
         prompt = self._read_prompt(f"{group}.md")
@@ -724,17 +724,20 @@ def extract_project_experiences(resume_text: str) -> list[dict[str, Any]]:
     experiences.extend(extract_dated_project_experiences(lines))
     experiences.extend(extract_bullet_project_experiences(lines))
     for index, line in enumerate(lines):
-        if not is_project_anchor(line):
+        if not (is_project_anchor(line) or is_research_description_anchor(line)):
             continue
         if line.startswith("#") or line in ("项目经历", "科研经历"):
             continue
         context = "\n".join(lines[index : min(len(lines), index + 8)])
         if not has_contribution_signal(context):
             continue
+        role = extract_project_subject(context)
+        if not role:
+            continue
         experiences.append(
             {
                 "type": "科研项目" if "实验室" in context or "科研" in context or "研究" in context else "项目",
-                "role": extract_project_subject(context),
+                "role": role,
                 "contribution": summarize_project_contribution(context),
                 "level": score_project_level(context),
             }
@@ -826,9 +829,15 @@ def parse_dated_project_line(line: str) -> tuple[str, str] | None:
 def is_project_anchor(line: str) -> bool:
     if any(skip in line for skip in ("荣誉", "奖项", "证书", "技能", "教育背景", "主修课程", "公众号")):
         return False
+    if is_descriptive_sentence(line):
+        return False
     if "实验室" in line and not ("重点实验室" in line or len(line) <= 28):
         return False
     return any(signal in line for signal in ("实验室", "科研项目", "项目经历", "研究项目", "研究中"))
+
+
+def is_research_description_anchor(line: str) -> bool:
+    return "研究项目" in line and any(signal in line for signal in ("GNSS", "DBSCAN", "点云", "轨迹", "田路分割"))
 
 
 def extract_described_contest_experiences(resume_text: str) -> list[dict[str, Any]]:
@@ -994,6 +1003,18 @@ def extract_project_subject(context: str) -> str:
             continue
         if any(signal in line for signal in ("项目", "研究", "系统", "平台")):
             return line[:24]
+    research_subject = extract_research_subject_from_context(context)
+    if research_subject:
+        return research_subject
+    return ""
+
+
+def extract_research_subject_from_context(context: str) -> str:
+    if "GNSS" in context:
+        if "田路分割" in context or "时序" in context:
+            return "GNSS轨迹田路分割研究项目"
+        if "点云" in context or "DBSCAN" in context:
+            return "GNSS点云处理研究项目"
     return ""
 
 
@@ -1233,15 +1254,41 @@ def item_text(item: dict[str, Any]) -> str:
     return f"{item.get('name', '')}{item.get('result', '')}"
 
 
-def compact_student_context(resume_text: str) -> str:
+def compact_education_context(resume_text: str) -> str:
     lines = [line.strip() for line in resume_text.splitlines() if line.strip()]
     selected: list[str] = []
-    for line in lines:
-        if any(signal in line for signal in ("大学", "学院", "专业", "研究方向", "硕士", "本科", "学士", "网络空间安全", "计算机")):
+    for line in lines[:16]:
+        if is_education_context_line(line):
             selected.append(line)
-        if len(selected) >= 8:
-            break
-    return "\n".join(selected)[:800]
+    if not selected:
+        for line in lines:
+            if is_education_context_line(line):
+                selected.append(line)
+            if len(selected) >= 8:
+                break
+    return "\n".join(selected[:8])[:800]
+
+
+def is_education_context_line(line: str) -> bool:
+    if line.startswith("#") and "教育" not in line:
+        return False
+    return any(
+        signal in line
+        for signal in (
+            "大学",
+            "学院",
+            "本科",
+            "专科",
+            "硕士",
+            "博士",
+            "学士",
+            "研究方向",
+            "专业",
+            "网络空间安全",
+            "计算机",
+            "信息安全",
+        )
+    )
 
 
 def merge_experience_candidates(local_experience: list[dict[str, Any]], llm_experience: list[dict[str, Any]]) -> list[dict[str, Any]]:

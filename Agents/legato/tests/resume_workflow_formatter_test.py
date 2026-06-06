@@ -182,6 +182,20 @@ class ResumeWorkflowFormatterTest(unittest.TestCase):
         self.assertIn("libcoap / 模糊测试", roles)
         self.assertFalse(any(item["role"] == "" and "Shellcode免杀" in item["contribution"] for item in experience))
 
+    def test_build_local_experience_names_gnss_research_description(self) -> None:
+        experience = build_local_experience(
+            "\n".join(
+                [
+                    "于DBSCAN的GNSS点云分块处理方法,对于研究项目使用的数据集开发了一系列数据清洗模块。",
+                    "模型的农机GNSS轨迹的田路分割的研究项目,对学界前沿的非开源文章独立复现与分析。",
+                ]
+            ),
+            [],
+        )
+        self.assertEqual(len(experience), 1)
+        self.assertEqual(experience[0]["role"], "GNSS轨迹田路分割研究项目")
+        self.assertEqual(experience[0]["contribution"], "数据清洗与研究方法实现")
+
     def test_contest_and_low_value_honor_scores_are_calibrated(self) -> None:
         self.assertEqual(score_contest_level("2024年第16届华中杯大学生数学建模挑战赛", "二等奖"), 7)
         self.assertEqual(score_contest_level("2024年第五届华数杯全国大学生数学建模竞赛", "三等奖"), 7)
@@ -212,6 +226,24 @@ class ResumeWorkflowFormatterTest(unittest.TestCase):
         self.assertAlmostEqual(sum(benchmark["scores"]), 1.0, places=3)
         self.assertEqual(max(range(6), key=lambda index: benchmark["scores"][index]), 2)
         self.assertGreaterEqual(benchmark["impact_factor"], 6)
+
+    def test_item_benchmark_prompt_includes_education_context(self) -> None:
+        formatter = ResumeWorkflowFormatter()
+        prompt = formatter._item_benchmark_prompt(
+            "\n".join(
+                [
+                    "桂林电子科技大学 - 网络空间安全 - 硕士 2025-09 ~ 至今",
+                    "杭州电子科技大学信息工程学院 - 计算机科学与技术 - 学士 2020-09 ~ 2024-06",
+                    "2023年ISCC第20届信息安全与对抗技术竞赛 全国二等奖",
+                ]
+            ),
+            {"name": "2023年ISCC第20届信息安全与对抗技术竞赛", "result": "全国二等奖"},
+        )
+        self.assertIn("Education context:", prompt)
+        self.assertIn("桂林电子科技大学", prompt)
+        self.assertIn("网络空间安全", prompt)
+        self.assertIn("硕士", prompt)
+        self.assertNotIn("{{education_context}}", prompt)
 
     def test_school_tags_match_ruanke_cache(self) -> None:
         tags = school_tags_for("东北农业大学 · 本科")

@@ -38,6 +38,7 @@
 html {
   height: 100%;
   scroll-behavior: smooth;
+  scrollbar-width: none;
 }
 
 body {
@@ -50,6 +51,12 @@ body {
   font-size: 16px;
   line-height: 1.55;
   letter-spacing: 0;
+  scrollbar-width: none;
+}
+
+html::-webkit-scrollbar,
+body::-webkit-scrollbar {
+  display: none;
 }
 
 button,
@@ -123,14 +130,44 @@ a {
 }
 
 .step-nav {
+  --nav-indicator-x: 0px;
+  --nav-indicator-w: 48px;
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
   flex: 1;
   justify-content: center;
+  scrollbar-width: none;
+}
+
+.step-nav::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  z-index: 0;
+  width: var(--nav-indicator-w);
+  height: 38px;
+  border-radius: 999px;
+  background:
+    radial-gradient(circle at 22% 24%, oklch(1 0 0 / 0.58), transparent 28%),
+    color-mix(in oklch, var(--primary-soft) 88%, var(--bg));
+  transform: translate3d(var(--nav-indicator-x), -50%, 0);
+  transition:
+    transform 460ms cubic-bezier(0.16, 1, 0.3, 1),
+    width 460ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-radius 460ms var(--ease);
+  will-change: transform, width;
+}
+
+.step-nav::-webkit-scrollbar {
+  display: none;
 }
 
 .step-dot {
+  position: relative;
+  z-index: 1;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -140,15 +177,22 @@ a {
   padding: 0 12px;
   color: var(--muted);
   font-size: 0.84rem;
+  font-weight: 700;
   text-decoration: none;
-  transition: background 180ms var(--ease), color 180ms var(--ease);
+  transition: background 200ms var(--ease), color 200ms var(--ease), transform 200ms var(--ease);
 }
 
 .step-dot:hover,
-.step-dot:focus-visible,
-.step-dot.is-active {
+.step-dot:focus-visible {
   background: var(--primary-soft);
   color: var(--primary-strong);
+  outline: none;
+}
+
+.step-dot.is-active {
+  background: transparent;
+  color: var(--primary-strong);
+  transform: translateY(-1px);
   outline: none;
 }
 
@@ -166,8 +210,12 @@ a {
 .deck {
   height: 100svh;
   overflow-y: auto;
-  scroll-snap-type: y mandatory;
   scroll-behavior: smooth;
+  scrollbar-width: none;
+}
+
+.deck::-webkit-scrollbar {
+  display: none;
 }
 
 .deck.is-locked {
@@ -177,8 +225,6 @@ a {
 .slide {
   position: relative;
   min-height: 100svh;
-  scroll-snap-align: start;
-  scroll-snap-stop: always;
   padding: calc(var(--topbar-h) + 36px) 28px calc(var(--dock-h) + 42px);
   display: grid;
   place-items: center;
@@ -199,7 +245,7 @@ a {
 }
 
 .module-slide:not(.is-module-locked) .slide-shell {
-  animation: moduleContentIn 300ms var(--ease) both;
+  animation: moduleContentIn 520ms var(--ease) both;
 }
 
 .module-slide.is-module-locked::before,
@@ -800,6 +846,26 @@ legend {
   font-variant-numeric: tabular-nums;
 }
 
+.scroll-gradient {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 29;
+  height: calc(var(--dock-h) + 96px);
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(10px);
+  background:
+    linear-gradient(0deg, var(--bg) 0%, color-mix(in oklch, var(--bg) 96%, transparent) 54%, color-mix(in oklch, var(--bg) 70%, transparent) 78%, transparent 100%);
+  transition: opacity 420ms var(--ease), transform 420ms var(--ease);
+}
+
+.scroll-gradient.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
 .panel-heading {
   display: flex;
   align-items: center;
@@ -850,6 +916,94 @@ legend {
   align-items: center;
   color: var(--muted);
   font-size: 0.88rem;
+}
+
+.identity-loading,
+.education-loading,
+.evidence-loading {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.identity-loading::before,
+.education-loading::before,
+.evidence-loading::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(100deg, transparent 0 34%, oklch(1 0 0 / 0.7) 48%, transparent 62%);
+  animation: skeletonSweep 1400ms var(--ease) infinite;
+}
+
+.identity-loading {
+  min-height: 64px;
+  display: grid;
+  grid-template-columns: 18px minmax(92px, 0.42fr) minmax(72px, 0.32fr) minmax(56px, 0.22fr);
+  align-items: center;
+  gap: 12px;
+  padding: 14px;
+}
+
+.education-loading {
+  min-height: 150px;
+  display: grid;
+  align-content: center;
+  gap: 14px;
+  padding: 22px 24px;
+  border: 1px solid var(--line);
+  background: linear-gradient(180deg, var(--surface), var(--bg));
+}
+
+.evidence-loading {
+  min-height: 96px;
+  display: grid;
+  align-content: center;
+  gap: 12px;
+  padding: 18px;
+  border: 1px dashed var(--line);
+}
+
+.award-loading,
+.hybrid-loading {
+  border-style: solid;
+}
+
+.award-loading.is-subtle,
+.hybrid-loading.is-subtle {
+  min-height: 76px;
+  opacity: 0.58;
+}
+
+.loading-dot,
+.loading-line {
+  position: relative;
+  z-index: 1;
+  display: block;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--line) 72%, var(--surface-3));
+}
+
+.loading-dot {
+  width: 14px;
+  height: 14px;
+  background: var(--primary-soft);
+  box-shadow: inset 0 0 0 4px color-mix(in oklch, var(--primary) 34%, transparent);
+  animation: loadingDot 1100ms var(--ease) infinite;
+}
+
+.loading-line {
+  height: 12px;
+}
+
+.loading-line.is-wide {
+  width: min(100%, 220px);
+}
+
+.loading-line.is-short {
+  width: min(65%, 140px);
 }
 
 .education-stack {
@@ -1064,12 +1218,37 @@ legend {
 }
 
 .evidence-item {
+  position: relative;
   min-width: 0;
   padding: 14px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: var(--surface);
   animation: evidenceIn 240ms var(--ease) both;
+  overflow: hidden;
+}
+
+.evidence-list.is-loading {
+  position: relative;
+}
+
+.evidence-item.is-loading,
+.evidence-item.is-refining {
+  border-color: color-mix(in oklch, var(--warning) 44%, var(--line));
+}
+
+.evidence-item.is-loading::after,
+.evidence-item.is-refining::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.46;
+  background:
+    linear-gradient(100deg, transparent 0 28%, oklch(1 0 0 / 0.82) 42%, transparent 56%),
+    linear-gradient(180deg, oklch(0.96 0.025 86 / 0.52), oklch(0.96 0.025 86 / 0.18));
+  transform: translateX(-100%);
+  animation: skeletonSweep 1500ms var(--ease) infinite;
 }
 
 .evidence-item header {
@@ -1569,8 +1748,8 @@ td {
 
 .js-ready .reveal {
   opacity: 0.001;
-  transform: translateY(16px);
-  transition: opacity 420ms var(--ease), transform 420ms var(--ease);
+  transform: translateY(18px);
+  transition: opacity 680ms var(--ease), transform 680ms var(--ease);
 }
 
 .js-ready .reveal.is-visible {
@@ -1632,11 +1811,24 @@ td {
 @keyframes moduleContentIn {
   from {
     opacity: 0.001;
-    transform: translateY(10px);
+    transform: translateY(14px);
   }
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes skeletonSweep {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes loadingDot {
+  50% {
+    transform: scale(0.72);
+    opacity: 0.72;
   }
 }
 

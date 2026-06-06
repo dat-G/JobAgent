@@ -10,12 +10,15 @@ const uploadMessage = document.querySelector("#uploadMessage");
 const lockState = document.querySelector("#lockState");
 const unlockHint = document.querySelector("#unlockHint");
 const toast = document.querySelector("#toast");
+const scrollGradient = document.querySelector("#scrollGradient");
 
 let diagnosis = null;
 let resumeReady = false;
 let toastTimer = 0;
 let diagnosisEvents = null;
 let firstResultRevealed = false;
+let activeStep = "upload";
+let scrollSyncFrame = 0;
 
 const agentSteps = ["resume_agent", "transcript_agent", "profile", "matching", "path", "outputs"];
 const moduleLocks = {
@@ -63,6 +66,8 @@ init();
 async function init() {
   setupRevealObserver();
   setupStepObserver();
+  setupScrollGradient();
+  setupNavIndicator();
   setupUploads();
   setupExports();
   resetResultModules();
@@ -83,12 +88,15 @@ function setupStepObserver() {
     const visible = entries.filter((entry) => entry.isIntersecting).sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
     if (!visible) return;
     const step = visible.target.dataset.step;
-    document.querySelectorAll("[data-step-link]").forEach((link) => {
-      link.classList.toggle("is-active", link.dataset.stepLink === step);
-    });
+    setActiveStep(step || activeStep);
   }, { root: deck, threshold: [0.45, 0.65] });
 
   document.querySelectorAll("[data-step]").forEach((section) => observer.observe(section));
+}
+
+function setupNavIndicator() {
+  updateNavIndicator();
+  window.addEventListener("resize", updateNavIndicator);
 }
 
 function setupUploads() {
@@ -96,15 +104,16 @@ function setupUploads() {
     const link = event.target.closest("a[href]");
     if (!link) return;
     const target = link.getAttribute("href").replace("#", "");
+    event.preventDefault();
     if (!resumeReady && target !== "upload") {
-      event.preventDefault();
       showToast("请先上传简历，再查看后续诊断页面。");
       return;
     }
     if (moduleLocks[target] === false) {
-      event.preventDefault();
       showToast("该模块还在生成中，完成后会自动解锁。");
+      return;
     }
+    scrollToModule(target);
   });
 
   resumeInput.addEventListener("change", () => {
@@ -124,6 +133,25 @@ function setupUploads() {
   });
 }
 
+function setupScrollGradient() {
+  deck.addEventListener("scroll", handleDeckScroll, { passive: true });
+  window.addEventListener("resize", () => {
+    syncActiveStepFromScroll();
+    updateScrollGradient();
+    updateNavIndicator();
+  });
+  updateScrollGradient();
+}
+
+function handleDeckScroll() {
+  if (scrollSyncFrame) return;
+  scrollSyncFrame = window.requestAnimationFrame(() => {
+    scrollSyncFrame = 0;
+    syncActiveStepFromScroll();
+    updateScrollGradient();
+  });
+}
+
 function updateFileState(input, stateId, dropId, fallback) {
   const state = document.querySelector(`#${stateId}`);
   const drop = document.querySelector(`#${dropId}`);
@@ -134,13 +162,54 @@ function updateFileState(input, stateId, dropId, fallback) {
 
 function unlockDeck() {
   deck.classList.remove("is-locked");
+  document.body.classList.add("can-scroll");
   unlockHint.classList.add("is-unlocked");
   lockState.classList.add("is-unlocked");
   lockState.textContent = "已解锁";
   runButton.disabled = false;
   uploadMessage.textContent = "已上传简历，可以继续浏览或生成诊断。";
   document.querySelector("#runDetail").textContent = "材料已就绪，点击生成诊断后会显示实时进度。";
+  updateScrollGradient();
   showToast("简历已上传，页面已解锁。");
+}
+
+function updateScrollGradient() {
+  if (!scrollGradient) return;
+  const canScroll = !deck.classList.contains("is-locked") && deck.scrollHeight > deck.clientHeight + 12;
+  const hasMoreBelow = deck.scrollTop + deck.clientHeight < deck.scrollHeight - 48;
+  scrollGradient.classList.toggle("is-visible", canScroll && hasMoreBelow);
+}
+
+function syncActiveStepFromScroll() {
+  const marker = deck.scrollTop + deck.clientHeight * 0.48;
+  let current = activeStep;
+  document.querySelectorAll("[data-step]").forEach((section) => {
+    if (section.offsetTop <= marker) current = section.dataset.step || current;
+  });
+  setActiveStep(current);
+}
+
+function setActiveStep(step) {
+  if (!step) return;
+  const changed = activeStep !== step;
+  activeStep = step;
+  document.querySelectorAll("[data-step-link]").forEach((link) => {
+    link.classList.toggle("is-active", link.dataset.stepLink === step);
+  });
+  updateNavIndicator({ scrollIntoView: changed });
+}
+
+function updateNavIndicator(options = {}) {
+  const nav = document.querySelector(".step-nav");
+  const activeLink = document.querySelector(`[data-step-link="${activeStep}"]`);
+  if (!nav || !activeLink) return;
+  const navRect = nav.getBoundingClientRect();
+  const linkRect = activeLink.getBoundingClientRect();
+  nav.style.setProperty("--nav-indicator-x", `${linkRect.left - navRect.left + nav.scrollLeft}px`);
+  nav.style.setProperty("--nav-indicator-w", `${linkRect.width}px`);
+  if (options.scrollIntoView) {
+    activeLink.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
 }
 
 async function runDiagnosis() {
@@ -355,14 +424,7 @@ function resetResultModules() {
   document.querySelector("#basicInfoDataState").textContent = "等待结构化数据";
   document.querySelector("#basicInfoDataState").className = "status-pill is-warning";
   document.querySelector("#sourceList").innerHTML = "";
-  document.querySelector("#resumeEvidenceState").textContent = "等待结构化数据";
-  document.querySelector("#resumeEvidenceState").className = "status-pill is-warning";
-  document.querySelector("#awardDataState").textContent = "等待奖项 agent";
-  document.querySelector("#awardDataState").className = "status-pill is-warning";
-  document.querySelector("#experienceDataState").textContent = "等待经历 agent";
-  document.querySelector("#experienceDataState").className = "status-pill is-warning";
-  document.querySelector("#awardList").innerHTML = "";
-  document.querySelector("#experienceList").innerHTML = "";
+  renderResumeEvidence(createDiagnosisShell().ability_profile);
   document.querySelector("#dimensionScores").innerHTML = "";
   document.querySelector("#radarChart").innerHTML = "";
   document.querySelector("#radarText").textContent = "";
@@ -395,6 +457,7 @@ function scrollToModule(module) {
   const target = document.querySelector(`#${module}`);
   if (!target) return;
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  setActiveStep(module);
   deck.scrollTo({ top: target.offsetTop, behavior: reducedMotion ? "auto" : "smooth" });
 }
 
@@ -440,9 +503,9 @@ function renderBasicInfo(data) {
           <strong>${escapeHTML(value)}</strong>
         </div>
       `).join("")}
-    </div>` : `<div class="identity-empty">等待 Resume workflow 返回姓名和出生年份。</div>`}
+    </div>` : renderIdentityLoading()}
     <div class="education-stack">
-      ${education.length ? education.map((item) => renderEducationCard(item)).join("") : ""}
+      ${education.length ? education.map((item) => renderEducationCard(item)).join("") : renderEducationLoading()}
     </div>
   `;
 
@@ -470,6 +533,27 @@ function renderBasicInfo(data) {
     const parseState = file.kind === "resume" || file.kind === "transcript" ? "Legato 解析" : "未解析";
     return `<span>${escapeHTML(file.kind)}：${escapeHTML(file.name)}，${size}，${parseState}</span>`;
   }).join("");
+}
+
+function renderIdentityLoading() {
+  return `
+    <div class="identity-loading" role="status" aria-label="正在等待身份信息返回">
+      <span class="loading-dot"></span>
+      <span class="loading-line is-wide"></span>
+      <span class="loading-line"></span>
+      <span class="loading-line is-short"></span>
+    </div>
+  `;
+}
+
+function renderEducationLoading() {
+  return `
+    <article class="education-loading" aria-hidden="true">
+      <span class="loading-line is-wide"></span>
+      <span class="loading-line"></span>
+      <span class="loading-line is-short"></span>
+    </article>
+  `;
 }
 
 function normalizedEducation(profile) {
@@ -574,9 +658,13 @@ function renderResumeEvidence(profile) {
   const experiences = profile.experiences || [];
   const awardStatus = profile.awards_status || (awards.length ? "ready" : "waiting");
   const experienceStatus = profile.experiences_status || (experiences.length ? "ready" : "waiting");
+  const isAwardLoading = isEvidenceLoadingStatus(awardStatus);
+  const isExperienceRefining = experienceStatus === "refining";
 
   setEvidencePill("#awardDataState", awardStatus, {
     waiting: "等待奖项 agent",
+    loading: "奖项解析中",
+    refining: "奖项解析中",
     ready: "Legato 已返回",
     empty: "未识别到奖项",
     failed: "奖项解析失败",
@@ -585,6 +673,7 @@ function renderResumeEvidence(profile) {
   setEvidencePill("#experienceDataState", experienceStatus, {
     waiting: "等待经历 agent",
     ready: "Legato 已返回",
+    refining: "hybrid 分析中",
     empty: "未识别到经历",
     failed: "经历解析失败",
     mock: "模拟数据"
@@ -600,20 +689,24 @@ function renderResumeEvidence(profile) {
   });
 
   const awardList = document.querySelector("#awardList");
+  awardList.classList.toggle("is-loading", isAwardLoading);
+  const awardSkeleton = isAwardLoading && awards.length === 0 ? renderAwardLoadingSkeleton(false) : "";
   awardList.innerHTML = awards.length
-    ? awards.map((item) => renderAwardItem(item)).join("")
-    : renderEvidenceEmpty(awardStatus, "等待 Resume workflow 返回奖项与证书。", "Legato 未识别到奖项或证书。", "奖项 agent 未返回可用结果。");
+    ? awards.map((item) => renderAwardItem(item, isAwardLoading)).join("")
+    : awardSkeleton || renderEvidenceEmpty(awardStatus, "等待 Resume workflow 返回奖项与证书。", "Legato 未识别到奖项或证书。", "奖项 agent 未返回可用结果。");
 
   const experienceList = document.querySelector("#experienceList");
+  experienceList.classList.toggle("is-refining", isExperienceRefining);
+  const hybridSkeleton = isExperienceRefining && experiences.length === 0 ? renderExperienceHybridSkeleton(false) : "";
   experienceList.innerHTML = experiences.length
-    ? experiences.map((item) => renderExperienceItem(item)).join("")
-    : renderEvidenceEmpty(experienceStatus, "等待 Resume workflow 返回经历评分。", "Legato 未识别到项目、实习或活动经历。", "经历 agent 未返回可用结果。");
+    ? experiences.map((item) => renderExperienceItem(item, isExperienceRefining)).join("")
+    : hybridSkeleton || renderEvidenceEmpty(experienceStatus, "等待 Resume workflow 返回经历评分。", "Legato 未识别到项目、实习或活动经历。", "经历 agent 未返回可用结果。");
 }
 
-function renderAwardItem(item) {
+function renderAwardItem(item, loading = false) {
   const score = safeScore(item.score);
   return `
-    <article class="evidence-item">
+    <article class="evidence-item${loading ? " is-loading" : ""}">
       <header>
         <div>
           <strong>${escapeHTML(item.name || "未命名奖项")}</strong>
@@ -634,12 +727,12 @@ function renderAwardItem(item) {
   `;
 }
 
-function renderExperienceItem(item) {
+function renderExperienceItem(item, refining = false) {
   const score = safeScore(item.score);
   const type = item.type || "经历";
   const role = item.role || "角色未解析";
   return `
-    <article class="evidence-item">
+    <article class="evidence-item${refining ? " is-refining" : ""}">
       <header>
         <div>
           <strong>${escapeHTML(type)} · ${escapeHTML(role)}</strong>
@@ -661,13 +754,42 @@ function renderExperienceItem(item) {
   `;
 }
 
+function renderAwardLoadingSkeleton(subtle) {
+  return `
+    <div class="evidence-loading award-loading ${subtle ? "is-subtle" : ""}" role="status" aria-label="奖项与证书正在结构化解析">
+      <span class="loading-line is-wide"></span>
+      <span class="loading-line"></span>
+      <span class="loading-line is-short"></span>
+    </div>
+  `;
+}
+
+function renderExperienceHybridSkeleton(subtle) {
+  return `
+    <div class="evidence-loading hybrid-loading ${subtle ? "is-subtle" : ""}" role="status" aria-label="experience_hybrid 正在进行高精度经历分析">
+      <span class="loading-line is-wide"></span>
+      <span class="loading-line"></span>
+      <span class="loading-line is-short"></span>
+    </div>
+  `;
+}
+
 function renderEvidenceEmpty(status, waitingText, emptyText, failedText) {
-  const text = status === "empty"
-    ? emptyText
-    : status === "failed"
-      ? failedText
-      : waitingText;
+  if (isEvidenceLoadingStatus(status)) {
+    return `
+      <div class="evidence-loading" role="status" aria-label="${escapeHTML(waitingText)}">
+        <span class="loading-line is-wide"></span>
+        <span class="loading-line"></span>
+        <span class="loading-line is-short"></span>
+      </div>
+    `;
+  }
+  const text = status === "failed" ? failedText : emptyText;
   return `<div class="evidence-empty">${escapeHTML(text)}</div>`;
+}
+
+function isEvidenceLoadingStatus(status) {
+  return ["waiting", "loading", "running", "refining"].includes(status || "waiting");
 }
 
 function evidenceOverallStatus(awardStatus, experienceStatus, awardCount, experienceCount) {

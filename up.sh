@@ -34,6 +34,69 @@ require_command() {
   fi
 }
 
+usage() {
+  cat >&2 <<EOF
+usage: $0 [up|down|restart|status|logs] [options]
+
+Options:
+  --cache, --presto-cache               enable Presto persistent response cache
+  --no-cache, --no-presto-cache         disable Presto persistent response cache
+  --clear-cache, --presto-clear-cache   clear Presto cache before starting
+  --cache-dir DIR, --presto-cache-dir DIR
+                                       set Presto persistent cache directory
+EOF
+}
+
+is_truthy() {
+  case "${1:-}" in
+    1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+COMMAND="up"
+if [[ $# -gt 0 && "$1" != --* ]]; then
+  COMMAND="$1"
+  shift
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --cache | --presto-cache)
+      PRESTO_CACHE=1
+      ;;
+    --no-cache | --no-presto-cache)
+      PRESTO_CACHE=0
+      ;;
+    --clear-cache | --presto-clear-cache)
+      PRESTO_CLEAR_CACHE=1
+      ;;
+    --cache-dir | --presto-cache-dir)
+      if [[ $# -lt 2 ]]; then
+        echo "$1 requires a directory" >&2
+        usage
+        exit 2
+      fi
+      PRESTO_CACHE_DIR="$2"
+      shift
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown option: $1" >&2
+      usage
+      exit 2
+      ;;
+  esac
+  shift
+done
+
 JOBAGENT_HOST="${JOBAGENT_HOST:-127.0.0.1}"
 JOBAGENT_PORT="${JOBAGENT_PORT:-8090}"
 JOBAGENT_ADDR="${JOBAGENT_ADDR:-$JOBAGENT_HOST:$JOBAGENT_PORT}"
@@ -63,8 +126,11 @@ PID_DIR="$(absolute_path "${PID_DIR:-$RUN_DIR/pids}")"
 BIN_DIR="$(absolute_path "${BIN_DIR:-$RUN_DIR/bin}")"
 GOCACHE="${GOCACHE:-/private/tmp/jobagent-gocache}"
 WAIT_TIMEOUT_SECONDS="${WAIT_TIMEOUT_SECONDS:-20}"
+PRESTO_CACHE="${PRESTO_CACHE:-1}"
+PRESTO_CLEAR_CACHE="${PRESTO_CLEAR_CACHE:-0}"
+PRESTO_CACHE_DIR="$(absolute_path "${PRESTO_CACHE_DIR:-$RUN_DIR/presto-cache}")"
 
-mkdir -p "$LOG_DIR" "$PID_DIR" "$BIN_DIR" "$GOCACHE"
+mkdir -p "$LOG_DIR" "$PID_DIR" "$BIN_DIR" "$GOCACHE" "$PRESTO_CACHE_DIR"
 
 health_ok() {
   local url="$1"
@@ -163,7 +229,11 @@ start_presto() {
     return 0
   fi
 
-  echo "starting presto on $PRESTO_ADDR"
+  if is_truthy "$PRESTO_CACHE"; then
+    echo "starting presto on $PRESTO_ADDR with cache $PRESTO_CACHE_DIR"
+  else
+    echo "starting presto on $PRESTO_ADDR without cache"
+  fi
   local bin_file="$BIN_DIR/presto"
   (
     cd "$PRESTO_DIR"
@@ -175,7 +245,14 @@ start_presto() {
     export PRESTO_ROUTE="${PRESTO_ROUTE:-legato.presto}"
     export PRESTO_ASYNC_RUN_TIMEOUT="${PRESTO_ASYNC_RUN_TIMEOUT:-10m}"
     export MODEL_ROUTING_CONFIG
-    start_detached "$log_file" "$pid_file" "$bin_file"
+    local args=("$bin_file" "--addr" "$PRESTO_ADDR")
+    if is_truthy "$PRESTO_CACHE"; then
+      args+=("--cache" "--cache-dir" "$PRESTO_CACHE_DIR")
+    fi
+    if is_truthy "$PRESTO_CLEAR_CACHE"; then
+      args+=("--clear-cache")
+    fi
+    start_detached "$log_file" "$pid_file" "${args[@]}"
   )
   local pid
   pid="$(cat "$pid_file")"
@@ -265,6 +342,11 @@ up() {
   echo "jobagent health: $JOBAGENT_URL/api/healthz"
   if [[ "$START_PRESTO" == "1" || "$START_PRESTO" == "true" ]]; then
     echo "presto health: $PRESTO_URL/healthz"
+    if is_truthy "$PRESTO_CACHE"; then
+      echo "presto cache: enabled ($PRESTO_CACHE_DIR)"
+    else
+      echo "presto cache: disabled"
+    fi
   fi
   echo "logs: $LOG_DIR"
 }
@@ -287,7 +369,7 @@ status() {
   fi
 }
 
-case "${1:-up}" in
+case "$COMMAND" in
   up)
     up
     ;;
@@ -304,8 +386,11 @@ case "${1:-up}" in
   logs)
     tail -n 80 -f "$LOG_DIR"/*.log
     ;;
+  help)
+    usage
+    ;;
   *)
-    echo "usage: $0 [up|down|restart|status|logs]" >&2
+    usage
     exit 2
     ;;
 esac

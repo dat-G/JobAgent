@@ -24,8 +24,15 @@ Rules:
 - Formal technical competitions with awards can be higher.
 - Language certificates raise 语言, but usually low 专业 and low impact unless directly relevant.
 
-Student context:
-{{student_context}}
+Impact factor rubric:
+- Contest value: scope, selectivity, organizer credibility, award level, and whether the contest is recognized in the student's field.
+- Participation depth: leader/core contributor > named contributor > ordinary participant > title-only award. If role is missing, infer conservatively.
+- Technical evidence: concrete technical details, deliverables, tools, targets, or measurable outcomes can support higher impact because they make participation more credible. Apply this leniently; do not require perfect detail.
+- Company/organization value: use company, lab, organizer, or school-level credibility when present, but never let brand alone dominate.
+- Student level fit: judge how strong the item is for this student's education level, school tier, degree, and major. A provincial/field-relevant award can be strong for an undergraduate; a basic certificate is weak for a master's student.
+
+Education context:
+{{education_context}}
 
 Item:
 {{item}}

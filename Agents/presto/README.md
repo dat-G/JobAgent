@@ -10,6 +10,7 @@ Current scope:
 - local Echo provider for zero-config smoke tests
 - typed function tools
 - LLM and tool retry policy
+- optional persistent response cache
 - composable single-agent and multi-agent workflows
 - run events and SSE replay
 - stdlib-only HTTP server
@@ -31,6 +32,20 @@ export PRESTO_MODEL=...
 export PRESTO_ASYNC_RUN_TIMEOUT=10m
 go run ./cmd/presto
 ```
+
+Enable the persistent provider cache only when you want exact repeated requests to reuse stored responses:
+
+```sh
+go run ./cmd/presto --cache --cache-dir .presto-cache
+```
+
+The cache key is derived from the model request and provider scope. Entries are sharded by hash prefix, so lookup opens one known file instead of scanning the cache directory as it grows. Clear the cache during startup with:
+
+```sh
+go run ./cmd/presto --clear-cache --cache --cache-dir .presto-cache
+```
+
+The same behavior is available through `PRESTO_CACHE=true` and `PRESTO_CACHE_DIR=.presto-cache`.
 
 ## API
 

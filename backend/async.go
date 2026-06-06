@@ -344,6 +344,7 @@ func (s Server) runDiagnosisJob(job *DiagnosisJob) {
 		{stage: "experience", message: "简历经历 agent 正在整理项目、实习和活动经历"},
 	}
 	results := make(chan legatoStageResult, len(resumeStages)+1)
+	hybridResults := make(chan legatoStageResult, 1)
 	for _, stage := range resumeStages {
 		stage := stage
 		go func() {
@@ -355,6 +356,14 @@ func (s Server) runDiagnosisJob(job *DiagnosisJob) {
 			}
 		}()
 	}
+	go func() {
+		result, err := s.runResumeWorkflowStage(ctx, job, "experience_hybrid", "简历经历 hybrid agent 正在进行高精度经历分析")
+		hybridResults <- legatoStageResult{
+			target: "resume_experience_hybrid",
+			result: result,
+			err:    err,
+		}
+	}()
 	go func() {
 		result, err := s.runLegatoStage(ctx, job, "transcript", "transcript_agent", "成绩单解析 agent 正在处理")
 		results <- legatoStageResult{
@@ -393,7 +402,7 @@ func (s Server) runDiagnosisJob(job *DiagnosisJob) {
 				applyResumeWorkflowCertifications(&diagnosis, stage.result)
 				resumeParsed = true
 			case "resume_experience":
-				applyResumeWorkflowExperience(&diagnosis, stage.result)
+				applyResumeWorkflowExperience(&diagnosis, stage.result, false)
 				resumeParsed = true
 			case "transcript":
 				applyTranscriptLegato(&diagnosis, stage.result)
@@ -402,7 +411,7 @@ func (s Server) runDiagnosisJob(job *DiagnosisJob) {
 			job.Emit(DiagnosisEvent{
 				Type:    "step.update",
 				Step:    "profile",
-				Status:  "done",
+				Status:  "running",
 				Message: "画像 agent 已收到" + legatoTargetLabel(stage.target) + "结果",
 				Data:    map[string]any{"ability_profile": diagnosis.AbilityProfile},
 			})
@@ -454,8 +463,8 @@ func (s Server) runDiagnosisJob(job *DiagnosisJob) {
 	job.Emit(DiagnosisEvent{
 		Type:    "step.update",
 		Step:    "profile",
-		Status:  "done",
-		Message: "能力画像已生成，可查看画像模块",
+		Status:  "running",
+		Message: "能力画像已可查看，experience_hybrid 仍在校准经历证据",
 		Data:    map[string]any{"ability_profile": diagnosis.AbilityProfile},
 	})
 
@@ -485,7 +494,66 @@ func (s Server) runDiagnosisJob(job *DiagnosisJob) {
 			Data:    map[string]any{"path_plan": diagnosis.PathPlan},
 		})
 	}()
-	downstream.Wait()
+	downstreamDone := make(chan struct{})
+	go func() {
+		downstream.Wait()
+		close(downstreamDone)
+	}()
+
+	hybridPending := true
+	downstreamPending := true
+	for hybridPending || downstreamPending {
+		select {
+		case stage := <-hybridResults:
+			hybridPending = false
+			if stage.err != nil {
+				message := legatoTargetLabel(stage.target) + "失败：" + stage.err.Error()
+				log.Printf("diagnosis %s legato %s failed: %v", job.ID, stage.target, stage.err)
+				optionalWarnings = append(optionalWarnings, message)
+				if len(diagnosis.AbilityProfile.Experiences) == 0 {
+					diagnosis.AbilityProfile.ExperiencesStatus = "failed"
+				} else {
+					diagnosis.AbilityProfile.ExperiencesStatus = "ready"
+					diagnosis.ProductionLimitations = append(diagnosis.ProductionLimitations, "experience_hybrid 失败，已保留快速经历解析结果。")
+				}
+				job.SetDiagnosis(diagnosis)
+				job.Emit(DiagnosisEvent{
+					Type:    "step.update",
+					Step:    "profile",
+					Status:  "done",
+					Message: "experience_hybrid 未返回可用结果，已保留快速经历解析",
+					Data: map[string]any{
+						"warnings":               optionalWarnings,
+						"ability_profile":        diagnosis.AbilityProfile,
+						"production_limitations": diagnosis.ProductionLimitations,
+					},
+				})
+				continue
+			}
+			if stage.result != nil && stage.result.Data != nil {
+				applyResumeWorkflowExperience(&diagnosis, stage.result, true)
+				job.SetDiagnosis(diagnosis)
+				job.Emit(DiagnosisEvent{
+					Type:    "step.update",
+					Step:    "profile",
+					Status:  "done",
+					Message: "experience_hybrid 已返回，经历证据已替换为高精度结果",
+					Data:    map[string]any{"ability_profile": diagnosis.AbilityProfile},
+				})
+			}
+		case <-downstreamDone:
+			downstreamPending = false
+			downstreamDone = nil
+		case <-ctx.Done():
+			if hybridPending {
+				hybridPending = false
+				if len(diagnosis.AbilityProfile.Experiences) > 0 && diagnosis.AbilityProfile.ExperiencesStatus == "refining" {
+					diagnosis.AbilityProfile.ExperiencesStatus = "ready"
+				}
+			}
+			downstreamPending = false
+		}
+	}
 
 	job.Emit(DiagnosisEvent{Type: "step.update", Step: "outputs", Status: "running", Message: "导出 agent 正在整理结构化输出"})
 	shortPause()
@@ -870,6 +938,8 @@ func legatoTargetLabel(target string) string {
 		return "简历证书奖项"
 	case "resume_experience":
 		return "简历经历"
+	case "resume_experience_hybrid":
+		return "简历经历 hybrid"
 	case "transcript":
 		return "成绩单解析"
 	default:
@@ -992,26 +1062,43 @@ func applyResumeWorkflowCertifications(diagnosis *Diagnosis, result *LegatoEnvel
 	applyLegatoWarnings(diagnosis, "简历证书奖项", result)
 }
 
-func applyResumeWorkflowExperience(diagnosis *Diagnosis, result *LegatoEnvelope) {
+func applyResumeWorkflowExperience(diagnosis *Diagnosis, result *LegatoEnvelope, hybrid bool) {
 	items := objectArray(result.Data["experience"])
 	diagnosis.AbilityProfile.Experiences = buildExperienceItems(items)
 	if len(diagnosis.AbilityProfile.Experiences) == 0 {
-		diagnosis.AbilityProfile.ExperiencesStatus = "empty"
+		if hybrid {
+			diagnosis.AbilityProfile.ExperiencesStatus = "empty"
+		} else {
+			diagnosis.AbilityProfile.ExperiencesStatus = "refining"
+		}
 	} else {
-		diagnosis.AbilityProfile.ExperiencesStatus = "ready"
+		if hybrid {
+			diagnosis.AbilityProfile.ExperiencesStatus = "ready"
+		} else {
+			diagnosis.AbilityProfile.ExperiencesStatus = "refining"
+		}
 	}
 	summary := fmt.Sprintf("Resume workflow 已解析经历 %d 条。", len(items))
+	category := "Legato 简历经历"
+	signal := "项目、实习和活动经历已结构化"
+	warningLabel := "简历经历"
+	if hybrid {
+		category = "Legato 简历经历 hybrid"
+		signal = "高精度经历分析已替换快速结果"
+		warningLabel = "简历经历 hybrid"
+		summary = fmt.Sprintf("experience_hybrid 已解析经历 %d 条。", len(items))
+	}
 	if len(items) > 0 {
 		if contribution := stringValue(items[0]["contribution"]); contribution != "" {
 			summary += " 代表经历：" + contribution + "。"
 		}
 	}
 	diagnosis.AbilityProfile.EvidenceSummary = append(diagnosis.AbilityProfile.EvidenceSummary, EvidenceItem{
-		Category: "Legato 简历经历",
+		Category: category,
 		Summary:  summary,
-		Signal:   "项目、实习和活动经历已结构化",
+		Signal:   signal,
 	})
-	applyLegatoWarnings(diagnosis, "简历经历", result)
+	applyLegatoWarnings(diagnosis, warningLabel, result)
 }
 
 func markResumeEvidenceStatus(diagnosis *Diagnosis, target string, status string) {
@@ -1020,6 +1107,10 @@ func markResumeEvidenceStatus(diagnosis *Diagnosis, target string, status string
 		diagnosis.AbilityProfile.AwardsStatus = status
 	case "resume_experience":
 		diagnosis.AbilityProfile.ExperiencesStatus = status
+	case "resume_experience_hybrid":
+		if len(diagnosis.AbilityProfile.Experiences) == 0 {
+			diagnosis.AbilityProfile.ExperiencesStatus = status
+		}
 	}
 }
 
