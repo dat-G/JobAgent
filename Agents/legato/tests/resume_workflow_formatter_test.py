@@ -7,6 +7,8 @@ from legato.resume_workflow_formatter import (
     build_local_experience,
     enrich_education,
     enrich_education_school_tags,
+    local_item_benchmark,
+    normalize_item_benchmark,
     repair_orphan_certification_scores,
     school_tags_for,
     score_contest_level,
@@ -158,12 +160,58 @@ class ResumeWorkflowFormatterTest(unittest.TestCase):
         self.assertIn("MCP标注", experience[0]["contribution"])
         self.assertEqual(experience[0]["level"], 4)
 
+    def test_build_local_experience_recalls_security_project_bullets(self) -> None:
+        experience = build_local_experience(
+            "\n".join(
+                [
+                    "科研经历",
+                    "基于拓扑结构构建与语义修复机制的RPKI验证器测试 - 参与者 2025-10 ~ 2026-03",
+                    "· 完成了基于CFG生成各种不同结构的RPKI证书仓库实验",
+                    "项目经历",
+                    "Shellcode免杀研究 2024-02 ~ 2024-05",
+                    "自动化免杀平台设计与实现 2024-05 ~ 2024-07",
+                    "· 对Tenda FH451路由器进行漏洞挖掘,发现多个栈溢出漏洞,可实现远程RCE,获得CVE-2025-45513",
+                    "· 对libcoap进行模糊测试,发现条件竞争情况下的UAF漏洞,可实现远程DoS,已上报",
+                ]
+            ),
+            [],
+        )
+        roles = {item["role"] for item in experience}
+        self.assertIn("基于拓扑结构构建与语义修复机制的RPKI验证器测试 / 参与者", roles)
+        self.assertIn("Tenda FH451路由器 / 漏洞挖掘", roles)
+        self.assertIn("libcoap / 模糊测试", roles)
+        self.assertFalse(any(item["role"] == "" and "Shellcode免杀" in item["contribution"] for item in experience))
+
     def test_contest_and_low_value_honor_scores_are_calibrated(self) -> None:
         self.assertEqual(score_contest_level("2024年第16届华中杯大学生数学建模挑战赛", "二等奖"), 7)
         self.assertEqual(score_contest_level("2024年第五届华数杯全国大学生数学建模竞赛", "三等奖"), 7)
         self.assertEqual(score_contest_level("校级软件开发项目", "负责核心模块开发"), 5)
         self.assertEqual(score_contest_level("优秀学生干部", ""), 2)
         self.assertEqual(score_contest_level("全国计算机二级WPS证书", ""), 2)
+
+    def test_item_benchmark_normalizes_six_dimensional_scores(self) -> None:
+        benchmark = normalize_item_benchmark(
+            {"name": "2023年全国大学生信息安全竞赛华东南赛区", "result": "三等奖"},
+            {"scores": [7, 2, 9, 3, 8, 6], "impact_factor": 7},
+        )
+        self.assertEqual(benchmark["dimensions"], ["逻辑", "语言", "专业", "领导", "抗压", "成长"])
+        self.assertEqual(len(benchmark["scores"]), 6)
+        self.assertAlmostEqual(sum(benchmark["scores"]), 1.0, places=3)
+        self.assertEqual(max(range(6), key=lambda index: benchmark["scores"][index]), 2)
+        self.assertEqual(benchmark["impact_factor"], 7.0)
+
+    def test_item_benchmark_caps_low_value_certificate(self) -> None:
+        benchmark = normalize_item_benchmark(
+            {"name": "全国计算机二级WPS证书", "result": ""},
+            {"scores": [0.5, 0.5, 0.5, 0.5, 0.5, 0.5], "impact_factor": 7},
+        )
+        self.assertLessEqual(benchmark["impact_factor"], 2.5)
+
+    def test_local_item_benchmark_scores_major_related_security_item(self) -> None:
+        benchmark = local_item_benchmark({"name": "2023年ISCC第20届信息安全与对抗技术竞赛", "result": "全国二等奖"})
+        self.assertAlmostEqual(sum(benchmark["scores"]), 1.0, places=3)
+        self.assertEqual(max(range(6), key=lambda index: benchmark["scores"][index]), 2)
+        self.assertGreaterEqual(benchmark["impact_factor"], 6)
 
     def test_school_tags_match_ruanke_cache(self) -> None:
         tags = school_tags_for("东北农业大学 · 本科")

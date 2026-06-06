@@ -41,6 +41,7 @@ function createDiagnosisShell() {
     input_sources: [],
     ability_profile: {
       basic_info: {},
+      education: [],
       four_dim_scores: [],
       radar_data: [],
       evidence_summary: [],
@@ -145,6 +146,7 @@ function unlockDeck() {
 async function runDiagnosis() {
   runButton.disabled = true;
   runButton.textContent = "生成中";
+  document.querySelector(".generation-dock").classList.add("is-running");
   resetRunSteps();
   resetResultModules();
 
@@ -193,6 +195,7 @@ function resetRunSteps() {
 function setRunDone() {
   document.querySelector("#runStatus").textContent = "诊断已生成";
   document.querySelector("#runDetail").textContent = "所有模块已解锁，可以查看和导出结果。";
+  document.querySelector(".generation-dock").classList.remove("is-running");
   setRunProgress(100);
   runButton.disabled = false;
   runButton.textContent = "重新生成";
@@ -201,6 +204,7 @@ function setRunDone() {
 function setRunFailed(message) {
   document.querySelector("#runStatus").textContent = "诊断失败";
   document.querySelector("#runDetail").textContent = message || "Legato 必需解析失败，请检查材料或后端服务。";
+  document.querySelector(".generation-dock").classList.remove("is-running");
   runButton.disabled = false;
   runButton.textContent = "重新生成";
 }
@@ -376,7 +380,11 @@ function resetResultModules() {
 function unlockModule(module) {
   moduleLocks[module] = true;
   const section = document.querySelector(`#${module}`);
-  if (section) section.classList.remove("is-module-locked");
+  if (section && section.classList.contains("is-module-locked")) {
+    section.classList.add("is-unlocking");
+    section.classList.remove("is-module-locked");
+    window.setTimeout(() => section.classList.remove("is-unlocking"), 360);
+  }
   if (module === "profile" && !firstResultRevealed) {
     firstResultRevealed = true;
     window.setTimeout(() => scrollToModule("profile"), 80);
@@ -416,24 +424,36 @@ function renderDiagnosis(data) {
 function renderBasicInfo(data) {
   const info = data.ability_profile.basic_info;
   const basicInfo = document.querySelector("#basicInfo");
-  const fields = [
-    ["姓名", info.name],
-    ["学校", info.school],
-    ["专业", info.major],
-    ["学历", info.degree],
-    ["毕业年份", info.graduation_year],
-    ["推荐首选岗位", info.target_role]
+  const education = normalizedEducation(data.ability_profile);
+  const identityItems = [
+    ...(info.name ? [["姓名", info.name]] : []),
+    ...(info.sex ? [["性别", info.sex]] : []),
+    ...(info.birth_year ? [["出生年份", info.birth_year]] : [])
   ];
-  basicInfo.innerHTML = fields.map(([label, value]) => `
-    <div>
-      <dt>${escapeHTML(label)}</dt>
-      <dd>${escapeHTML(value || "未解析")}</dd>
-    </div>
-  `).join("");
+  const hasIdentity = identityItems.length > 0;
 
-  const parsedCount = fields.filter(([, value]) => String(value || "").trim()).length;
+  basicInfo.innerHTML = `
+    ${hasIdentity ? `<div class="identity-row">
+      ${identityItems.map(([label, value]) => `
+        <div class="identity-field">
+          <span>${escapeHTML(label)}</span>
+          <strong>${escapeHTML(value)}</strong>
+        </div>
+      `).join("")}
+    </div>` : `<div class="identity-empty">等待 Resume workflow 返回姓名和出生年份。</div>`}
+    <div class="education-stack">
+      ${education.length ? education.map((item) => renderEducationCard(item)).join("") : ""}
+    </div>
+  `;
+
+  const parsedCount = [
+    info.name,
+    info.sex,
+    info.birth_year,
+    ...education.flatMap((item) => [item.school, item.department, item.major])
+  ].filter((value) => String(value || "").trim()).length;
   const state = document.querySelector("#basicInfoDataState");
-  if (parsedCount >= 4) {
+  if (education.length > 0 && info.name) {
     state.textContent = "Legato 已连接";
     state.className = "status-pill is-real";
   } else if (parsedCount > 0) {
@@ -450,6 +470,47 @@ function renderBasicInfo(data) {
     const parseState = file.kind === "resume" || file.kind === "transcript" ? "Legato 解析" : "未解析";
     return `<span>${escapeHTML(file.kind)}：${escapeHTML(file.name)}，${size}，${parseState}</span>`;
   }).join("");
+}
+
+function normalizedEducation(profile) {
+  const items = Array.isArray(profile.education) ? profile.education.filter(Boolean) : [];
+  if (items.length > 0) return items;
+  const info = profile.basic_info || {};
+  if (!info.school && !info.major && !info.degree) return [];
+  return [{
+    school: info.school,
+    major: info.major,
+    degree: info.degree,
+    department: "",
+    is_985: false,
+    is_211: false,
+    is_double_first_class: false,
+    ruanke_rank: 0
+  }];
+}
+
+function renderEducationCard(item) {
+  const tags = [];
+  if (item.is_985) tags.push(`<span class="school-tag is-985">985</span>`);
+  if (item.is_211) tags.push(`<span class="school-tag is-211">211</span>`);
+  if (Number(item.ruanke_rank) > 0) tags.push(`<span class="school-tag is-rank">#${escapeHTML(item.ruanke_rank)}</span>`);
+  const detailItems = [
+    ["学院", item.department],
+    ["专业", item.major]
+  ].filter(([, value]) => String(value || "").trim());
+  return `
+    <article class="education-card">
+      <div class="education-head">
+        <strong>${escapeHTML(item.school || "学校未解析")}</strong>
+        <div class="school-tags">${tags.join("")}</div>
+      </div>
+      <div class="education-meta">
+        ${detailItems.length ? detailItems.map(([label, value]) => `
+          <span><b>${escapeHTML(label)}</b>${escapeHTML(value)}</span>
+        `).join("") : `<span><b>学院</b>未解析</span><span><b>专业</b>未解析</span>`}
+      </div>
+    </article>
+  `;
 }
 
 function renderScores(scores) {

@@ -320,6 +320,7 @@ func (s Server) runDiagnosisJob(job *DiagnosisJob) {
 		ResumeStatus:  "等待 Legato 简历解析",
 		TranscriptUse: transcriptUse,
 	}
+	diagnosis.AbilityProfile.Education = []EducationItem{}
 	diagnosis.AbilityProfile.AwardsStatus = "waiting"
 	diagnosis.AbilityProfile.Awards = []AwardItem{}
 	diagnosis.AbilityProfile.ExperiencesStatus = "waiting"
@@ -901,6 +902,13 @@ func applyResumeWorkflowProfile(diagnosis *Diagnosis, result *LegatoEnvelope) {
 	if name := stringValue(identity["name"]); name != "" {
 		diagnosis.AbilityProfile.BasicInfo.Name = name
 	}
+	if sex := stringValue(identity["sex"]); sex != "" {
+		diagnosis.AbilityProfile.BasicInfo.Sex = sex
+	}
+	if birthYear := stringValue(identity["birth_year"]); birthYear != "" {
+		diagnosis.AbilityProfile.BasicInfo.BirthYear = birthYear
+	}
+	diagnosis.AbilityProfile.Education = buildEducationItems(objectArray(data["education"]))
 	if education := firstObject(data, "education"); education != nil {
 		if school := stringValue(education["school"]); school != "" {
 			diagnosis.AbilityProfile.BasicInfo.School = school
@@ -923,6 +931,37 @@ func applyResumeWorkflowProfile(diagnosis *Diagnosis, result *LegatoEnvelope) {
 		},
 	}, diagnosis.AbilityProfile.EvidenceSummary...)
 	applyLegatoWarnings(diagnosis, "简历基础信息", result)
+}
+
+func buildEducationItems(items []map[string]any) []EducationItem {
+	education := make([]EducationItem, 0, len(items))
+	for _, item := range items {
+		school := stringValue(item["school"])
+		major := stringValue(item["major"])
+		department := stringValue(item["department"])
+		degree := stringValue(item["degree_level"])
+		if degree == "" {
+			degree = stringValue(item["degree"])
+		}
+		tags, _ := item["school_tags"].(map[string]any)
+		if school == "" && tags != nil {
+			school = stringValue(tags["matched_school"])
+		}
+		if school == "" && major == "" && department == "" && degree == "" {
+			continue
+		}
+		education = append(education, EducationItem{
+			School:             school,
+			Degree:             degree,
+			Department:         department,
+			Major:              major,
+			Is985:              boolValue(tags["is_985"]),
+			Is211:              boolValue(tags["is_211"]),
+			IsDoubleFirstClass: boolValue(tags["is_double_first_class"]),
+			RuankeRank:         intValue(tags["ruanke_rank"]),
+		})
+	}
+	return education
 }
 
 func applyResumeWorkflowCertifications(diagnosis *Diagnosis, result *LegatoEnvelope) {
@@ -1175,9 +1214,16 @@ func applyResumeLegato(diagnosis *Diagnosis, result *LegatoEnvelope) {
 	if name := nestedString(data, "identity", "name"); name != "" {
 		diagnosis.AbilityProfile.BasicInfo.Name = name
 	}
+	if sex := nestedString(data, "identity", "sex"); sex != "" {
+		diagnosis.AbilityProfile.BasicInfo.Sex = sex
+	}
+	if birthYear := nestedString(data, "identity", "birth_year"); birthYear != "" {
+		diagnosis.AbilityProfile.BasicInfo.BirthYear = birthYear
+	}
 	if name := nestedString(data, "candidate", "name"); name != "" {
 		diagnosis.AbilityProfile.BasicInfo.Name = name
 	}
+	diagnosis.AbilityProfile.Education = buildEducationItems(objectArray(data["education"]))
 	if education := firstObject(data, "education"); education != nil {
 		if school := stringValue(education["school"]); school != "" {
 			diagnosis.AbilityProfile.BasicInfo.School = school
@@ -1299,6 +1345,11 @@ func intValue(value any) int {
 	default:
 		return 0
 	}
+}
+
+func boolValue(value any) bool {
+	typed, _ := value.(bool)
+	return typed
 }
 
 func containsAny(text string, needles ...string) bool {

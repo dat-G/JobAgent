@@ -16,7 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workflow", choices=["resume"], help="Use a workflow-specific formatter.")
     parser.add_argument(
         "--workflow-stage",
-        choices=["profile", "certifications_awards", "experience"],
+        choices=["profile", "certifications_awards", "experience", "experience_hybrid", "item_benchmark"],
         help="Run one resume workflow stage and return partial structured data.",
     )
     parser.add_argument(

@@ -48,6 +48,7 @@ type Diagnosis struct {
 
 type AbilityProfile struct {
 	BasicInfo         BasicInfo        `json:"basic_info"`
+	Education         []EducationItem  `json:"education"`
 	FourDimScores     []ScoreDimension `json:"four_dim_scores"`
 	RadarData         []ScoreDimension `json:"radar_data"`
 	EvidenceSummary   []EvidenceItem   `json:"evidence_summary"`
@@ -60,6 +61,8 @@ type AbilityProfile struct {
 
 type BasicInfo struct {
 	Name           string `json:"name"`
+	Sex            string `json:"sex"`
+	BirthYear      string `json:"birth_year"`
 	School         string `json:"school"`
 	Major          string `json:"major"`
 	Degree         string `json:"degree"`
@@ -67,6 +70,17 @@ type BasicInfo struct {
 	TargetRole     string `json:"target_role"`
 	ResumeStatus   string `json:"resume_status"`
 	TranscriptUse  string `json:"transcript_use"`
+}
+
+type EducationItem struct {
+	School             string `json:"school"`
+	Degree             string `json:"degree"`
+	Department         string `json:"department"`
+	Major              string `json:"major"`
+	Is985              bool   `json:"is_985"`
+	Is211              bool   `json:"is_211"`
+	IsDoubleFirstClass bool   `json:"is_double_first_class"`
+	RuankeRank         int    `json:"ruanke_rank"`
 }
 
 type ScoreDimension struct {
@@ -364,6 +378,8 @@ func mockDiagnosis(req DiagnosisRequest) Diagnosis {
 		AbilityProfile: AbilityProfile{
 			BasicInfo: BasicInfo{
 				Name:           "陈曦",
+				Sex:            "男",
+				BirthYear:      "2002",
 				School:         "东北农业大学",
 				Major:          "计算机科学与技术",
 				Degree:         "本科",
@@ -371,6 +387,18 @@ func mockDiagnosis(req DiagnosisRequest) Diagnosis {
 				TargetRole:     recommendedRole,
 				ResumeStatus:   "模拟数据：未调用 Legato 解析",
 				TranscriptUse:  "可选材料，当前用于补充课程和 GPA 线索",
+			},
+			Education: []EducationItem{
+				{
+					School:             "东北农业大学",
+					Degree:             "本科",
+					Department:         "电气与信息学院",
+					Major:              "计算机科学与技术",
+					Is985:              false,
+					Is211:              true,
+					IsDoubleFirstClass: true,
+					RuankeRank:         120,
+				},
 			},
 			FourDimScores: []ScoreDimension{
 				{Name: "专业基础", Score: 78, MaxScore: 100, Level: "良好", Reason: "课程与专业背景匹配推荐岗位，算法与网络基础仍需补证据"},
@@ -574,14 +602,32 @@ func buildAbilityProfileXLSX(profile AbilityProfile) ([]byte, error) {
 	rows := [][]string{
 		{"能力画像", "模拟数据"},
 		{"姓名", profile.BasicInfo.Name},
+		{"性别", profile.BasicInfo.Sex},
+		{"出生年份", profile.BasicInfo.BirthYear},
 		{"学校", profile.BasicInfo.School},
 		{"专业", profile.BasicInfo.Major},
 		{"学历", profile.BasicInfo.Degree},
 		{"毕业年份", profile.BasicInfo.GraduationYear},
 		{"推荐首选岗位", profile.BasicInfo.TargetRole},
 		{},
-		{"四维分值", "分数", "等级", "原因"},
+		{"教育经历", "学院", "专业", "学历", "985", "211", "双一流", "软科排名"},
 	}
+	for _, item := range profile.Education {
+		rows = append(rows, []string{
+			item.School,
+			item.Department,
+			item.Major,
+			item.Degree,
+			boolLabel(item.Is985),
+			boolLabel(item.Is211),
+			boolLabel(item.IsDoubleFirstClass),
+			rankLabel(item.RuankeRank),
+		})
+	}
+	rows = append(rows,
+		[]string{},
+		[]string{"四维分值", "分数", "等级", "原因"},
+	)
 	for _, item := range profile.FourDimScores {
 		rows = append(rows, []string{item.Name, fmt.Sprintf("%d/%d", item.Score, item.MaxScore), item.Level, item.Reason})
 	}
@@ -780,6 +826,20 @@ func envDefault(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func boolLabel(value bool) string {
+	if value {
+		return "是"
+	}
+	return "否"
+}
+
+func rankLabel(rank int) string {
+	if rank <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("#%d", rank)
 }
 
 func xmlText(value string) string {

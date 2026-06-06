@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -45,6 +46,12 @@ func (p *OpenAIChat) Chat(ctx context.Context, req agent.ChatRequest) (agent.Cha
 		Tools:       convertTools(req.Tools),
 		Temperature: req.Temperature,
 		MaxTokens:   req.MaxTokens,
+	}
+	if thinking := os.Getenv("PRESTO_THINKING"); thinking != "" {
+		payload.Thinking = &chatThinking{Type: thinking}
+	}
+	if effort := os.Getenv("PRESTO_REASONING_EFFORT"); effort != "" {
+		payload.ReasoningEffort = effort
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -164,11 +171,17 @@ func convertTools(specs []agent.ToolSpec) []chatTool {
 }
 
 type chatPayload struct {
-	Model       string        `json:"model"`
-	Messages    []chatMessage `json:"messages"`
-	Tools       []chatTool    `json:"tools,omitempty"`
-	Temperature float64       `json:"temperature"`
-	MaxTokens   int           `json:"max_tokens,omitempty"`
+	Model           string        `json:"model"`
+	Messages        []chatMessage `json:"messages"`
+	Tools           []chatTool    `json:"tools,omitempty"`
+	Temperature     float64       `json:"temperature"`
+	MaxTokens       int           `json:"max_tokens,omitempty"`
+	Thinking        *chatThinking `json:"thinking,omitempty"`
+	ReasoningEffort string        `json:"reasoning_effort,omitempty"`
+}
+
+type chatThinking struct {
+	Type string `json:"type"`
 }
 
 type chatMessage struct {

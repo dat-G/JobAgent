@@ -82,6 +82,7 @@ The first workflow contract is intentionally narrow:
 prompts/common.md      shared short rules for JSON and accuracy
 prompts/profile.md     identity + education in one request
 prompts/certifications_awards.md certificates and awards
+prompts/item_benchmark.md six-dimensional item scoring
 prompts/combined.md    profile + certifications_awards + experience in one request
 prompts/merge.md       final schema merge
 prompts/retry_json.md  short retry instruction for invalid JSON
@@ -115,6 +116,34 @@ combined agent -> validate -> JSON
 Use `--workflow-combine-agents` to compare single-request latency with the concurrent path.
 
 No contact extraction in this workflow version.
+
+## Item Benchmark
+
+`--workflow-stage item_benchmark` first extracts `certifications_awards`, then benchmarks each item concurrently through Presto.
+
+Each output item contains:
+
+- `item`: original `name` and `result`.
+- `dimensions`: fixed order `逻辑`, `语言`, `专业`, `领导`, `抗压`, `成长`.
+- `scores`: normalized six-dimensional weight vector, each value in `0.0-1.0`, and the six values sum to `1.0`.
+- `impact_factor`: `0-10`, similar to `experience.level`, measuring how strongly the item proves ability.
+
+Dimension definitions:
+
+- `逻辑`: math, science, analysis, modeling, and problem-solving ability.
+- `语言`: writing, communication, presentation, and humanities expression.
+- `专业`: ability related to the student's major or technical field.
+- `领导`: leadership, ownership, organization, and team influence.
+- `抗压`: pressure, difficulty, persistence, and delivery under constraints.
+- `成长`: learning potential, initiative, improvement, and exploration.
+
+For DeepSeek thinking mode, run Presto with:
+
+```sh
+PRESTO_THINKING=enabled PRESTO_REASONING_EFFORT=high go run ./cmd/presto
+```
+
+The final JSON does not expose chain-of-thought; the model is instructed to use brief internal reasoning and return only scores.
 
 ## Experience Level
 

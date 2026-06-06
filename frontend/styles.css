@@ -25,6 +25,12 @@
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
+@property --lock-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -180,32 +186,77 @@ a {
   contain-intrinsic-size: 100svh;
 }
 
-.module-slide.is-module-locked .slide-shell {
-  opacity: 0.22;
+.module-slide.is-module-locked .slide-shell,
+.module-slide.is-unlocking .slide-shell {
   pointer-events: none;
   user-select: none;
 }
 
-.module-slide.is-module-locked::after {
+.module-slide.is-module-locked .slide-shell {
+  opacity: 0.18;
+  transform: translateY(8px) scale(0.992);
+  filter: saturate(0.72);
+}
+
+.module-slide:not(.is-module-locked) .slide-shell {
+  animation: moduleContentIn 300ms var(--ease) both;
+}
+
+.module-slide.is-module-locked::before,
+.module-slide.is-unlocking::before {
+  content: "";
+  position: absolute;
+  inset: var(--topbar-h) 0 var(--dock-h);
+  z-index: 1;
+  background:
+    linear-gradient(105deg, transparent 0 36%, oklch(1 0 0 / 0.62) 46%, transparent 58%) 0 0 / 220% 100%,
+    color-mix(in oklch, var(--surface) 78%, transparent);
+  opacity: 1;
+  pointer-events: none;
+  animation: lockMaskIn 220ms var(--ease) both, lockSweep 1800ms var(--ease) infinite;
+}
+
+.module-slide.is-module-locked::after,
+.module-slide.is-unlocking::after {
   content: attr(data-lock-message);
   position: absolute;
   left: 50%;
   top: 50%;
-  z-index: 2;
+  z-index: 3;
   transform: translate(-50%, -50%);
-  min-width: min(360px, calc(100% - 48px));
-  border: 1px solid var(--line);
+  min-width: min(330px, calc(100% - 48px));
+  border: 1px solid transparent;
   border-radius: var(--radius-md);
-  background: var(--bg);
-  color: var(--ink);
-  padding: 16px 18px;
-  text-align: center;
+  background:
+    linear-gradient(var(--bg), var(--bg)) padding-box,
+    conic-gradient(from var(--lock-angle), var(--primary), var(--accent), var(--primary)) border-box;
+  color: var(--primary-strong);
+  padding: 14px 18px 14px 48px;
+  text-align: left;
   font-weight: 800;
+  box-shadow: 0 8px 18px oklch(0.28 0.04 255.9 / 0.10);
+  animation: lockBadgeIn 240ms var(--ease) both, lockRing 1600ms linear infinite;
+}
+
+.module-slide.is-module-locked::after {
+  background:
+    radial-gradient(circle at 24px 50%, var(--primary) 0 4px, transparent 5px),
+    radial-gradient(circle at 24px 50%, transparent 0 10px, var(--primary-soft) 11px 13px, transparent 14px),
+    linear-gradient(var(--bg), var(--bg)) padding-box,
+    conic-gradient(from var(--lock-angle), var(--primary), var(--accent), var(--primary)) border-box;
+}
+
+.module-slide.is-unlocking::before {
+  animation: lockOverlayOut 320ms var(--ease) both;
+}
+
+.module-slide.is-unlocking::after {
+  animation: lockBadgeOut 320ms var(--ease) both;
 }
 
 .slide-shell {
   width: min(1180px, 100%);
-  transition: opacity 180ms var(--ease);
+  transition: opacity 220ms var(--ease), transform 220ms var(--ease), filter 220ms var(--ease);
 }
 
 .upload-layout,
@@ -605,6 +656,12 @@ legend {
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   background: var(--bg);
+  transition: border-color 180ms var(--ease), box-shadow 180ms var(--ease);
+}
+
+.generation-dock.is-running {
+  border-color: color-mix(in oklch, var(--primary) 36%, var(--line));
+  box-shadow: 0 8px 18px oklch(0.28 0.04 255.9 / 0.08);
 }
 
 .generation-main {
@@ -656,6 +713,17 @@ legend {
   background: linear-gradient(90deg, var(--primary), var(--accent));
   transition: width 260ms var(--ease);
   will-change: width;
+  position: relative;
+  overflow: hidden;
+}
+
+.generation-dock.is-running .generation-meter span::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, oklch(1 0 0 / 0.42), transparent);
+  animation: progressSheen 900ms var(--ease) infinite;
 }
 
 .generation-steps {
@@ -710,7 +778,8 @@ legend {
 .generation-steps li.is-running span {
   border-color: var(--warning);
   background: var(--warning);
-  animation: activePulse 900ms var(--ease) infinite;
+  box-shadow: 0 0 0 0 oklch(0.74 0.16 82 / 0.26);
+  animation: activePulse 900ms var(--ease) infinite, stepGlow 1100ms var(--ease) infinite;
 }
 
 .generation-steps li.is-failed {
@@ -741,26 +810,142 @@ legend {
 
 .basic-list {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  margin: 0;
+  gap: 14px;
 }
 
-.basic-list div {
-  min-width: 0;
-  padding: 12px;
-  border-radius: var(--radius-sm);
+.identity-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 18px;
+  min-height: 54px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
   background: var(--surface);
 }
 
-.basic-list dt {
+.identity-field {
+  min-width: 0;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.identity-field span {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.identity-field strong {
+  color: var(--ink);
+  font-size: 1.04rem;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.identity-empty {
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.education-stack {
+  display: grid;
+  gap: 10px;
+}
+
+.education-card {
+  min-width: 0;
+  min-height: 150px;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  padding: 22px 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: linear-gradient(180deg, var(--surface), var(--bg));
+}
+
+.education-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+}
+
+.education-head strong {
+  font-size: 1.2rem;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.school-tags {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.school-tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border-radius: 999px;
+  padding: 0 8px;
+  font-size: 0.76rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.school-tag.is-985 {
+  background: oklch(0.94 0.045 25);
+  color: oklch(0.45 0.16 25);
+}
+
+.school-tag.is-211 {
+  background: var(--primary-soft);
+  color: var(--primary-strong);
+}
+
+.school-tag.is-rank {
+  background: var(--surface-3);
+  color: var(--muted);
+}
+
+.education-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-self: end;
+  gap: 8px 14px;
+  margin-top: 24px;
+  color: var(--ink);
+  font-size: 0.9rem;
+}
+
+.education-meta span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.education-meta b {
+  margin-right: 6px;
   color: var(--muted);
   font-size: 0.8rem;
 }
 
-.basic-list dd {
-  margin: 4px 0 0;
-  font-weight: 700;
+.education-empty {
+  min-height: 72px;
+  display: grid;
+  place-items: center;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--muted);
+  padding: 14px;
+  text-align: center;
+  font-size: 0.88rem;
 }
 
 .source-list {
@@ -1399,6 +1584,62 @@ td {
   }
 }
 
+@keyframes lockMaskIn {
+  from {
+    opacity: 0.001;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes lockOverlayOut {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes lockBadgeOut {
+  to {
+    opacity: 0;
+    transform: translate(-50%, -48%) scale(0.98);
+  }
+}
+
+@keyframes lockBadgeIn {
+  from {
+    opacity: 0.001;
+    transform: translate(-50%, -46%) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@keyframes lockSweep {
+  to {
+    background-position: -140% 0, 0 0;
+  }
+}
+
+@keyframes lockRing {
+  to {
+    --lock-angle: 360deg;
+  }
+}
+
+@keyframes moduleContentIn {
+  from {
+    opacity: 0.001;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 @keyframes drawRadar {
   to {
     stroke-dashoffset: 0;
@@ -1429,6 +1670,18 @@ td {
   50% {
     opacity: 0.56;
     transform: scale(1.45);
+  }
+}
+
+@keyframes stepGlow {
+  50% {
+    box-shadow: 0 0 0 7px oklch(0.74 0.16 82 / 0);
+  }
+}
+
+@keyframes progressSheen {
+  to {
+    transform: translateX(100%);
   }
 }
 
@@ -1570,6 +1823,14 @@ td {
   .evidence-item header,
   .job-head {
     grid-template-columns: 1fr auto;
+  }
+
+  .education-head {
+    grid-template-columns: 1fr;
+  }
+
+  .school-tags {
+    justify-content: flex-start;
   }
 
   .match-score strong {
