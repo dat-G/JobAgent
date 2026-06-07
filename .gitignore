@@ -5,3 +5,7 @@
 __pycache__/
 *.pyc
 test/
+
+# Impeccable local design artifacts
+.impeccable/
+DESIGN.md
