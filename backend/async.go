@@ -69,6 +69,7 @@ type LegatoEnvelope struct {
 	MarkdownChars int            `json:"markdown_chars"`
 	Data          map[string]any `json:"data"`
 	Warnings      []string       `json:"warnings"`
+	Debug         map[string]any `json:"debug,omitempty"`
 	Error         string         `json:"error"`
 }
 
@@ -321,7 +322,7 @@ func streamDiagnosisEvents(w http.ResponseWriter, r *http.Request, job *Diagnosi
 func (s Server) handleDiagnosisBenchmark(w http.ResponseWriter, r *http.Request, job *DiagnosisJob) {
 	var req BenchmarkRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid benchmark request")
+		writeError(w, http.StatusBadRequest, "invalid Benchmark request")
 		return
 	}
 	items := sanitizeBenchmarkInputs(req.Items)
@@ -341,7 +342,7 @@ func (s Server) handleDiagnosisBenchmark(w http.ResponseWriter, r *http.Request,
 			Type:    "step.update",
 			Step:    "profile",
 			Status:  "failed",
-			Message: "benchmark 无法继续，上传简历临时文件不可用",
+			Message: "Benchmark 无法继续，上传简历临时文件不可用",
 			Data: map[string]any{
 				"ability_profile":        diagnosis.AbilityProfile,
 				"production_limitations": diagnosis.ProductionLimitations,
@@ -363,62 +364,196 @@ func (s Server) handleDiagnosisBenchmark(w http.ResponseWriter, r *http.Request,
 		Type:    "step.update",
 		Step:    "profile",
 		Status:  "running",
-		Message: "benchmark 正在并发评估证据影响因子和专业基础分布",
+		Message: "Benchmark 正在并发评估证据影响因子和专业六维基线",
 		Data:    map[string]any{"ability_profile": diagnosis.AbilityProfile},
 	})
 
 	ctx, cancel := context.WithTimeout(r.Context(), diagnosisTimeout())
 	defer cancel()
 	majorBaselineInput := buildMajorBaselineStageInput(diagnosis)
-	type benchmarkStageCall struct {
+	batches := chunkBenchmarkInputs(items, itemBenchmarkMaxRequests())
+	type itemBenchmarkBatchCall struct {
+		index     int
+		total     int
+		itemCount int
+		result    *LegatoEnvelope
+		err       error
+	}
+	type majorBaselineCall struct {
 		result *LegatoEnvelope
 		err    error
 	}
-	itemBenchmarkCh := make(chan benchmarkStageCall, 1)
-	majorBaselineCh := make(chan benchmarkStageCall, 1)
-	go func() {
-		result, err := s.runResumeWorkflowStageWithInput(
-			ctx,
-			job,
-			"item_benchmark",
-			"简历 item_benchmark 正在结合教育背景评估证据影响因子",
-			map[string]any{"items": items},
-		)
-		itemBenchmarkCh <- benchmarkStageCall{result: result, err: err}
-	}()
+	itemBenchmarkCh := make(chan itemBenchmarkBatchCall, len(batches))
+	majorBaselineCh := make(chan majorBaselineCall, 1)
+	for index, batch := range batches {
+		index := index
+		batch := batch
+		go func() {
+			result, err := s.runResumeWorkflowStageWithInput(
+				ctx,
+				job,
+				"item_benchmark",
+				fmt.Sprintf("简历 Item Benchmark 第 %d/%d 批正在评估 %d 条证据", index+1, len(batches), len(batch)),
+				map[string]any{
+					"items":       batch,
+					"max_workers": 1,
+				},
+			)
+			itemBenchmarkCh <- itemBenchmarkBatchCall{
+				index:     index,
+				total:     len(batches),
+				itemCount: len(batch),
+				result:    result,
+				err:       err,
+			}
+		}()
+	}
 	go func() {
 		result, err := s.runResumeWorkflowStageWithInput(
 			ctx,
 			job,
 			"major_baseline",
-			"简历 major_baseline 正在思考专业对六维基础分布的影响",
+			"简历 Major Baseline 正在思考专业对六维基础分布的影响",
 			majorBaselineInput,
 		)
-		majorBaselineCh <- benchmarkStageCall{result: result, err: err}
+		majorBaselineCh <- majorBaselineCall{result: result, err: err}
 	}()
-	itemBenchmarkCall := <-itemBenchmarkCh
-	majorBaselineCall := <-majorBaselineCh
+
+	pendingItemBatches := len(batches)
+	majorBaselinePending := true
+	itemBenchmarkApplied := 0
+	var benchmarkErrors []string
+	for pendingItemBatches > 0 || majorBaselinePending {
+		select {
+		case batch := <-itemBenchmarkCh:
+			pendingItemBatches--
+			diagnosis = job.CurrentDiagnosis()
+			if batch.err != nil {
+				message := fmt.Sprintf("Item Benchmark 第 %d/%d 批失败：%s", batch.index+1, batch.total, batch.err.Error())
+				benchmarkErrors = append(benchmarkErrors, message)
+				log.Printf("diagnosis %s legato item_benchmark batch %d/%d failed: %v", job.ID, batch.index+1, batch.total, batch.err)
+				diagnosis.AbilityProfile.BenchmarkStatus = "benchmarking"
+				job.SetDiagnosis(diagnosis)
+				job.Emit(DiagnosisEvent{
+					Type:    "step.update",
+					Step:    "profile",
+					Status:  "running",
+					Message: benchmarkProgressMessage(pendingItemBatches, majorBaselinePending, itemBenchmarkApplied, true),
+					Data: map[string]any{
+						"ability_profile": diagnosis.AbilityProfile,
+						"benchmark_batch": map[string]any{
+							"index":      batch.index,
+							"total":      batch.total,
+							"item_count": batch.itemCount,
+							"status":     "failed",
+							"pending":    pendingItemBatches,
+						},
+					},
+				})
+				continue
+			}
+			applied := applyResumeWorkflowItemBenchmark(&diagnosis, batch.result)
+			if applied == 0 {
+				message := fmt.Sprintf("Item Benchmark 第 %d/%d 批未返回可应用评分", batch.index+1, batch.total)
+				benchmarkErrors = append(benchmarkErrors, message)
+				diagnosis.AbilityProfile.BenchmarkStatus = "benchmarking"
+				job.SetDiagnosis(diagnosis)
+				job.Emit(DiagnosisEvent{
+					Type:    "step.update",
+					Step:    "profile",
+					Status:  "running",
+					Message: benchmarkProgressMessage(pendingItemBatches, majorBaselinePending, itemBenchmarkApplied, true),
+					Data: map[string]any{
+						"ability_profile": diagnosis.AbilityProfile,
+						"benchmark_batch": map[string]any{
+							"index":      batch.index,
+							"total":      batch.total,
+							"item_count": batch.itemCount,
+							"applied":    0,
+							"status":     "failed",
+							"pending":    pendingItemBatches,
+						},
+					},
+				})
+				continue
+			}
+			itemBenchmarkApplied += applied
+			if pendingItemBatches > 0 || majorBaselinePending {
+				diagnosis.AbilityProfile.BenchmarkStatus = "benchmarking"
+			}
+			job.SetDiagnosis(diagnosis)
+			job.Emit(DiagnosisEvent{
+				Type:    "step.update",
+				Step:    "profile",
+				Status:  benchmarkStepStatus(pendingItemBatches, majorBaselinePending),
+				Message: benchmarkProgressMessage(pendingItemBatches, majorBaselinePending, itemBenchmarkApplied, len(benchmarkErrors) > 0),
+				Data: map[string]any{
+					"ability_profile": diagnosis.AbilityProfile,
+					"benchmark_batch": map[string]any{
+						"index":      batch.index,
+						"total":      batch.total,
+						"item_count": batch.itemCount,
+						"applied":    applied,
+						"status":     "ready",
+						"pending":    pendingItemBatches,
+					},
+				},
+			})
+		case baseline := <-majorBaselineCh:
+			majorBaselinePending = false
+			majorBaselineCh = nil
+			diagnosis = job.CurrentDiagnosis()
+			if baseline.err != nil {
+				message := "Major Baseline 失败：" + baseline.err.Error()
+				benchmarkErrors = append(benchmarkErrors, message)
+				log.Printf("diagnosis %s legato major_baseline failed: %v", job.ID, baseline.err)
+				diagnosis.AbilityProfile.MajorBaselineStatus = "failed"
+				job.SetDiagnosis(diagnosis)
+				job.Emit(DiagnosisEvent{
+					Type:    "step.update",
+					Step:    "profile",
+					Status:  "running",
+					Message: benchmarkProgressMessage(pendingItemBatches, majorBaselinePending, itemBenchmarkApplied, true),
+					Data: map[string]any{
+						"ability_profile": diagnosis.AbilityProfile,
+						"major_baseline":  map[string]any{"status": "failed"},
+					},
+				})
+				continue
+			}
+			applyResumeWorkflowMajorBaseline(&diagnosis, baseline.result)
+			job.SetDiagnosis(diagnosis)
+			job.Emit(DiagnosisEvent{
+				Type:    "step.update",
+				Step:    "profile",
+				Status:  benchmarkStepStatus(pendingItemBatches, majorBaselinePending),
+				Message: benchmarkProgressMessage(pendingItemBatches, majorBaselinePending, itemBenchmarkApplied, len(benchmarkErrors) > 0),
+				Data: map[string]any{
+					"ability_profile": diagnosis.AbilityProfile,
+					"major_baseline":  map[string]any{"status": "ready"},
+				},
+			})
+		case <-ctx.Done():
+			benchmarkErrors = append(benchmarkErrors, "Benchmark 超时："+ctx.Err().Error())
+			pendingItemBatches = 0
+			majorBaselinePending = false
+		}
+	}
+
 	diagnosis = job.CurrentDiagnosis()
-	if itemBenchmarkCall.err != nil || majorBaselineCall.err != nil {
-		var benchmarkErrors []string
-		if itemBenchmarkCall.err != nil {
-			benchmarkErrors = append(benchmarkErrors, "item_benchmark: "+itemBenchmarkCall.err.Error())
-			log.Printf("diagnosis %s legato item_benchmark failed: %v", job.ID, itemBenchmarkCall.err)
-		}
-		if majorBaselineCall.err != nil {
-			benchmarkErrors = append(benchmarkErrors, "major_baseline: "+majorBaselineCall.err.Error())
-			log.Printf("diagnosis %s legato major_baseline failed: %v", job.ID, majorBaselineCall.err)
-		}
+	if len(benchmarkErrors) > 0 {
 		errMessage := strings.Join(benchmarkErrors, "；")
 		diagnosis.AbilityProfile.BenchmarkStatus = "failed"
-		diagnosis.AbilityProfile.MajorBaselineStatus = "failed"
-		diagnosis.ProductionLimitations = append(diagnosis.ProductionLimitations, "benchmark 失败，六维分布、impact_factor 或专业基础基线未生成，可从失败阶段重试。")
+		if diagnosis.AbilityProfile.MajorBaselineStatus == "benchmarking" {
+			diagnosis.AbilityProfile.MajorBaselineStatus = "failed"
+		}
+		diagnosis.ProductionLimitations = append(diagnosis.ProductionLimitations, "Benchmark 失败，六维分布、impact_factor 或专业六维基线未生成，可从失败阶段重试。")
 		job.SetDiagnosis(diagnosis)
 		job.Emit(DiagnosisEvent{
 			Type:    "step.update",
 			Step:    "profile",
 			Status:  "failed",
-			Message: "benchmark 失败，点击 dock 中红色画像阶段可继续重试",
+			Message: "Benchmark 失败，点击 dock 中红色画像阶段可继续重试",
 			Data: map[string]any{
 				"ability_profile":        diagnosis.AbilityProfile,
 				"production_limitations": diagnosis.ProductionLimitations,
@@ -433,17 +568,81 @@ func (s Server) handleDiagnosisBenchmark(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	applyResumeWorkflowMajorBaseline(&diagnosis, majorBaselineCall.result)
-	applyResumeWorkflowItemBenchmark(&diagnosis, itemBenchmarkCall.result)
+	if itemBenchmarkApplied == 0 {
+		diagnosis.AbilityProfile.BenchmarkStatus = "empty"
+	} else {
+		diagnosis.AbilityProfile.BenchmarkStatus = "ready"
+	}
 	job.SetDiagnosis(diagnosis)
 	job.Emit(DiagnosisEvent{
 		Type:    "step.update",
 		Step:    "profile",
 		Status:  "done",
-		Message: "benchmark 已返回，证据卡片已补充 impact_factor，雷达图已补充专业基础基线",
+		Message: "Benchmark 已返回，证据卡片已补充 impact_factor，雷达图已补充专业六维基线",
 		Data:    map[string]any{"ability_profile": diagnosis.AbilityProfile},
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"ability_profile": diagnosis.AbilityProfile})
+	diagnosis, matchingErr := s.runJobMatchingStage(ctx, job, diagnosis)
+	if matchingErr != nil {
+		diagnosis.ProductionLimitations = append(diagnosis.ProductionLimitations, "Job Matching 失败，岗位推荐和匹配雷达未生成，可重新生成或稍后重试。")
+		job.SetDiagnosis(diagnosis)
+		job.Emit(DiagnosisEvent{
+			Type:    "step.update",
+			Step:    "matching",
+			Status:  "failed",
+			Message: "Legato Job Matching 失败，岗位匹配模块未生成",
+			Data: map[string]any{
+				"ability_profile":        diagnosis.AbilityProfile,
+				"production_limitations": diagnosis.ProductionLimitations,
+				"error":                  matchingErr.Error(),
+			},
+		})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ability_profile":        diagnosis.AbilityProfile,
+			"production_limitations": diagnosis.ProductionLimitations,
+			"matching_error":         matchingErr.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ability_profile":  diagnosis.AbilityProfile,
+		"matching_result":  diagnosis.MatchingResult,
+		"top_jobs":         diagnosis.AbilityProfile.TopJobs,
+		"generated_at":     diagnosis.GeneratedAt,
+		"match_generated":  true,
+		"matching_source":  diagnosis.MatchingResult.Source,
+		"job_matching_run": "Legato Job Matching Team via Presto",
+	})
+}
+
+func (s Server) runJobMatchingStage(ctx context.Context, job *DiagnosisJob, diagnosis Diagnosis) (Diagnosis, error) {
+	job.Emit(DiagnosisEvent{
+		Type:    "step.update",
+		Step:    "matching",
+		Status:  "running",
+		Message: "Legato Job Matching Team 正在连接 Presto 并生成岗位推荐",
+		Data: map[string]any{
+			"ability_profile": diagnosis.AbilityProfile,
+		},
+	})
+	result, err := s.runLegatoJobMatchingTeam(ctx, job, diagnosis)
+	if err != nil {
+		return diagnosis, err
+	}
+	applyResumeWorkflowJobMatching(&diagnosis, result)
+	diagnosis.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
+	job.SetDiagnosis(diagnosis)
+	job.Emit(DiagnosisEvent{
+		Type:    "step.update",
+		Step:    "matching",
+		Status:  "done",
+		Message: "Legato Job Matching Team 已返回岗位推荐、目标雷达和差距明细",
+		Data: map[string]any{
+			"matching_result": diagnosis.MatchingResult,
+			"top_jobs":        diagnosis.AbilityProfile.TopJobs,
+			"generated_at":    diagnosis.GeneratedAt,
+		},
+	})
+	return diagnosis, nil
 }
 
 func writeDiagnosisSSE(w io.Writer, event DiagnosisEvent) error {
@@ -480,7 +679,6 @@ func (s Server) runDiagnosisJob(job *DiagnosisJob) {
 		TranscriptUse: transcriptUse,
 	}
 	diagnosis.AbilityProfile.Education = []EducationItem{}
-	diagnosis.AbilityProfile.FourDimScores = []ScoreDimension{}
 	diagnosis.AbilityProfile.RadarData = []ScoreDimension{}
 	diagnosis.AbilityProfile.EvidenceSummary = []EvidenceItem{}
 	diagnosis.AbilityProfile.AwardsStatus = "waiting"
@@ -490,10 +688,13 @@ func (s Server) runDiagnosisJob(job *DiagnosisJob) {
 	diagnosis.AbilityProfile.BenchmarkStatus = "waiting"
 	diagnosis.AbilityProfile.MajorBaselineStatus = "waiting"
 	diagnosis.AbilityProfile.MajorBaseline = MajorBaseline{}
+	diagnosis.AbilityProfile.TopJobs = []MatchedJob{}
+	diagnosis.MatchingResult = MatchingResult{}
 	diagnosis.ProductionLimitations = []string{
 		"简历必须由 Legato 后端成功解析，否则诊断任务失败。",
 		"成绩单是可选增强材料；如解析失败，本次诊断会跳过成绩单证据并继续生成结果。",
-		"能力评分、雷达图、岗位推荐、匹配差距和成长路径仍为模拟数据，待接入真实评分与规划 agent。",
+		"岗位推荐、匹配差距和目标岗位雷达由 Benchmark 后的 Legato Job Matching Team via Presto 生成。",
+		"成长路径仍为模拟数据，待接入真实规划 Agent。",
 		"其他材料当前只记录文件元信息，尚未纳入真实解析。",
 	}
 
@@ -504,12 +705,11 @@ func (s Server) runDiagnosisJob(job *DiagnosisJob) {
 		stage   string
 		message string
 	}{
-		{stage: "profile", message: "简历基础信息 agent 正在抽取姓名、学校、专业和学历"},
-		{stage: "certifications_awards", message: "简历证书奖项 agent 正在结构化荣誉与证书"},
-		{stage: "experience", message: "简历经历 agent 正在整理项目、实习和活动经历"},
+		{stage: "profile", message: "简历基础信息 Agent 正在抽取姓名、学校、专业和学历"},
+		{stage: "certifications_awards", message: "简历证书奖项 Agent 正在结构化荣誉与证书"},
+		{stage: "experience_hybrid", message: "简历经历 hybrid Agent 正在整体整理项目、实习和活动经历"},
 	}
 	results := make(chan legatoStageResult, len(resumeStages)+1)
-	hybridResults := make(chan legatoStageResult, 1)
 	for _, stage := range resumeStages {
 		stage := stage
 		go func() {
@@ -522,15 +722,7 @@ func (s Server) runDiagnosisJob(job *DiagnosisJob) {
 		}()
 	}
 	go func() {
-		result, err := s.runResumeWorkflowStage(ctx, job, "experience_hybrid", "简历经历 hybrid agent 正在进行高精度经历分析")
-		hybridResults <- legatoStageResult{
-			target: "resume_experience_hybrid",
-			result: result,
-			err:    err,
-		}
-	}()
-	go func() {
-		result, err := s.runLegatoStage(ctx, job, "transcript", "transcript_agent", "成绩单解析 agent 正在处理")
+		result, err := s.runLegatoStage(ctx, job, "transcript", "transcript_agent", "成绩单解析 Agent 正在处理")
 		results <- legatoStageResult{
 			target: "transcript",
 			result: result,
@@ -538,48 +730,55 @@ func (s Server) runDiagnosisJob(job *DiagnosisJob) {
 		}
 	}()
 
-	job.Emit(DiagnosisEvent{Type: "step.update", Step: "profile", Status: "running", Message: "画像 agent 已启动，等待材料解析结果"})
+	job.Emit(DiagnosisEvent{Type: "step.update", Step: "profile", Status: "running", Message: "画像 Agent 已启动，等待材料解析结果"})
 	resumeParsed := false
 	var resumeFailures []string
 	var requiredFailures []string
 	var optionalWarnings []string
-	for completed := 0; completed < cap(results); completed++ {
-		stage := <-results
-		if stage.err != nil {
-			message := legatoTargetLabel(stage.target) + "失败：" + stage.err.Error()
-			log.Printf("diagnosis %s legato %s failed: %v", job.ID, stage.target, stage.err)
-			if isResumeLegatoTarget(stage.target) {
-				resumeFailures = append(resumeFailures, message)
-				markResumeEvidenceStatus(&diagnosis, stage.target, "failed")
-			} else {
-				optionalWarnings = append(optionalWarnings, message)
-				applyOptionalLegatoFailure(&diagnosis, stage.target, stage.err)
+
+	for completed := 0; completed < cap(results); {
+		select {
+		case stage := <-results:
+			completed++
+			if stage.err != nil {
+				message := legatoTargetLabel(stage.target) + "失败：" + stage.err.Error()
+				log.Printf("diagnosis %s legato %s failed: %v", job.ID, stage.target, stage.err)
+				if isResumeLegatoTarget(stage.target) {
+					resumeFailures = append(resumeFailures, message)
+					markResumeEvidenceStatus(&diagnosis, stage.target, "failed")
+				} else {
+					optionalWarnings = append(optionalWarnings, message)
+					applyOptionalLegatoFailure(&diagnosis, stage.target, stage.err)
+					job.SetDiagnosis(diagnosis)
+				}
+				continue
+			}
+			if stage.result != nil && stage.result.Data != nil {
+				switch stage.target {
+				case "resume_profile":
+					applyResumeWorkflowProfile(&diagnosis, stage.result)
+					resumeParsed = true
+				case "resume_certifications_awards":
+					applyResumeWorkflowCertifications(&diagnosis, stage.result)
+					resumeParsed = true
+				case "resume_experience":
+					applyResumeWorkflowExperience(&diagnosis, stage.result, false)
+					resumeParsed = true
+				case "resume_experience_hybrid":
+					applyResumeWorkflowExperience(&diagnosis, stage.result, true)
+					resumeParsed = true
+				case "transcript":
+					applyTranscriptLegato(&diagnosis, stage.result)
+				}
 				job.SetDiagnosis(diagnosis)
+				job.Emit(DiagnosisEvent{
+					Type:    "step.update",
+					Step:    "profile",
+					Status:  "running",
+					Message: "画像 Agent 已收到" + legatoTargetLabel(stage.target) + "结果",
+					Data:    map[string]any{"ability_profile": diagnosis.AbilityProfile},
+				})
 			}
-			continue
-		}
-		if stage.result != nil && stage.result.Data != nil {
-			switch stage.target {
-			case "resume_profile":
-				applyResumeWorkflowProfile(&diagnosis, stage.result)
-				resumeParsed = true
-			case "resume_certifications_awards":
-				applyResumeWorkflowCertifications(&diagnosis, stage.result)
-				resumeParsed = true
-			case "resume_experience":
-				applyResumeWorkflowExperience(&diagnosis, stage.result, false)
-				resumeParsed = true
-			case "transcript":
-				applyTranscriptLegato(&diagnosis, stage.result)
-			}
-			job.SetDiagnosis(diagnosis)
-			job.Emit(DiagnosisEvent{
-				Type:    "step.update",
-				Step:    "profile",
-				Status:  "running",
-				Message: "画像 agent 已收到" + legatoTargetLabel(stage.target) + "结果",
-				Data:    map[string]any{"ability_profile": diagnosis.AbilityProfile},
-			})
 		}
 	}
 	if !resumeParsed {
@@ -629,25 +828,14 @@ func (s Server) runDiagnosisJob(job *DiagnosisJob) {
 		Type:    "step.update",
 		Step:    "profile",
 		Status:  "running",
-		Message: "能力画像已可查看，experience_hybrid 仍在校准经历证据",
+		Message: "experience_hybrid 已返回最终经历，画像 Agent 正在合并证据",
 		Data:    map[string]any{"ability_profile": diagnosis.AbilityProfile},
 	})
 
-	job.Emit(DiagnosisEvent{Type: "step.update", Step: "matching", Status: "running", Message: "岗位匹配 agent 正在计算推荐岗位"})
-	job.Emit(DiagnosisEvent{Type: "step.update", Step: "path", Status: "running", Message: "路径规划 agent 正在生成阶段任务"})
+	job.Emit(DiagnosisEvent{Type: "step.update", Step: "matching", Status: "running", Message: "岗位匹配 Agent 正在计算推荐岗位"})
+	job.Emit(DiagnosisEvent{Type: "step.update", Step: "path", Status: "running", Message: "路径规划 Agent 正在生成阶段任务"})
 	var downstream sync.WaitGroup
-	downstream.Add(2)
-	go func() {
-		defer downstream.Done()
-		shortPause()
-		job.Emit(DiagnosisEvent{
-			Type:    "step.update",
-			Step:    "matching",
-			Status:  "done",
-			Message: "岗位匹配结果已生成，可查看匹配模块",
-			Data:    map[string]any{"matching_result": diagnosis.MatchingResult, "top_jobs": diagnosis.AbilityProfile.TopJobs},
-		})
-	}()
+	downstream.Add(1)
 	go func() {
 		defer downstream.Done()
 		time.Sleep(260 * time.Millisecond)
@@ -665,62 +853,18 @@ func (s Server) runDiagnosisJob(job *DiagnosisJob) {
 		close(downstreamDone)
 	}()
 
-	hybridPending := true
 	downstreamPending := true
-	for hybridPending || downstreamPending {
+	for downstreamPending {
 		select {
-		case stage := <-hybridResults:
-			hybridPending = false
-			if stage.err != nil {
-				message := legatoTargetLabel(stage.target) + "失败：" + stage.err.Error()
-				log.Printf("diagnosis %s legato %s failed: %v", job.ID, stage.target, stage.err)
-				optionalWarnings = append(optionalWarnings, message)
-				if len(diagnosis.AbilityProfile.Experiences) == 0 {
-					diagnosis.AbilityProfile.ExperiencesStatus = "failed"
-				} else {
-					diagnosis.AbilityProfile.ExperiencesStatus = "ready"
-					diagnosis.ProductionLimitations = append(diagnosis.ProductionLimitations, "experience_hybrid 失败，已保留快速经历解析结果。")
-				}
-				job.SetDiagnosis(diagnosis)
-				job.Emit(DiagnosisEvent{
-					Type:    "step.update",
-					Step:    "profile",
-					Status:  "done",
-					Message: "experience_hybrid 未返回可用结果，已保留快速经历解析",
-					Data: map[string]any{
-						"warnings":               optionalWarnings,
-						"ability_profile":        diagnosis.AbilityProfile,
-						"production_limitations": diagnosis.ProductionLimitations,
-					},
-				})
-				continue
-			}
-			if stage.result != nil && stage.result.Data != nil {
-				applyResumeWorkflowExperience(&diagnosis, stage.result, true)
-				job.SetDiagnosis(diagnosis)
-				job.Emit(DiagnosisEvent{
-					Type:    "step.update",
-					Step:    "profile",
-					Status:  "done",
-					Message: "experience_hybrid 已返回，经历证据已替换为高精度结果",
-					Data:    map[string]any{"ability_profile": diagnosis.AbilityProfile},
-				})
-			}
 		case <-downstreamDone:
 			downstreamPending = false
 			downstreamDone = nil
 		case <-ctx.Done():
-			if hybridPending {
-				hybridPending = false
-				if len(diagnosis.AbilityProfile.Experiences) > 0 && diagnosis.AbilityProfile.ExperiencesStatus == "refining" {
-					diagnosis.AbilityProfile.ExperiencesStatus = "ready"
-				}
-			}
 			downstreamPending = false
 		}
 	}
 
-	job.Emit(DiagnosisEvent{Type: "step.update", Step: "outputs", Status: "running", Message: "导出 agent 正在整理结构化输出"})
+	job.Emit(DiagnosisEvent{Type: "step.update", Step: "outputs", Status: "running", Message: "导出 Agent 正在整理结构化输出"})
 	shortPause()
 	diagnosis.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
 	job.SetDiagnosis(diagnosis)
@@ -746,7 +890,7 @@ func (s Server) runDiagnosisJob(job *DiagnosisJob) {
 func (s Server) runLegatoStage(ctx context.Context, job *DiagnosisJob, target string, step string, runningMessage string) (*LegatoEnvelope, error) {
 	file, ok := firstFileByKind(job.Files, target)
 	if !ok {
-		job.Emit(DiagnosisEvent{Type: "step.update", Step: step, Status: "done", Message: "未上传对应材料，跳过该 agent"})
+		job.Emit(DiagnosisEvent{Type: "step.update", Step: step, Status: "done", Message: "未上传对应材料，跳过该 Agent"})
 		return nil, nil
 	}
 	if file.Path == "" {
@@ -858,6 +1002,9 @@ func (s Server) runResumeWorkflowStage(ctx context.Context, job *DiagnosisJob, w
 func (s Server) runResumeWorkflowStageWithInput(ctx context.Context, job *DiagnosisJob, workflowStage string, runningMessage string, stageInput any) (*LegatoEnvelope, error) {
 	file, ok := firstFileByKind(job.Files, "resume")
 	step := "profile"
+	if workflowStage == "job_matching" {
+		step = "matching"
+	}
 	if !ok || file.Path == "" {
 		err := errors.New("缺少简历文件，无法调用 Legato resume workflow")
 		job.Emit(DiagnosisEvent{Type: "step.update", Step: step, Status: "failed", Message: err.Error()})
@@ -940,13 +1087,16 @@ func runLegatoWithOptions(ctx context.Context, sourcePath string, target string,
 		"--target", target,
 		"--timeout-ms", legatoTimeoutMS(),
 	}
-	if target == "resume" {
-		args = append(args, "--workflow", "resume")
+	if target == "resume" || target == "chat" {
+		args = append(args, "--workflow", target)
 		if len(workflowStage) > 0 && strings.TrimSpace(workflowStage[0]) != "" {
 			args = append(args, "--workflow-stage", strings.TrimSpace(workflowStage[0]))
 		}
 		if strings.TrimSpace(workflowStageInput) != "" {
 			args = append(args, "--workflow-stage-input", workflowStageInput)
+		}
+		if target == "chat" {
+			args = append(args, "--debug")
 		}
 	}
 	if legatoUsePresto() {
@@ -1073,7 +1223,7 @@ func tempDirFromFiles(files []SavedUpload) string {
 func ensureResumeFileAvailable(job *DiagnosisJob) error {
 	file, ok := firstFileByKind(job.Files, "resume")
 	if !ok || file.Path == "" {
-		return errors.New("缺少简历文件，无法继续 benchmark")
+		return errors.New("缺少简历文件，无法继续 Benchmark")
 	}
 	if _, err := os.Stat(file.Path); err != nil {
 		name := strings.TrimSpace(file.SourceFile.Name)
@@ -1081,9 +1231,9 @@ func ensureResumeFileAvailable(job *DiagnosisJob) error {
 			name = filepath.Base(file.Path)
 		}
 		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("上传简历临时文件已过期或被清理，无法从当前任务继续 benchmark：%s；请重新生成诊断", name)
+			return fmt.Errorf("上传简历临时文件已过期或被清理，无法从当前任务继续 Benchmark：%s；请重新生成诊断", name)
 		}
-		return fmt.Errorf("上传简历文件不可读取，无法继续 benchmark：%w", err)
+		return fmt.Errorf("上传简历文件不可读取，无法继续 Benchmark：%w", err)
 	}
 	return nil
 }
@@ -1177,6 +1327,22 @@ func legatoTimeoutMS() string {
 	return value
 }
 
+func itemBenchmarkMaxRequests() int {
+	for _, key := range []string{"ITEM_BENCHMARK_MAX_REQUESTS", "BENCHMARK_MAX_REQUESTS"} {
+		value := strings.TrimSpace(os.Getenv(key))
+		if value == "" {
+			continue
+		}
+		count, err := strconv.Atoi(value)
+		if err != nil || count <= 0 {
+			log.Printf("invalid %s=%q, using 5", key, value)
+			return 5
+		}
+		return count
+	}
+	return 5
+}
+
 func diagnosisTimeout() time.Duration {
 	value := strings.TrimSpace(os.Getenv("DIAGNOSIS_TIMEOUT_SECONDS"))
 	if value == "" {
@@ -1229,10 +1395,14 @@ func legatoTargetLabel(target string) string {
 		return "简历经历"
 	case "resume_experience_hybrid":
 		return "简历经历 hybrid"
+	case "resume_experience_hybrid_item":
+		return "简历经历 hybrid item"
 	case "resume_item_benchmark":
-		return "简历 item benchmark"
+		return "简历 Item Benchmark"
 	case "resume_major_baseline":
-		return "简历专业基础基线"
+		return "简历 Major Baseline"
+	case "resume_job_matching":
+		return "简历 Job Matching"
 	case "transcript":
 		return "成绩单解析"
 	default:
@@ -1360,6 +1530,11 @@ func applyResumeWorkflowCertifications(diagnosis *Diagnosis, result *LegatoEnvel
 func applyResumeWorkflowExperience(diagnosis *Diagnosis, result *LegatoEnvelope, hybrid bool) {
 	items := objectArray(result.Data["experience"])
 	diagnosis.AbilityProfile.Experiences = buildExperienceItems(items)
+	if hybrid {
+		markPendingExperienceHybridItems(diagnosis, "ready")
+	} else {
+		markPendingExperienceHybridItems(diagnosis, "pending")
+	}
 	if len(diagnosis.AbilityProfile.Experiences) == 0 {
 		if hybrid {
 			diagnosis.AbilityProfile.ExperiencesStatus = "empty"
@@ -1396,11 +1571,11 @@ func applyResumeWorkflowExperience(diagnosis *Diagnosis, result *LegatoEnvelope,
 	applyLegatoWarnings(diagnosis, warningLabel, result)
 }
 
-func applyResumeWorkflowItemBenchmark(diagnosis *Diagnosis, result *LegatoEnvelope) {
+func applyResumeWorkflowItemBenchmark(diagnosis *Diagnosis, result *LegatoEnvelope) int {
 	items := objectArray(result.Data["item_benchmark"])
 	if len(items) == 0 {
 		diagnosis.AbilityProfile.BenchmarkStatus = "empty"
-		return
+		return 0
 	}
 
 	applied := 0
@@ -1441,15 +1616,16 @@ func applyResumeWorkflowItemBenchmark(diagnosis *Diagnosis, result *LegatoEnvelo
 
 	if applied == 0 {
 		diagnosis.AbilityProfile.BenchmarkStatus = "empty"
-		return
+		return 0
 	}
 	diagnosis.AbilityProfile.BenchmarkStatus = "ready"
 	diagnosis.AbilityProfile.EvidenceSummary = append(diagnosis.AbilityProfile.EvidenceSummary, EvidenceItem{
-		Category: "Legato item_benchmark",
+		Category: "Legato Item Benchmark",
 		Summary:  fmt.Sprintf("已为 %d 条证据补充六维分布和 impact_factor。", applied),
 		Signal:   "证据影响因子已结构化",
 	})
-	applyLegatoWarnings(diagnosis, "item_benchmark", result)
+	applyLegatoWarnings(diagnosis, "Item Benchmark", result)
+	return applied
 }
 
 func buildMajorBaselineStageInput(diagnosis Diagnosis) map[string]any {
@@ -1457,6 +1633,17 @@ func buildMajorBaselineStageInput(diagnosis Diagnosis) map[string]any {
 		"basic_info":     diagnosis.AbilityProfile.BasicInfo,
 		"education":      diagnosis.AbilityProfile.Education,
 		"transcript_use": diagnosis.AbilityProfile.BasicInfo.TranscriptUse,
+	}
+}
+
+func buildJobMatchingStageInput(diagnosis Diagnosis) map[string]any {
+	return map[string]any{
+		"basic_info":     diagnosis.AbilityProfile.BasicInfo,
+		"education":      diagnosis.AbilityProfile.Education,
+		"major_baseline": diagnosis.AbilityProfile.MajorBaseline,
+		"awards":         diagnosis.AbilityProfile.Awards,
+		"experiences":    diagnosis.AbilityProfile.Experiences,
+		"dimensions":     benchmarkDimensionNames(),
 	}
 }
 
@@ -1497,11 +1684,244 @@ func applyResumeWorkflowMajorBaseline(diagnosis *Diagnosis, result *LegatoEnvelo
 		majorFamily = "未知"
 	}
 	diagnosis.AbilityProfile.EvidenceSummary = append(diagnosis.AbilityProfile.EvidenceSummary, EvidenceItem{
-		Category: "Legato major_baseline",
+		Category: "Legato Major Baseline",
 		Summary:  fmt.Sprintf("已根据%s专业背景生成六维能力 prior。", majorFamily),
 		Signal:   "专业培养 prior 已结构化",
 	})
-	applyLegatoWarnings(diagnosis, "major_baseline", result)
+	applyLegatoWarnings(diagnosis, "Major Baseline", result)
+}
+
+func applyResumeWorkflowJobMatching(diagnosis *Diagnosis, result *LegatoEnvelope) {
+	raw := objectValue(result.Data["job_matching"])
+	if len(raw) == 0 {
+		return
+	}
+	topJobs := buildMatchedJobs(raw["top_jobs"])
+	selectedJob := buildMatchedJob(objectValue(raw["selected_job"]), 1)
+	if selectedJob.Title == "" && len(topJobs) > 0 {
+		selectedJob = topJobs[0]
+	}
+	if len(topJobs) == 0 && selectedJob.Title != "" {
+		topJobs = []MatchedJob{selectedJob}
+	}
+	targetRole := stringValue(raw["target_role"])
+	if targetRole == "" {
+		targetRole = selectedJob.Title
+	}
+	studentRadar := buildScoreDimensions(raw["student_radar"])
+	targetRadar := buildScoreDimensions(raw["target_radar"])
+	if len(targetRadar) == 0 {
+		targetRadar = selectedJob.RequirementRadar
+	}
+	if selectedJob.Title != "" && len(selectedJob.RequirementRadar) == 0 {
+		selectedJob.RequirementRadar = targetRadar
+	}
+	diagnosis.MatchingResult = MatchingResult{
+		TargetRole:      targetRole,
+		OverallMatch:    clampInt(intValue(raw["overall_match"]), 0, 100),
+		MatchLevel:      stringValue(raw["match_level"]),
+		Source:          stringValue(raw["source"]),
+		MethodSummary:   stringValue(raw["method_summary"]),
+		FitSummary:      stringValue(raw["fit_summary"]),
+		SelectedJob:     selectedJob,
+		StudentRadar:    studentRadar,
+		TargetRadar:     targetRadar,
+		ReportSections:  buildReportRows(raw["report_sections"]),
+		GapDetails:      buildGapDetails(raw["gap_details"]),
+		Recommendations: stringArrayValue(raw["recommendations"]),
+		Reasons:         stringArrayValue(raw["recommended_reasons"]),
+		AgentNotes:      stringArrayValue(raw["agent_notes"]),
+	}
+	if diagnosis.MatchingResult.OverallMatch == 0 && selectedJob.Match > 0 {
+		diagnosis.MatchingResult.OverallMatch = selectedJob.Match
+	}
+	if diagnosis.MatchingResult.MatchLevel == "" {
+		diagnosis.MatchingResult.MatchLevel = matchLevelFromScore(diagnosis.MatchingResult.OverallMatch)
+	}
+	if diagnosis.MatchingResult.Source == "" {
+		diagnosis.MatchingResult.Source = "Legato Job Matching Team via Presto"
+	}
+	if len(diagnosis.MatchingResult.ReportSections) == 0 && len(studentRadar) == len(targetRadar) {
+		diagnosis.MatchingResult.ReportSections = reportRowsFromRadar(studentRadar, targetRadar)
+	}
+	diagnosis.AbilityProfile.TopJobs = topJobs
+	if targetRole != "" {
+		diagnosis.AbilityProfile.BasicInfo.TargetRole = targetRole
+	}
+	diagnosis.AbilityProfile.EvidenceSummary = append(diagnosis.AbilityProfile.EvidenceSummary, EvidenceItem{
+		Category: "Legato Job Matching",
+		Summary:  fmt.Sprintf("已推荐 %d 个岗位，首选岗位为%s。", len(topJobs), fallbackString(targetRole, "未命名岗位")),
+		Signal:   "岗位推荐和目标能力雷达已结构化",
+	})
+	applyLegatoWarnings(diagnosis, "Job Matching", result)
+}
+
+func buildMatchedJobs(value any) []MatchedJob {
+	items := objectArray(value)
+	jobs := make([]MatchedJob, 0, minInt(len(items), 5))
+	for index, item := range items {
+		job := buildMatchedJob(item, index+1)
+		if job.Title == "" {
+			continue
+		}
+		job.Rank = len(jobs) + 1
+		jobs = append(jobs, job)
+		if len(jobs) >= 5 {
+			break
+		}
+	}
+	return jobs
+}
+
+func buildMatchedJob(item map[string]any, defaultRank int) MatchedJob {
+	if len(item) == 0 {
+		return MatchedJob{}
+	}
+	title := stringValue(item["title"])
+	if title == "" {
+		title = stringValue(item["role"])
+	}
+	if title == "" {
+		return MatchedJob{}
+	}
+	return MatchedJob{
+		Rank:             clampInt(defaultInt(intValue(item["rank"]), defaultRank), 1, 99),
+		Title:            title,
+		Category:         stringValue(item["category"]),
+		Match:            clampInt(intValue(item["match"]), 0, 100),
+		AbilityMatch:     clampInt(intValue(item["ability_match"]), 0, 100),
+		ExperienceMatch:  clampInt(intValue(item["experience_match"]), 0, 100),
+		EducationGate:    stringValue(item["education_gate"]),
+		FitSummary:       stringValue(item["fit_summary"]),
+		Risk:             stringValue(item["risk"]),
+		RequirementRadar: buildScoreDimensions(item["requirement_radar"]),
+		Reasons:          stringArrayValue(item["reasons"]),
+		NextProof:        stringValue(item["next_proof"]),
+	}
+}
+
+func buildScoreDimensions(value any) []ScoreDimension {
+	items := objectArray(value)
+	if len(items) == 0 {
+		return nil
+	}
+	dimensions := make([]ScoreDimension, 0, len(items))
+	for _, item := range items {
+		name := stringValue(item["name"])
+		if name == "" {
+			name = stringValue(item["dimension"])
+		}
+		score := clampInt(intValue(item["score"]), 0, 100)
+		maxScore := intValue(item["max_score"])
+		if maxScore == 0 {
+			maxScore = 100
+		}
+		if name == "" {
+			continue
+		}
+		dimensions = append(dimensions, ScoreDimension{
+			Name:     name,
+			Score:    score,
+			MaxScore: clampInt(maxScore, 1, 100),
+			Level:    stringValue(item["level"]),
+			Reason:   stringValue(item["reason"]),
+		})
+	}
+	return dimensions
+}
+
+func buildReportRows(value any) []ReportRow {
+	items := objectArray(value)
+	rows := make([]ReportRow, 0, len(items))
+	for _, item := range items {
+		name := stringValue(item["name"])
+		if name == "" {
+			name = stringValue(item["capability"])
+		}
+		if name == "" {
+			continue
+		}
+		student := clampInt(intValue(item["student"]), 0, 100)
+		roleNeed := clampInt(defaultInt(intValue(item["role_need"]), intValue(item["target"])), 0, 100)
+		difference := intValue(item["difference"])
+		if difference == 0 {
+			difference = student - roleNeed
+		}
+		rows = append(rows, ReportRow{
+			Name:       name,
+			Student:    student,
+			RoleNeed:   roleNeed,
+			Difference: clampInt(difference, -100, 100),
+		})
+	}
+	return rows
+}
+
+func buildGapDetails(value any) []GapDetail {
+	items := objectArray(value)
+	gaps := make([]GapDetail, 0, len(items))
+	for _, item := range items {
+		capability := stringValue(item["capability"])
+		if capability == "" {
+			capability = stringValue(item["name"])
+		}
+		if capability == "" {
+			continue
+		}
+		gaps = append(gaps, GapDetail{
+			Capability: capability,
+			Current:    stringValue(item["current"]),
+			Expected:   stringValue(item["expected"]),
+			Action:     stringValue(item["action"]),
+			Severity:   stringValue(item["severity"]),
+		})
+	}
+	return gaps
+}
+
+func reportRowsFromRadar(studentRadar []ScoreDimension, targetRadar []ScoreDimension) []ReportRow {
+	targetByName := make(map[string]int, len(targetRadar))
+	for _, item := range targetRadar {
+		targetByName[item.Name] = item.Score
+	}
+	rows := make([]ReportRow, 0, len(studentRadar))
+	for _, item := range studentRadar {
+		roleNeed := targetByName[item.Name]
+		rows = append(rows, ReportRow{
+			Name:       item.Name,
+			Student:    item.Score,
+			RoleNeed:   roleNeed,
+			Difference: item.Score - roleNeed,
+		})
+	}
+	return rows
+}
+
+func matchLevelFromScore(score int) string {
+	switch {
+	case score >= 85:
+		return "强匹配"
+	case score >= 75:
+		return "高潜力匹配"
+	case score >= 65:
+		return "可迁移匹配"
+	default:
+		return "需补证据"
+	}
+}
+
+func fallbackString(value string, fallback string) string {
+	if strings.TrimSpace(value) != "" {
+		return value
+	}
+	return fallback
+}
+
+func defaultInt(value int, fallback int) int {
+	if value != 0 {
+		return value
+	}
+	return fallback
 }
 
 func benchmarkIndexFromKey(key string, prefix string, length int) (int, bool) {
@@ -1525,6 +1945,51 @@ func markResumeEvidenceStatus(diagnosis *Diagnosis, target string, status string
 	case "resume_experience_hybrid":
 		if len(diagnosis.AbilityProfile.Experiences) == 0 {
 			diagnosis.AbilityProfile.ExperiencesStatus = status
+		}
+	}
+}
+
+func chunkBenchmarkInputs(items []BenchmarkEvidenceInput, maxRequests int) [][]BenchmarkEvidenceInput {
+	if len(items) == 0 {
+		return nil
+	}
+	if maxRequests <= 0 {
+		maxRequests = 5
+	}
+	requestCount := minInt(maxRequests, len(items))
+	chunks := make([][]BenchmarkEvidenceInput, requestCount)
+	for index, item := range items {
+		bucket := index % requestCount
+		chunks[bucket] = append(chunks[bucket], item)
+	}
+	return chunks
+}
+
+func benchmarkStepStatus(pendingItemBatches int, majorBaselinePending bool) string {
+	if pendingItemBatches > 0 || majorBaselinePending {
+		return "running"
+	}
+	return "done"
+}
+
+func benchmarkProgressMessage(pendingItemBatches int, majorBaselinePending bool, applied int, hasFailures bool) string {
+	parts := []string{fmt.Sprintf("Item Benchmark 已补充 %d 条证据", applied)}
+	if pendingItemBatches > 0 {
+		parts = append(parts, fmt.Sprintf("剩余 %d 批", pendingItemBatches))
+	}
+	if majorBaselinePending {
+		parts = append(parts, "等待 Major Baseline")
+	}
+	if hasFailures {
+		parts = append(parts, "部分批次失败")
+	}
+	return strings.Join(parts, "，")
+}
+
+func markPendingExperienceHybridItems(diagnosis *Diagnosis, status string) {
+	for index := range diagnosis.AbilityProfile.Experiences {
+		if diagnosis.AbilityProfile.Experiences[index].HybridStatus == "" || diagnosis.AbilityProfile.Experiences[index].HybridStatus == "pending" {
+			diagnosis.AbilityProfile.Experiences[index].HybridStatus = status
 		}
 	}
 }

@@ -61,13 +61,14 @@ Apply these after the base score.
 `item_benchmark` returns a six-dimensional distribution and an `impact_factor`. The frontend derives radar scores from item evidence:
 
 1. Evidence strength = `0.4 * level/10 + 0.6 * impact_factor/10`.
-2. Dimension contribution = `six_dim_score * evidence_strength * 1.85`, capped at `0.96`.
-3. Multiple items combine with diminishing returns: `combined = 1 - product(1 - contribution_i)`.
-4. 校内 and 综合 blend an academic prior from the `major_baseline` workflow. A missing GPA or transcript average around 80 maps to an ability prior around 50, not ability 80.
+2. Dimension contribution = `six_dim_score * evidence_strength`, capped at `0.96`.
+3. Evidence first goes into impact buckets. Low-confidence buckets are strict; higher-impact buckets have wider single-item and total caps.
+4. Multiple items combine with strong diminishing returns after bucket caps.
 5. Low-confidence evidence buckets have both single-item and total-bucket caps. Untitled professional projects, campus/internal awards, low-impact awards/basic certificates, and generic campus roles can support a profile, but cannot stack into strong evidence without concrete titles, formal external selection, or measured outcomes.
-5. Render three overlays: `综合` for all items plus academic baseline, `校内` for campus/internal items plus academic baseline, `校外` for external items.
+6. Final ability is `school_tier_prior + evidence_lift`, subject to a school-tier ceiling. A missing GPA or transcript average around 80 maps to ordinary academic completion, not ability 80.
+7. Render three overlays: `综合` for all items plus academic baseline, `校内` for campus/internal items plus academic baseline, `校外` for external items constrained by the same school-tier ceiling.
 
-This keeps low-value certificates from dominating while letting repeated high-quality evidence accumulate.
+This keeps low-value certificates from dominating while letting verified high-quality evidence break through within realistic school-tier caps.
 
 ## Major Baseline Calibration
 
@@ -112,10 +113,22 @@ School tier is a visible academic prior, not a ranking contest:
 | ordinary / unknown / lower rank | medium debuff; do not collapse the score, but avoid treating it as neutral |
 | independent/private/former third-tier college | separate from parent school; missing GPA or average around 80 usually maps to 38-43 prior |
 
+Frontend ceiling bands:
+
+| Tier | Default base | No B3/B4 evidence cap | With B3/B4 evidence cap |
+| --- | ---: | ---: | ---: |
+| 985 / soft-rank <= 50 | 68 | 78 | 92-94 |
+| 211 / 双一流 / soft-rank <= 150 | 62 | 72 | 86-88 |
+| non-双一流 soft-rank 151-250 | 52 | 62 | 76-78 |
+| ordinary本科 / unknown / lower rank | 46 | 56 | 70-72 |
+| independent-college history plus better later degree | 45 | 54 | 66-70 |
+| independent/private/former third-tier college | 38 | 52 | 60-62 |
+| 专科 | 34 | 48 | 56-60 |
+
 Apply school tier mainly to `逻辑`, `专业`, `抗压`, and `成长`; do not raise `领导` from school tier alone.
 If the school's known field orientation or resume context suggests a strong specialty match, add a small extra lift to `专业` and one adjacent dimension, but do not erase a below-tier debuff.
 Do not invent a specialty. Use explicit context such as `王牌专业`, `特色专业`, `优势专业`, `一流学科`, or broad school-domain alignment such as electronic-information schools with computing/electronics majors.
-Independent/private/former third-tier colleges do not inherit the parent university's ranking or specialty strength. Their real projects, internships, and competitions can still raise final ability scores normally.
+Independent/private/former third-tier colleges do not inherit the parent university's ranking or specialty strength. Their real projects, internships, and competitions can still raise final ability scores, but only B3/B4 evidence should break the 52 band. A later clearly stronger degree partially offsets the weak undergraduate prior, but should not turn the profile into a normal T0/T1/T2 profile.
 
 ## Contest Calibration
 

@@ -127,6 +127,48 @@ func TestRunnerRetriesProviderErrors(t *testing.T) {
 	}
 }
 
+func TestRunnerEmitsModelDeltaEventsWhenStreaming(t *testing.T) {
+	ctx := context.Background()
+	provider := &recordingProvider{}
+	provider.stream = func(ctx context.Context, req ChatRequest, call int, onDelta ChatStreamHandler) (ChatResponse, error) {
+		onDelta(ChatStreamDelta{Content: "hello"})
+		onDelta(ChatStreamDelta{Content: " world"})
+		return ChatResponse{Message: Message{Content: "hello world"}}, nil
+	}
+
+	runner, err := NewRunner(Config{
+		Model:    "unit-model",
+		MaxSteps: 2,
+		LLMRetry: NoRetry(),
+	}, provider, NewMemoryStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	events, results := runner.RunStream(ctx, RunInput{UserInput: "hello", Stream: true})
+	var deltas []string
+	for event := range events {
+		if event.Type != EventModelDelta {
+			continue
+		}
+		if event.Data["channel"] != "content" {
+			t.Fatalf("delta channel = %#v, want content", event.Data["channel"])
+		}
+		deltas = append(deltas, event.Data["text"].(string))
+	}
+	result := <-results
+	if result.Output != "hello world" {
+		t.Fatalf("output = %q, want hello world", result.Output)
+	}
+	if len(deltas) != 2 || deltas[0] != "hello" || deltas[1] != " world" {
+		t.Fatalf("deltas = %#v", deltas)
+	}
+	requests := provider.Requests()
+	if len(requests) != 1 || !requests[0].Stream {
+		t.Fatalf("stream request not recorded: %#v", requests)
+	}
+}
+
 func TestRunnerExecutesToolLoopAndSubmitsToolResult(t *testing.T) {
 	ctx := context.Background()
 	provider := &recordingProvider{}
@@ -384,6 +426,7 @@ type recordingProvider struct {
 	mu       sync.Mutex
 	requests []ChatRequest
 	chat     func(context.Context, ChatRequest, int) (ChatResponse, error)
+	stream   func(context.Context, ChatRequest, int, ChatStreamHandler) (ChatResponse, error)
 }
 
 func lastUserContent(messages []Message) string {
@@ -406,6 +449,23 @@ func (p *recordingProvider) Chat(ctx context.Context, req ChatRequest) (ChatResp
 		return ChatResponse{}, errors.New("chat function is not configured")
 	}
 	return chat(ctx, req, call)
+}
+
+func (p *recordingProvider) ChatStream(ctx context.Context, req ChatRequest, onDelta ChatStreamHandler) (ChatResponse, error) {
+	p.mu.Lock()
+	p.requests = append(p.requests, cloneChatRequest(req))
+	call := len(p.requests)
+	stream := p.stream
+	chat := p.chat
+	p.mu.Unlock()
+
+	if stream == nil {
+		if chat == nil {
+			return ChatResponse{}, errors.New("stream function is not configured")
+		}
+		return chat(ctx, req, call)
+	}
+	return stream(ctx, req, call, onDelta)
 }
 
 func (p *recordingProvider) Requests() []ChatRequest {

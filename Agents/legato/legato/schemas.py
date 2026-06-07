@@ -74,7 +74,36 @@ TRANSCRIPT_SCHEMA = {
     },
 }
 
+CHAT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["chat"],
+    "properties": {
+        "chat": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "answer",
+                "conclusion",
+                "actions",
+                "evidence_refs",
+                "missing_evidence",
+                "confidence",
+            ],
+            "properties": {
+                "answer": {"type": "string"},
+                "conclusion": {"type": "string"},
+                "actions": {"type": "array", "items": {"type": "string"}},
+                "evidence_refs": {"type": "array", "items": {"type": "string"}},
+                "missing_evidence": {"type": "array", "items": {"type": "string"}},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            },
+        },
+    },
+}
+
 SCHEMAS = {
+    "chat": CHAT_SCHEMA,
     "resume": RESUME_SCHEMA,
     "transcript": TRANSCRIPT_SCHEMA,
 }
@@ -86,4 +115,3 @@ def schema_for(target: str) -> dict:
     except KeyError as exc:
         supported = ", ".join(sorted(SCHEMAS))
         raise ValueError(f"unsupported target {target!r}; expected one of: {supported}") from exc
-

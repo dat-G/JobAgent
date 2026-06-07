@@ -107,6 +107,70 @@ func (p *CachedProvider) Chat(ctx context.Context, req agent.ChatRequest) (agent
 	return response, nil
 }
 
+func (p *CachedProvider) ChatStream(ctx context.Context, req agent.ChatRequest, onDelta agent.ChatStreamHandler) (agent.ChatResponse, error) {
+	key, err := p.store.Key(req)
+	if err != nil {
+		return agent.ChatResponse{}, err
+	}
+	if response, err := p.store.Get(key); err == nil {
+		emitCachedDelta(response, onDelta)
+		return response, nil
+	} else if !errors.Is(err, errCacheMiss) {
+		return agent.ChatResponse{}, err
+	}
+
+	call, leader := p.join(key)
+	if !leader {
+		select {
+		case <-call.done:
+			if call.err == nil {
+				emitCachedDelta(call.response, onDelta)
+			}
+			return call.response, call.err
+		case <-ctx.Done():
+			return agent.ChatResponse{}, ctx.Err()
+		}
+	}
+
+	defer func() {
+		p.finish(key, call)
+	}()
+
+	if response, err := p.store.Get(key); err == nil {
+		call.response = response
+		emitCachedDelta(response, onDelta)
+		return call.response, nil
+	} else if !errors.Is(err, errCacheMiss) {
+		call.err = err
+		return agent.ChatResponse{}, call.err
+	}
+
+	var response agent.ChatResponse
+	if streaming, ok := p.next.(agent.StreamingProvider); ok {
+		response, err = streaming.ChatStream(ctx, req, onDelta)
+	} else {
+		response, err = p.next.Chat(ctx, req)
+		emitCachedDelta(response, onDelta)
+	}
+	if err != nil {
+		call.err = err
+		return agent.ChatResponse{}, err
+	}
+	if err := p.store.Set(key, req, response); err != nil {
+		call.err = err
+		return agent.ChatResponse{}, err
+	}
+	call.response = response
+	return response, nil
+}
+
+func emitCachedDelta(response agent.ChatResponse, onDelta agent.ChatStreamHandler) {
+	if onDelta == nil || response.Message.Content == "" {
+		return
+	}
+	onDelta(agent.ChatStreamDelta{Content: response.Message.Content, Raw: response.Raw})
+}
+
 func (p *CachedProvider) join(key string) (*cacheCall, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

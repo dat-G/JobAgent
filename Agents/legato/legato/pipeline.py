@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from .chat_workflow_formatter import ChatWorkflowFormatter
 from .cleaning import clean_markdown
 from .formatter import LocalRuleFormatter, PrestoFormatter
 from .markitdown_frontend import MarkItDownFrontend
@@ -134,6 +135,21 @@ def process(
             timeout_seconds=remaining,
             stage_input=workflow_stage_input,
             combine_agents=workflow_combine_agents,
+        )
+        if workflow_stage:
+            formatted = formatter.format_stage(markdown, workflow_stage)
+        else:
+            formatted = formatter.format(markdown)
+        formatter_debug = formatted.debug
+    elif workflow == "chat":
+        if target != "chat":
+            raise ValueError("--workflow chat requires --target chat")
+        if not use_presto:
+            raise ValueError("--workflow chat requires Presto; remove --no-presto")
+        formatter = ChatWorkflowFormatter(
+            presto_url=presto_url,
+            timeout_seconds=remaining,
+            stage_input=workflow_stage_input,
         )
         if workflow_stage:
             formatted = formatter.format_stage(markdown, workflow_stage)

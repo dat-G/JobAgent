@@ -6,6 +6,7 @@ Agents/*/.venv/
 .DS_Store
 .run/
 jobagent-gocache/
+.gocache/
 go-build*/
 __pycache__/
 *.pyc

@@ -10,14 +10,24 @@ from .schemas import SCHEMAS
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="legato", description="Structure resumes and transcripts.")
+    parser = argparse.ArgumentParser(prog="legato", description="Structure resumes, transcripts, and chat context.")
     parser.add_argument("source", help="Input PDF, image, or Markdown file.")
     parser.add_argument("--target", choices=sorted(SCHEMAS), required=True)
-    parser.add_argument("--workflow", choices=["resume"], help="Use a workflow-specific formatter.")
+    parser.add_argument("--workflow", choices=["resume", "chat"], help="Use a workflow-specific formatter.")
     parser.add_argument(
         "--workflow-stage",
-        choices=["profile", "certifications_awards", "experience", "experience_hybrid", "item_benchmark", "major_baseline"],
-        help="Run one resume workflow stage and return partial structured data.",
+        choices=[
+            "profile",
+            "certifications_awards",
+            "experience",
+            "experience_hybrid",
+            "experience_hybrid_item",
+            "item_benchmark",
+            "major_baseline",
+            "job_matching",
+            "answer",
+        ],
+        help="Run one workflow stage and return partial structured data.",
     )
     parser.add_argument(
         "--workflow-combine-agents",

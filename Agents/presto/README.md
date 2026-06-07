@@ -65,6 +65,8 @@ curl -N http://127.0.0.1:8080/runs/{run_id}/events
 
 Use `{"async":true,"message":"..."}` to return immediately and consume progress from SSE. Async runs continue after the request returns and are capped by `PRESTO_ASYNC_RUN_TIMEOUT`, a positive Go duration that defaults to `10m`.
 
+Add `"token_stream":true` to the run request to opt into model token events. Presto will emit `model.delta` SSE events with `data.channel="content"` and `data.text` for each streamed content delta, while still returning the same final run `output`. DeepSeek `reasoning_content` is kept internal by default; set `PRESTO_STREAM_REASONING=1` only for controlled debugging.
+
 ## Workflow
 
 Use `internal/workflow` to compose agent runs:

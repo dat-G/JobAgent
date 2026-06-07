@@ -49,7 +49,6 @@ type Diagnosis struct {
 type AbilityProfile struct {
 	BasicInfo           BasicInfo        `json:"basic_info"`
 	Education           []EducationItem  `json:"education"`
-	FourDimScores       []ScoreDimension `json:"four_dim_scores"`
 	RadarData           []ScoreDimension `json:"radar_data"`
 	EvidenceSummary     []EvidenceItem   `json:"evidence_summary"`
 	AwardsStatus        string           `json:"awards_status"`
@@ -131,6 +130,7 @@ type ExperienceItem struct {
 	Reason              string    `json:"reason"`
 	DataSource          string    `json:"data_source"`
 	ScoreSource         string    `json:"score_source"`
+	HybridStatus        string    `json:"hybrid_status,omitempty"`
 }
 
 type MajorBaseline struct {
@@ -145,11 +145,18 @@ type MajorBaseline struct {
 }
 
 type MatchedJob struct {
-	Rank      int      `json:"rank"`
-	Title     string   `json:"title"`
-	Match     int      `json:"match"`
-	Reasons   []string `json:"reasons"`
-	NextProof string   `json:"next_proof"`
+	Rank             int              `json:"rank"`
+	Title            string           `json:"title"`
+	Category         string           `json:"category,omitempty"`
+	Match            int              `json:"match"`
+	AbilityMatch     int              `json:"ability_match,omitempty"`
+	ExperienceMatch  int              `json:"experience_match,omitempty"`
+	EducationGate    string           `json:"education_gate,omitempty"`
+	FitSummary       string           `json:"fit_summary,omitempty"`
+	Risk             string           `json:"risk,omitempty"`
+	RequirementRadar []ScoreDimension `json:"requirement_radar,omitempty"`
+	Reasons          []string         `json:"reasons"`
+	NextProof        string           `json:"next_proof"`
 }
 
 type PathPlan struct {
@@ -179,13 +186,20 @@ type Resource struct {
 }
 
 type MatchingResult struct {
-	TargetRole      string      `json:"target_role"`
-	OverallMatch    int         `json:"overall_match"`
-	MatchLevel      string      `json:"match_level"`
-	ReportSections  []ReportRow `json:"report_sections"`
-	GapDetails      []GapDetail `json:"gap_details"`
-	Recommendations []string    `json:"recommendations"`
-	Reasons         []string    `json:"recommended_reasons"`
+	TargetRole      string           `json:"target_role"`
+	OverallMatch    int              `json:"overall_match"`
+	MatchLevel      string           `json:"match_level"`
+	Source          string           `json:"source,omitempty"`
+	MethodSummary   string           `json:"method_summary,omitempty"`
+	FitSummary      string           `json:"fit_summary,omitempty"`
+	SelectedJob     MatchedJob       `json:"selected_job,omitempty"`
+	StudentRadar    []ScoreDimension `json:"student_radar,omitempty"`
+	TargetRadar     []ScoreDimension `json:"target_radar,omitempty"`
+	ReportSections  []ReportRow      `json:"report_sections"`
+	GapDetails      []GapDetail      `json:"gap_details"`
+	Recommendations []string         `json:"recommendations"`
+	Reasons         []string         `json:"recommended_reasons"`
+	AgentNotes      []string         `json:"agent_notes,omitempty"`
 }
 
 type ReportRow struct {
@@ -241,6 +255,7 @@ func (s Server) routes() http.Handler {
 	mux.HandleFunc("/api/diagnosis/mock", s.handleMockDiagnosis)
 	mux.HandleFunc("/api/diagnosis", s.handleDiagnosis)
 	mux.HandleFunc("/api/diagnosis/", s.handleDiagnosisJob)
+	mux.HandleFunc("/api/chat", s.handleChat)
 	mux.HandleFunc("/api/export/ability-profile.json", s.handleAbilityProfileJSON)
 	mux.HandleFunc("/api/export/ability-profile.xlsx", s.handleAbilityProfileXLSX)
 	mux.HandleFunc("/api/export/path-plan.doc", s.handlePathPlanDoc)
@@ -433,23 +448,17 @@ func mockDiagnosis(req DiagnosisRequest) Diagnosis {
 					RuankeRank:         120,
 				},
 			},
-			FourDimScores: []ScoreDimension{
-				{Name: "专业基础", Score: 78, MaxScore: 100, Level: "良好", Reason: "课程与专业背景匹配推荐岗位，算法与网络基础仍需补证据"},
-				{Name: "项目实践", Score: 84, MaxScore: 100, Level: "强", Reason: "前端项目与实习经历有明确产出，适合形成作品集"},
-				{Name: "工程交付", Score: 72, MaxScore: 100, Level: "待强化", Reason: "已有开发经验，但自动化测试、性能优化和工程规范证据不足"},
-				{Name: "职业准备", Score: 69, MaxScore: 100, Level: "待强化", Reason: "岗位表达和面试题库准备不足，需要按推荐岗位要求补齐材料"},
-			},
 			RadarData: []ScoreDimension{
-				{Name: "专业基础", Score: 78, MaxScore: 100, Level: "良好", Reason: "课程匹配"},
-				{Name: "项目实践", Score: 84, MaxScore: 100, Level: "强", Reason: "项目证据较完整"},
-				{Name: "工程能力", Score: 72, MaxScore: 100, Level: "待强化", Reason: "工程化证据不足"},
-				{Name: "算法数据", Score: 62, MaxScore: 100, Level: "短板", Reason: "算法训练证据偏少"},
-				{Name: "沟通协作", Score: 76, MaxScore: 100, Level: "良好", Reason: "有团队项目线索"},
-				{Name: "求职准备", Score: 69, MaxScore: 100, Level: "待强化", Reason: "投递和面试材料未成体系"},
+				{Name: "逻辑", Score: 74, MaxScore: 100, Level: "良好", Reason: "建模、问题拆解和工程分析证据较完整"},
+				{Name: "语言", Score: 64, MaxScore: 100, Level: "中等", Reason: "英语证书和项目表达有基础，岗位化表达仍需补强"},
+				{Name: "专业", Score: 80, MaxScore: 100, Level: "强", Reason: "计算机专业背景和前端项目证据支撑专业维度"},
+				{Name: "领导", Score: 62, MaxScore: 100, Level: "中等", Reason: "有组织协作线索，但缺少明确 ownership 和团队结果"},
+				{Name: "抗压", Score: 68, MaxScore: 100, Level: "良好", Reason: "竞赛和交付经历能体现约束下完成任务"},
+				{Name: "成长", Score: 76, MaxScore: 100, Level: "良好", Reason: "项目迭代和跨任务学习证据较强"},
 			},
 			EvidenceSummary: []EvidenceItem{
 				{Category: "教育背景", Summary: "计算机科学与技术本科，学校具备 211 与双一流标签", Signal: "岗位基础匹配"},
-				{Category: "项目经历", Summary: "视频云平台监控前台系统开发，能支撑前端工程方向", Signal: "项目实践强"},
+				{Category: "项目经历", Summary: "视频云平台监控前台系统开发，能支撑前端工程方向", Signal: "专业维度强"},
 				{Category: "竞赛证书", Summary: "英语六级、数学建模竞赛奖项可补充学习能力证据", Signal: "综合能力良好"},
 				{Category: "待补证据", Summary: "性能优化、测试覆盖、组件化设计、线上问题处理证据不足", Signal: "工程深度待补"},
 			},
@@ -553,11 +562,11 @@ func mockDiagnosis(req DiagnosisRequest) Diagnosis {
 				},
 			},
 			TopJobs: []MatchedJob{
-				{Rank: 1, Title: "前端工程师", Match: 82, Reasons: []string{"项目经验直接相关", "专业背景匹配", "可通过作品集快速补强"}, NextProof: "补充组件库、性能优化和测试覆盖案例"},
-				{Rank: 2, Title: "Web 全栈开发", Match: 76, Reasons: []string{"前端基础较强", "需要后端接口与数据库证据"}, NextProof: "完成一个含鉴权、接口、部署的全栈项目"},
-				{Rank: 3, Title: "低代码平台开发", Match: 73, Reasons: []string{"前端交互经验相关", "需要配置化和组件抽象证据"}, NextProof: "做一个表单编排或流程设计器 Demo"},
-				{Rank: 4, Title: "测试开发工程师", Match: 68, Reasons: []string{"工程基础可迁移", "测试工具链证据不足"}, NextProof: "补充 Playwright、接口测试和 CI 报告"},
-				{Rank: 5, Title: "数据可视化工程师", Match: 66, Reasons: []string{"前端方向可延展", "图表与数据处理经历不足"}, NextProof: "构建一个含 ECharts/D3 的指标分析项目"},
+				{Rank: 1, Title: "前端工程师", Category: "本专业相关", Match: 82, AbilityMatch: 84, ExperienceMatch: 78, EducationGate: "通过", FitSummary: "专业和项目都能支撑前端方向，工程化证据需要补齐。", RequirementRadar: []ScoreDimension{{Name: "逻辑", Score: 78}, {Name: "语言", Score: 60}, {Name: "专业", Score: 86}, {Name: "领导", Score: 62}, {Name: "抗压", Score: 72}, {Name: "成长", Score: 78}}, Reasons: []string{"项目经验直接相关", "专业背景匹配", "可通过作品集快速补强"}, NextProof: "补充组件库、性能优化和测试覆盖案例"},
+				{Rank: 2, Title: "Web 全栈开发", Category: "本专业扩展", Match: 76, AbilityMatch: 77, ExperienceMatch: 70, EducationGate: "通过", FitSummary: "前端能力可迁移，但后端接口和数据库证据偏少。", RequirementRadar: []ScoreDimension{{Name: "逻辑", Score: 80}, {Name: "语言", Score: 58}, {Name: "专业", Score: 82}, {Name: "领导", Score: 60}, {Name: "抗压", Score: 74}, {Name: "成长", Score: 76}}, Reasons: []string{"前端基础较强", "需要后端接口与数据库证据"}, NextProof: "完成一个含鉴权、接口、部署的全栈项目"},
+				{Rank: 3, Title: "低代码平台开发", Category: "本专业扩展", Match: 73, AbilityMatch: 75, ExperienceMatch: 68, EducationGate: "通过", FitSummary: "组件抽象和交互经验相关，配置化产品证据不足。", RequirementRadar: []ScoreDimension{{Name: "逻辑", Score: 76}, {Name: "语言", Score: 62}, {Name: "专业", Score: 80}, {Name: "领导", Score: 66}, {Name: "抗压", Score: 70}, {Name: "成长", Score: 76}}, Reasons: []string{"前端交互经验相关", "需要配置化和组件抽象证据"}, NextProof: "做一个表单编排或流程设计器 Demo"},
+				{Rank: 4, Title: "测试开发工程师", Category: "跨方向可迁移", Match: 68, AbilityMatch: 70, ExperienceMatch: 58, EducationGate: "通过", FitSummary: "工程基础可迁移，测试工具链和质量体系证据不足。", RequirementRadar: []ScoreDimension{{Name: "逻辑", Score: 82}, {Name: "语言", Score: 56}, {Name: "专业", Score: 76}, {Name: "领导", Score: 54}, {Name: "抗压", Score: 76}, {Name: "成长", Score: 72}}, Reasons: []string{"工程基础可迁移", "测试工具链证据不足"}, NextProof: "补充 Playwright、接口测试和 CI 报告"},
+				{Rank: 5, Title: "数据可视化工程师", Category: "跨方向可迁移", Match: 66, AbilityMatch: 68, ExperienceMatch: 56, EducationGate: "通过", FitSummary: "前端方向可延展，但图表与数据处理经历不足。", RequirementRadar: []ScoreDimension{{Name: "逻辑", Score: 80}, {Name: "语言", Score: 60}, {Name: "专业", Score: 78}, {Name: "领导", Score: 55}, {Name: "抗压", Score: 70}, {Name: "成长", Score: 74}}, Reasons: []string{"前端方向可延展", "图表与数据处理经历不足"}, NextProof: "构建一个含 ECharts/D3 的指标分析项目"},
 			},
 		},
 		PathPlan: PathPlan{
@@ -614,14 +623,41 @@ func mockDiagnosis(req DiagnosisRequest) Diagnosis {
 			},
 		},
 		MatchingResult: MatchingResult{
-			TargetRole:   recommendedRole,
-			OverallMatch: 82,
-			MatchLevel:   "高潜力匹配",
+			TargetRole:    recommendedRole,
+			OverallMatch:  82,
+			MatchLevel:    "高潜力匹配",
+			Source:        "mock_job_matching",
+			MethodSummary: "模拟 Agent Team 按六维能力、经历相关性和学历门槛进行排序。",
+			FitSummary:    "前端工程师与学生现有专业背景和项目证据最贴近，短板集中在工程化测试、性能优化和岗位表达。",
+			SelectedJob: MatchedJob{
+				Rank:             1,
+				Title:            recommendedRole,
+				Category:         "本专业相关",
+				Match:            82,
+				AbilityMatch:     84,
+				ExperienceMatch:  78,
+				EducationGate:    "通过",
+				FitSummary:       "专业和项目都能支撑前端方向，工程化证据需要补齐。",
+				RequirementRadar: []ScoreDimension{{Name: "逻辑", Score: 78}, {Name: "语言", Score: 60}, {Name: "专业", Score: 86}, {Name: "领导", Score: 62}, {Name: "抗压", Score: 72}, {Name: "成长", Score: 78}},
+				Reasons:          []string{"项目经验直接相关", "专业背景匹配", "可通过作品集快速补强"},
+				NextProof:        "补充组件库、性能优化和测试覆盖案例",
+			},
+			StudentRadar: []ScoreDimension{
+				{Name: "逻辑", Score: 74},
+				{Name: "语言", Score: 64},
+				{Name: "专业", Score: 80},
+				{Name: "领导", Score: 62},
+				{Name: "抗压", Score: 68},
+				{Name: "成长", Score: 76},
+			},
+			TargetRadar: []ScoreDimension{{Name: "逻辑", Score: 78}, {Name: "语言", Score: 60}, {Name: "专业", Score: 86}, {Name: "领导", Score: 62}, {Name: "抗压", Score: 72}, {Name: "成长", Score: 78}},
 			ReportSections: []ReportRow{
-				{Name: "专业基础", Student: 78, RoleNeed: 82, Difference: -4},
-				{Name: "项目实践", Student: 84, RoleNeed: 80, Difference: 4},
-				{Name: "工程交付", Student: 72, RoleNeed: 86, Difference: -14},
-				{Name: "职业准备", Student: 69, RoleNeed: 78, Difference: -9},
+				{Name: "逻辑", Student: 74, RoleNeed: 78, Difference: -4},
+				{Name: "语言", Student: 64, RoleNeed: 60, Difference: 4},
+				{Name: "专业", Student: 80, RoleNeed: 86, Difference: -6},
+				{Name: "领导", Student: 62, RoleNeed: 62, Difference: 0},
+				{Name: "抗压", Student: 68, RoleNeed: 72, Difference: -4},
+				{Name: "成长", Student: 76, RoleNeed: 78, Difference: -2},
 			},
 			GapDetails: []GapDetail{
 				{Capability: "工程化测试", Current: "简历未体现测试覆盖", Expected: "能展示单测、E2E 或 CI 证据", Action: "为作品集补 Playwright 测试和截图报告", Severity: "高"},
@@ -639,10 +675,11 @@ func mockDiagnosis(req DiagnosisRequest) Diagnosis {
 				"项目和实习经历能支撑前端方向。",
 				"短板集中在可通过 60 到 90 天任务补齐的工程证据。",
 			},
+			AgentNotes: []string{"六维能力优先", "经历证据第二", "学历作为门槛而非单点排序依据"},
 		},
 		BackendRequirements: backendRequirements(),
 		ProductionLimitations: []string{
-			"当前评分、雷达图和岗位推荐为模拟数据，待接入真实评分 agent。",
+			"当前 /api/diagnosis/mock 返回的是样例数据，正式诊断不使用该 mock 回退。",
 			"当前文件上传只记录文件元信息，未解析真实简历和成绩单内容。",
 			"PDF 导出由前端打印样式完成，生产环境建议改为后端模板化 PDF 服务。",
 		},
@@ -654,8 +691,8 @@ func backendRequirements() []BackendRequirement {
 		{ID: "BR-01", Title: "材料上传与对象存储", Status: "not_started", Priority: "P0", Details: []string{"支持简历必传、成绩单可选、其他材料可选", "返回文件 ID、解析状态、可追踪错误", "限制文件类型、大小和病毒扫描策略"}},
 		{ID: "BR-02", Title: "简历结构化解析 API", Status: "partial_in_legato_cli", Priority: "P0", Details: []string{"把 Legato 简历 workflow 暴露为 HTTP API", "输出基础信息、教育、证书奖项、经历和置信度", "支持 PDF、DOCX、Markdown、图片 OCR 回退"}},
 		{ID: "BR-03", Title: "成绩单解析与课程能力映射", Status: "partial_ocr_blocked", Priority: "P0", Details: []string{"解析课程、学期、成绩、GPA 和专业课程分类", "将课程映射到岗位能力维度", "扫描版成绩单需要稳定 OCR 服务"}},
-		{ID: "BR-04", Title: "岗位能力模型与 JD 解析", Status: "not_started", Priority: "P0", Details: []string{"维护岗位族、能力项、权重和达标标准", "根据学生材料自动推荐岗位", "后续可扩展为粘贴 JD 的定向分析模式", "输出岗位能力要求结构化 JSON"}},
-		{ID: "BR-05", Title: "能力评分与雷达数据引擎", Status: "not_started", Priority: "P0", Details: []string{"生成四维分值、雷达图数据和证据引用", "输出评分解释、置信度和缺失证据", "支持规则评分与模型评分合并"}},
+		{ID: "BR-04", Title: "岗位能力模型与 JD 解析", Status: "partial_in_legato_presto_team", Priority: "P0", Details: []string{"已新增 Adaptive Planner 动态派生多视角 Presto Agent", "后端会校验 Planner 输出并限制 3 到 6 个 Agent、最多 3 个并发 run", "每个 Presto run 的事件流会转发到前端 chat 状态卡", "当前基于简历证据、六维能力和学历门槛推断岗位", "后续仍需接入真实岗位库、JD 数据源和地区过滤", "后续可扩展为粘贴 JD 的定向分析模式"}},
+		{ID: "BR-05", Title: "能力评分与雷达数据引擎", Status: "partial_in_item_benchmark", Priority: "P0", Details: []string{"Item Benchmark 已生成证据级六维分布", "Major Baseline 已生成专业 prior", "Job Matching 已输出岗位目标雷达", "后续仍需服务端统一聚合学生最终六维画像并输出置信度"}},
 		{ID: "BR-06", Title: "成长路径规划生成", Status: "not_started", Priority: "P1", Details: []string{"生成阶段目标、周任务、资源链接、达标标准", "根据学生短板和岗位权重调整优先级", "支持任务完成状态和再规划"}},
 		{ID: "BR-07", Title: "结构化导出服务", Status: "mock_in_gateway", Priority: "P1", Details: []string{"能力画像导出 JSON 和 Excel", "路径规划导出 PDF 和 Word", "匹配结果导出可视化报表"}},
 		{ID: "BR-08", Title: "异步任务与 SSE 事件契约", Status: "partial_in_presto", Priority: "P1", Details: []string{"统一上传、解析、评分、生成报告的 run 状态", "提供可恢复的事件流和错误码", "支持长任务超时与重试"}},
@@ -694,7 +731,7 @@ func buildAbilityProfileXLSX(profile AbilityProfile) ([]byte, error) {
 	if len(profile.MajorBaseline.Scores) > 0 {
 		rows = append(rows,
 			[]string{},
-			[]string{"专业基础六维基线", "专业族群", "基础分", "六维基线", "说明", "来源"},
+			[]string{"专业六维基线", "专业族群", "基础分", "六维基线", "说明", "来源"},
 			[]string{
 				profile.MajorBaseline.MajorName,
 				profile.MajorBaseline.MajorFamily,
@@ -705,14 +742,7 @@ func buildAbilityProfileXLSX(profile AbilityProfile) ([]byte, error) {
 			},
 		)
 	}
-	rows = append(rows,
-		[]string{},
-		[]string{"四维分值", "分数", "等级", "原因"},
-	)
-	for _, item := range profile.FourDimScores {
-		rows = append(rows, []string{item.Name, fmt.Sprintf("%d/%d", item.Score, item.MaxScore), item.Level, item.Reason})
-	}
-	rows = append(rows, []string{}, []string{"雷达图数据", "分数", "等级", "说明"})
+	rows = append(rows, []string{}, []string{"六维指标", "分数", "等级", "说明"})
 	for _, item := range profile.RadarData {
 		rows = append(rows, []string{item.Name, fmt.Sprintf("%d/%d", item.Score, item.MaxScore), item.Level, item.Reason})
 	}

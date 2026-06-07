@@ -162,12 +162,12 @@ func (s *Server) handleSessionRuns(w http.ResponseWriter, r *http.Request, sessi
 				ctx, cancel := s.asyncRunContext(r.Context())
 				go func() {
 					defer cancel()
-					s.executeRun(ctx, run.ID, sessionID, message)
+					s.executeRun(ctx, run.ID, sessionID, message, req.TokenStream)
 				}()
 				writeJSON(w, http.StatusCreated, run)
 				return
 			}
-			finished := s.executeRun(r.Context(), run.ID, sessionID, message)
+			finished := s.executeRun(r.Context(), run.ID, sessionID, message, req.TokenStream)
 			writeJSON(w, http.StatusCreated, finished)
 			return
 		}
@@ -231,9 +231,10 @@ type createSessionRequest struct {
 }
 
 type createRunRequest struct {
-	Input   json.RawMessage `json:"input,omitempty"`
-	Message string          `json:"message,omitempty"`
-	Async   bool            `json:"async,omitempty"`
+	Input       json.RawMessage `json:"input,omitempty"`
+	Message     string          `json:"message,omitempty"`
+	Async       bool            `json:"async,omitempty"`
+	TokenStream bool            `json:"token_stream,omitempty"`
 }
 
 type appendEventRequest struct {
@@ -309,12 +310,12 @@ func (s *Server) asyncRunContext(ctx context.Context) (context.Context, context.
 	return context.WithTimeout(base, s.asyncRunTimeout)
 }
 
-func (s *Server) executeRun(ctx context.Context, runID string, sessionID string, message string) Run {
+func (s *Server) executeRun(ctx context.Context, runID string, sessionID string, message string, tokenStream bool) Run {
 	events, results := s.runner.RunStream(ctx, agent.RunInput{
 		RunID:     runID,
 		SessionID: sessionID,
 		UserInput: message,
-		Stream:    true,
+		Stream:    tokenStream,
 	})
 
 	for event := range events {

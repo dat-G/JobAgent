@@ -6,6 +6,7 @@ Current focus:
 
 - Resume structuring
 - Transcript structuring
+- Chat answer workflow for Growth Lens assistant context
 - Fast PDF text-layer extraction
 - MarkItDown fallback
 - Presto-backed schema formatting
@@ -91,6 +92,14 @@ Transcript:
 
 ```sh
 legato path/to/transcript.pdf --target transcript
+```
+
+Chat workflow:
+
+```sh
+legato chat.md --target chat --workflow chat --workflow-stage answer \
+  --workflow-stage-input chat-input.json \
+  --presto-url http://127.0.0.1:8080
 ```
 
 Local acceptance without Presto:

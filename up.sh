@@ -113,6 +113,7 @@ LEGATO_USE_PRESTO="${LEGATO_USE_PRESTO:-1}"
 LEGATO_PRESTO_URL="${LEGATO_PRESTO_URL:-$PRESTO_URL}"
 LEGATO_TIMEOUT_MS="${LEGATO_TIMEOUT_MS:-60000}"
 DIAGNOSIS_TIMEOUT_SECONDS="${DIAGNOSIS_TIMEOUT_SECONDS:-120}"
+ITEM_BENCHMARK_MAX_REQUESTS="${ITEM_BENCHMARK_MAX_REQUESTS:-5}"
 
 BACKEND_DIR="$(absolute_path "${BACKEND_DIR:-backend}")"
 PRESTO_DIR="$(absolute_path "${PRESTO_DIR:-Agents/presto}")"
@@ -224,6 +225,11 @@ start_presto() {
   local pid_file="$PID_DIR/presto.pid"
   local log_file="$LOG_DIR/presto.log"
 
+  if is_truthy "$PRESTO_CLEAR_CACHE"; then
+    echo "clearing presto cache: $PRESTO_CACHE_DIR"
+    rm -rf "$PRESTO_CACHE_DIR/v1"
+  fi
+
   if health_ok "$health_url"; then
     echo "presto already healthy: $health_url"
     return 0
@@ -283,6 +289,7 @@ start_jobagent() {
     export LEGATO_USE_PRESTO
     export LEGATO_TIMEOUT_MS
     export DIAGNOSIS_TIMEOUT_SECONDS
+    export ITEM_BENCHMARK_MAX_REQUESTS
     export LEGATO_PYTHON
     export FRONTEND_DIR
     export MODEL_ROUTING_CONFIG
@@ -328,6 +335,7 @@ up() {
   ensure_legato_cli
 
   export PRESTO_URL LEGATO_PRESTO_URL LEGATO_USE_PRESTO LEGATO_TIMEOUT_MS
+  export ITEM_BENCHMARK_MAX_REQUESTS
   export MODEL_ROUTING_CONFIG GOCACHE FRONTEND_DIR
 
   if [[ "$START_PRESTO" == "1" || "$START_PRESTO" == "true" ]]; then

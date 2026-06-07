@@ -84,6 +84,11 @@ MIN_EXPERIENCE_SLICE_CHARS = 160
 CONTEXT_LINES = 4
 ENGLISH_EXAM_RE = re.compile(r"(全国大学英语(?:四|六)级考试)")
 ORPHAN_SCORE_RE = re.compile(r"^(\d{3})\s*分$")
+COMPANY_ENTITY_RE = re.compile(
+    r"^[\u4e00-\u9fa5A-Za-z0-9（）()·&]{2,40}(?:股份有限公司|有限责任公司|有限公司|集团股份有限公司|集团|公司)$"
+)
+DEPARTMENT_ENTITY_RE = re.compile(r"(研究院|事业部|平台部|研发部|部门|中心|实验室|团队)$")
+DATE_RANGE_OR_PRESENT_RE = re.compile(r"20\d{2}[.年/-]?\d{0,2}\s*[-~至]\s*(?:20\d{2}[.年/-]?\d{0,2}|今)")
 EDUCATION_DATE_RE = re.compile(
     r"(?P<start>20\d{2})[.年/-]?\d{0,2}\s*[-~至]\s*(?P<end>20\d{2})[.年/-]?\d{0,2}"
 )
@@ -147,28 +152,24 @@ class ResumeWorkflowFormatter:
             return self._format_combined(resume_text)
 
         started = time.perf_counter()
-        with ThreadPoolExecutor(max_workers=min(self.max_workers, len(self.groups))) as executor:
+        with ThreadPoolExecutor(max_workers=min(self.max_workers, len(self.groups) + 1)) as executor:
             futures = {
                 group: executor.submit(self._run_group_with_retry, group, resume_text)
                 for group in self.groups
             }
+            experience_future = executor.submit(self._run_experience_hybrid, resume_text)
             results = {group: future.result() for group, future in futures.items()}
+            experience_result = experience_future.result()
 
         education_tags_started = time.perf_counter()
         education = enrich_education(results["profile"]["data"].get("education", []), resume_text)
         education_tags_ms = int((time.perf_counter() - education_tags_started) * 1000)
-        experience_started = time.perf_counter()
-        experience = build_local_experience(
-            resume_text,
-            results["certifications_awards"]["data"].get("certifications_awards", []),
-        )
-        experience_ms = int((time.perf_counter() - experience_started) * 1000)
         merge_started = time.perf_counter()
         data = {
             "identity": results["profile"]["data"].get("identity", {}),
             "education": education,
             "certifications_awards": results["certifications_awards"]["data"].get("certifications_awards", []),
-            "experience": experience,
+            "experience": experience_result["experience"],
         }
         merge_ms = int((time.perf_counter() - merge_started) * 1000)
         total_ms = int((time.perf_counter() - started) * 1000)
@@ -177,12 +178,12 @@ class ResumeWorkflowFormatter:
             formatter="presto_resume_workflow",
             warnings=[],
             debug=self._debug_envelope(
-                results,
+                {**results, "experience_refine": experience_result["agent"]},
                 merge_ms,
                 total_ms,
                 local_stages=[
                     {"stage": "education_degree_inference_agent", "elapsed_ms": education_tags_ms},
-                    {"stage": "experience_local", "elapsed_ms": experience_ms},
+                    *experience_result["local_stages"],
                 ],
             ),
         )
@@ -233,6 +234,7 @@ class ResumeWorkflowFormatter:
             )
         if stage == "item_benchmark":
             external_items = normalize_benchmark_input_items(self.stage_input.get("items"))
+            stage_max_workers = safe_int(self.stage_input.get("max_workers"), self.max_workers)
             agents: dict[str, dict[str, Any]] = {}
             if external_items:
                 items = external_items
@@ -244,6 +246,7 @@ class ResumeWorkflowFormatter:
             benchmark_result = self._run_item_benchmarks(
                 resume_text,
                 items,
+                max_workers=stage_max_workers,
             )
             benchmark_ms = int((time.perf_counter() - benchmark_started) * 1000)
             total_ms = int((time.perf_counter() - started) * 1000)
@@ -256,6 +259,19 @@ class ResumeWorkflowFormatter:
                     merge_ms=0,
                     total_ms=total_ms,
                     local_stages=[{"stage": "item_benchmark_merge", "elapsed_ms": benchmark_ms}],
+                ),
+            )
+        if stage == "job_matching":
+            result = self._run_job_matching_with_retry(resume_text)
+            total_ms = int((time.perf_counter() - started) * 1000)
+            return WorkflowFormatResult(
+                data={"job_matching": result["data"].get("job_matching", {})},
+                formatter="presto_resume_workflow_job_matching",
+                warnings=[],
+                debug=self._debug_envelope(
+                    {"job_matching": result},
+                    merge_ms=0,
+                    total_ms=total_ms,
                 ),
             )
         if stage == "experience":
@@ -275,30 +291,71 @@ class ResumeWorkflowFormatter:
                 ),
             )
         if stage == "experience_hybrid":
-            local_started = time.perf_counter()
-            local_experience = build_local_experience(resume_text, [])
-            local_ms = int((time.perf_counter() - local_started) * 1000)
-            result = self._run_experience_refine_with_retry(resume_text, local_experience)
-            filter_started = time.perf_counter()
-            llm_experience = filter_llm_experience_candidates(result["data"].get("experience", []))
-            experience = merge_experience_candidates(local_experience, llm_experience)
-            filter_ms = int((time.perf_counter() - filter_started) * 1000)
+            experience_result = self._run_experience_hybrid(resume_text)
             total_ms = int((time.perf_counter() - started) * 1000)
             return WorkflowFormatResult(
-                data={"experience": experience},
+                data={"experience": experience_result["experience"]},
                 formatter="presto_resume_workflow_experience_hybrid",
                 warnings=[],
                 debug=self._debug_envelope(
-                    {"experience_refine": result},
+                    {"experience_refine": experience_result["agent"]},
+                    merge_ms=0,
+                    total_ms=total_ms,
+                    local_stages=experience_result["local_stages"],
+                ),
+            )
+        if stage == "experience_hybrid_item":
+            item_index = safe_int(self.stage_input.get("index"), 0)
+            local_item = normalize_stage_experience_item(self.stage_input.get("item"))
+            local_ms = 0
+            if not local_item:
+                local_started = time.perf_counter()
+                local_experience = build_local_experience(resume_text, [])
+                local_ms = int((time.perf_counter() - local_started) * 1000)
+                if 0 <= item_index < len(local_experience):
+                    local_item = normalize_stage_experience_item(local_experience[item_index])
+            if not local_item:
+                raise ValueError("experience_hybrid_item requires a valid stage_input item")
+
+            result = self._run_experience_refine_with_retry(resume_text, [local_item])
+            filter_started = time.perf_counter()
+            llm_experience = filter_llm_experience_candidates(result["data"].get("experience", []))
+            experience = [select_hybrid_experience_item(local_item, llm_experience)]
+            filter_ms = int((time.perf_counter() - filter_started) * 1000)
+            total_ms = int((time.perf_counter() - started) * 1000)
+            return WorkflowFormatResult(
+                data={"experience_index": item_index, "experience": experience},
+                formatter="presto_resume_workflow_experience_hybrid_item",
+                warnings=[],
+                debug=self._debug_envelope(
+                    {f"experience_refine_{item_index}": result},
                     merge_ms=0,
                     total_ms=total_ms,
                     local_stages=[
-                        {"stage": "experience_local_recall", "elapsed_ms": local_ms},
-                        {"stage": "experience_candidate_filter", "elapsed_ms": filter_ms},
+                        {"stage": "experience_local_item", "elapsed_ms": local_ms},
+                        {"stage": "experience_item_candidate_filter", "elapsed_ms": filter_ms},
                     ],
                 ),
             )
         raise ValueError(f"unsupported resume workflow stage {stage!r}")
+
+    def _run_experience_hybrid(self, resume_text: str) -> dict[str, Any]:
+        local_started = time.perf_counter()
+        local_experience = build_local_experience(resume_text, [])
+        local_ms = int((time.perf_counter() - local_started) * 1000)
+        result = self._run_experience_refine_with_retry(resume_text, local_experience)
+        filter_started = time.perf_counter()
+        llm_experience = filter_llm_experience_candidates(result["data"].get("experience", []))
+        experience = merge_experience_candidates(local_experience, llm_experience)
+        filter_ms = int((time.perf_counter() - filter_started) * 1000)
+        return {
+            "experience": experience,
+            "agent": result,
+            "local_stages": [
+                {"stage": "experience_local_recall", "elapsed_ms": local_ms},
+                {"stage": "experience_candidate_filter", "elapsed_ms": filter_ms},
+            ],
+        }
 
     def _format_combined(self, resume_text: str) -> WorkflowFormatResult:
         started = time.perf_counter()
@@ -396,13 +453,20 @@ class ResumeWorkflowFormatter:
             .replace("{{resume_text}}", resume_text)
         )
 
-    def _run_item_benchmarks(self, resume_text: str, items: list[dict[str, Any]]) -> dict[str, Any]:
+    def _run_item_benchmarks(
+        self,
+        resume_text: str,
+        items: list[dict[str, Any]],
+        *,
+        max_workers: int | None = None,
+    ) -> dict[str, Any]:
         benchmarks: list[dict[str, Any] | None] = [None] * len(items)
         agents: dict[str, dict[str, Any]] = {}
         if not items:
             return {"items": [], "agents": agents}
 
-        with ThreadPoolExecutor(max_workers=min(self.max_workers, max(1, len(items)))) as executor:
+        worker_count = max(1, max_workers or self.max_workers)
+        with ThreadPoolExecutor(max_workers=min(worker_count, max(1, len(items)))) as executor:
             futures = {
                 executor.submit(self._run_item_benchmark_with_retry, resume_text, item, index): index
                 for index, item in enumerate(items)
@@ -496,6 +560,47 @@ class ResumeWorkflowFormatter:
 
     def _major_baseline_prompt(self, context: dict[str, Any]) -> str:
         prompt = self._read_prompt("major_baseline.md")
+        context_text = json.dumps(context, ensure_ascii=False, separators=(",", ":"))
+        return prompt.replace("{{common}}", self.common_prompt).replace("{{context}}", context_text)
+
+    def _run_job_matching_with_retry(self, resume_text: str) -> dict[str, Any]:
+        started = time.perf_counter()
+        context = job_matching_context(resume_text, self.stage_input)
+        prompt = self._job_matching_prompt(context)
+        previous_output = ""
+        last_error = ""
+        input_debug = {
+            "mode": "structured_profile_evidence_benchmark_context",
+            "input_chars": len(prompt),
+            "original_chars": len(resume_text),
+            "fallback_full_text": False,
+        }
+        for attempt in range(1, self.max_retries + 1):
+            call_prompt = prompt
+            if attempt > 1:
+                call_prompt += "\n\n" + self._retry_block(last_error, previous_output)
+            call_started = time.perf_counter()
+            try:
+                output = self._call_presto(call_prompt, "job_matching")
+                call_ms = int((time.perf_counter() - call_started) * 1000)
+                previous_output = output
+                data = extract_json_object(output)
+                matching = normalize_job_matching(data, context)
+                validate_job_matching(matching)
+                return {
+                    "data": {"job_matching": matching},
+                    "attempts": attempt,
+                    "retry_count": attempt - 1,
+                    "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                    "last_call_ms": call_ms,
+                    "input": input_debug,
+                }
+            except Exception as exc:
+                last_error = str(exc)
+        raise RuntimeError(f"job_matching failed after {self.max_retries} attempts: {last_error}")
+
+    def _job_matching_prompt(self, context: dict[str, Any]) -> str:
+        prompt = self._read_prompt("job_matching.md")
         context_text = json.dumps(context, ensure_ascii=False, separators=(",", ":"))
         return prompt.replace("{{common}}", self.common_prompt).replace("{{context}}", context_text)
 
@@ -703,6 +808,7 @@ def build_local_experience(resume_text: str, certifications_awards: list[dict[st
     experiences: list[dict[str, Any]] = []
 
     experiences.extend(extract_internship_experiences(resume_text))
+    experiences.extend(extract_company_role_experiences(resume_text))
     experiences.extend(extract_project_experiences(resume_text))
     experiences.extend(extract_described_contest_experiences(resume_text))
     experiences.extend(extract_campus_role_experiences(resume_text))
@@ -718,7 +824,12 @@ def extract_internship_experiences(resume_text: str) -> list[dict[str, Any]]:
             continue
         if not is_internship_body(match.group("body")):
             continue
-        organization, role = split_experience_body(match.group("body"))
+        body = match.group("body")
+        organization, role = split_experience_body(body)
+        nearby_organization = find_nearby_company_entity(lines, index)
+        if nearby_organization and is_department_like_organization(organization):
+            organization = nearby_organization
+            role = extract_job_role_from_internship_body(body) or role
         contribution_context = "\n".join(lines[max(0, index - 30) : min(len(lines), index + 6)])
         scoring_context = "\n".join(lines[index : min(len(lines), index + 6)])
         contribution = summarize_internship_contribution(organization, role, contribution_context)
@@ -728,6 +839,34 @@ def extract_internship_experiences(resume_text: str) -> list[dict[str, Any]]:
                 "role": compose_experience_role(organization, role),
                 "contribution": contribution,
                 "level": score_internship_level(organization, scoring_context),
+                "evidence_scope": "校外",
+            }
+        )
+    return experiences
+
+
+def extract_company_role_experiences(resume_text: str) -> list[dict[str, Any]]:
+    lines = [line.strip() for line in resume_text.splitlines() if line.strip()]
+    experiences: list[dict[str, Any]] = []
+    for index, line in enumerate(lines[:-1]):
+        organization = compact_role_part(line)
+        if not COMPANY_ENTITY_RE.match(organization):
+            continue
+        role_line = lines[index + 1]
+        if is_internship_body(role_line):
+            continue
+        if not DATE_RANGE_OR_PRESENT_RE.search(role_line):
+            continue
+        role = compact_role_part(DATE_RANGE_OR_PRESENT_RE.sub("", role_line))
+        if not role or any(skip in role for skip in ("大学", "学院", "本科", "硕士", "博士", "指导老师")):
+            continue
+        context = "\n".join(lines[index : index + 2])
+        experiences.append(
+            {
+                "type": "任职",
+                "role": compose_experience_role(organization, role),
+                "contribution": summarize_company_role_contribution(role, context),
+                "level": score_company_role_level(role, context),
                 "evidence_scope": "校外",
             }
         )
@@ -747,6 +886,30 @@ def split_experience_body(body: str) -> tuple[str, str]:
     return normalized, ""
 
 
+def find_nearby_company_entity(lines: list[str], index: int) -> str:
+    for line in reversed(lines[max(0, index - 4) : index]):
+        candidate = compact_role_part(strip_date_prefix(line))
+        if COMPANY_ENTITY_RE.match(candidate):
+            return candidate
+    return ""
+
+
+def strip_date_prefix(line: str) -> str:
+    return re.sub(r"^20\d{2}[.年/-]?\d{0,2}\s*[-~至]\s*20\d{2}[.年/-]?\d{0,2}\s+", "", line).strip()
+
+
+def is_department_like_organization(organization: str) -> bool:
+    compacted = compact_role_part(organization)
+    return bool(compacted and DEPARTMENT_ENTITY_RE.search(compacted))
+
+
+def extract_job_role_from_internship_body(body: str) -> str:
+    normalized = body.replace("｜", "|").strip()
+    if "|" in normalized:
+        return compact_role_part(normalized.rsplit("|", maxsplit=1)[-1])
+    return ""
+
+
 def is_internship_body(body: str) -> bool:
     return any(signal in body for signal in ("实习", "工程师", "标注"))
 
@@ -761,6 +924,22 @@ def summarize_internship_contribution(organization: str, role: str, context: str
     if role:
         return role[:35]
     return "实习任务执行"
+
+
+def summarize_company_role_contribution(role: str, context: str) -> str:
+    if any(signal in context for signal in ("实验", "检测", "制备", "免疫", "疫苗", "动物", "生物")):
+        return f"{role}岗位实践"
+    return f"{role}岗位任职"
+
+
+def score_company_role_level(role: str, context: str) -> int:
+    detailed = has_contribution_signal(context)
+    domain_relevant = any(signal in context for signal in ("实验", "检测", "制备", "免疫", "疫苗", "动物", "生物"))
+    if detailed and domain_relevant:
+        return 5
+    if domain_relevant:
+        return 4
+    return 3
 
 
 def score_internship_level(organization: str, context: str) -> int:
@@ -789,16 +968,22 @@ def extract_project_experiences(resume_text: str) -> list[dict[str, Any]]:
     experiences.extend(extract_dated_project_experiences(lines))
     experiences.extend(extract_bullet_project_experiences(lines))
     for index, line in enumerate(lines):
-        if not (is_project_anchor(line) or is_research_description_anchor(line)):
+        project_anchor = is_project_anchor(line)
+        research_anchor = is_research_description_anchor(line)
+        if not (project_anchor or research_anchor):
             continue
         if line.startswith("#") or line in ("项目经历", "科研经历"):
             continue
-        context = "\n".join(lines[index : min(len(lines), index + 8)])
+        context_start = max(0, index - 4) if research_anchor else index
+        context = "\n".join(lines[context_start : min(len(lines), index + 8)])
         if not has_contribution_signal(context):
             continue
         role = extract_project_subject(context)
         if not role:
             continue
+        affiliation = find_project_affiliation(lines, index, context)
+        if affiliation and affiliation not in role:
+            role = compose_experience_role(affiliation, role)
         experiences.append(
             {
                 "type": "科研项目" if "实验室" in context or "科研" in context or "研究" in context else "项目",
@@ -1081,6 +1266,9 @@ def summarize_campus_contribution(context: str) -> str:
 
 def extract_project_subject(context: str) -> str:
     lines = [line.strip(" ,，。；;") for line in context.splitlines() if line.strip()]
+    research_subject = extract_research_subject_from_context(context)
+    if research_subject:
+        return research_subject
     for line in lines:
         if not is_clean_subject_line(line):
             continue
@@ -1091,9 +1279,37 @@ def extract_project_subject(context: str) -> str:
             continue
         if any(signal in line for signal in ("项目", "研究", "系统", "平台")):
             return line[:24]
-    research_subject = extract_research_subject_from_context(context)
-    if research_subject:
-        return research_subject
+    return ""
+
+
+def find_project_affiliation(lines: list[str], index: int, context: str) -> str:
+    if not any(signal in context for signal in ("实验室", "科研", "研究", "GNSS", "教授", "指导")):
+        return ""
+    context_affiliation = extract_lab_affiliation(context)
+    if context_affiliation:
+        return context_affiliation
+    best = ""
+    best_distance = 10**9
+    for candidate_index, line in enumerate(lines):
+        affiliation = extract_lab_affiliation(line)
+        if not affiliation:
+            continue
+        distance = abs(candidate_index - index)
+        if distance <= 25 and distance < best_distance:
+            best = affiliation
+            best_distance = distance
+    return best
+
+
+def extract_lab_affiliation(text: str) -> str:
+    for line in [item.strip(" ,，。；;") for item in text.splitlines() if item.strip()]:
+        if "实验室" not in line:
+            continue
+        if is_descriptive_sentence(line) and "重点实验室" not in line:
+            continue
+        match = re.search(r"([\u4e00-\u9fa5A-Za-z0-9（）()·&]{2,40}?实验室)", line)
+        if match:
+            return match.group(1)[:28]
     return ""
 
 
@@ -1280,6 +1496,41 @@ def filter_llm_experience_candidates(candidates: list[Any]) -> list[dict[str, An
     return dedupe_experiences(experiences)
 
 
+def safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def normalize_stage_experience_item(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    experience_type = str(value.get("type") or value.get("experience_type") or "").strip()
+    role = str(value.get("role") or "").strip()
+    contribution = str(value.get("contribution") or "").strip()
+    if not any((experience_type, role, contribution)):
+        return None
+    level = safe_int(value.get("level"), 5)
+    normalized = {
+        "type": experience_type,
+        "role": role,
+        "contribution": contribution,
+        "level": max(0, min(level, 10)),
+    }
+    normalized["evidence_scope"] = normalize_evidence_scope(value.get("evidence_scope"), normalized)
+    return normalized
+
+
+def select_hybrid_experience_item(local_item: dict[str, Any], llm_experience: list[dict[str, Any]]) -> dict[str, Any]:
+    if not llm_experience:
+        return local_item
+    for item in llm_experience:
+        if is_covered_by_existing_experience(local_item, [item]) or is_covered_by_existing_experience(item, [local_item]):
+            return item
+    return local_item
+
+
 BENCHMARK_DIMENSIONS = ("逻辑", "语言", "专业", "领导", "抗压", "成长")
 EVIDENCE_SCOPES = ("校内", "校外")
 MAJOR_FAMILIES = ("文科类", "理科类", "工科类", "商科类", "医农类", "艺术体育类", "交叉类", "未知")
@@ -1381,6 +1632,358 @@ def validate_major_baseline(baseline: dict[str, Any]) -> None:
     for index, score in enumerate(scores):
         if not isinstance(score, int) or isinstance(score, bool) or score < 0 or score > 100:
             raise ValueError(f"major_baseline.scores[{index}] must be an integer between 0 and 100")
+
+
+def job_matching_context(resume_text: str, stage_input: dict[str, Any] | None = None) -> dict[str, Any]:
+    stage_input = stage_input or {}
+    basic_info = stage_input.get("basic_info") if isinstance(stage_input.get("basic_info"), dict) else {}
+    education = normalize_matching_education(stage_input.get("education"))
+    awards = normalize_matching_awards(stage_input.get("awards"))
+    experiences = normalize_matching_experiences(stage_input.get("experiences"))
+    major_baseline = stage_input.get("major_baseline") if isinstance(stage_input.get("major_baseline"), dict) else {}
+    student_radar = normalize_radar_dimensions(stage_input.get("student_radar"), allow_empty=True)
+    if not student_radar:
+        student_radar = normalize_radar_dimensions(major_baseline.get("scores"), allow_empty=True)
+    context: dict[str, Any] = {
+        "basic_info": {
+            "name": str(basic_info.get("name") or ""),
+            "sex": str(basic_info.get("sex") or ""),
+            "birth_year": str(basic_info.get("birth_year") or ""),
+            "school": str(basic_info.get("school") or ""),
+            "major": str(basic_info.get("major") or ""),
+            "degree": str(basic_info.get("degree") or ""),
+            "graduation_year": str(basic_info.get("graduation_year") or ""),
+            "transcript_use": str(basic_info.get("transcript_use") or ""),
+        },
+        "education": education,
+        "major_baseline": {
+            "major_name": str(major_baseline.get("major_name") or ""),
+            "major_family": str(major_baseline.get("major_family") or ""),
+            "base_score": numeric_int(major_baseline.get("base_score"), 0),
+            "dimensions": list(BENCHMARK_DIMENSIONS),
+            "scores": normalize_radar_score_values(major_baseline.get("scores"), min_value=0, max_value=100),
+            "rationale": str(major_baseline.get("rationale") or ""),
+            "confidence": numeric_float(major_baseline.get("confidence"), 0),
+        },
+        "student_radar_hint": student_radar,
+        "awards": awards[:16],
+        "experiences": experiences[:16],
+        "resume_excerpt": compact_resume_excerpt(resume_text),
+        "dimensions": list(BENCHMARK_DIMENSIONS),
+        "recommendation_principles": [
+            "综合六维能力作为第一排序依据。",
+            "经历和项目证据作为第二排序依据，优先看相关性、impact、ownership 和结果证据。",
+            "学历作为岗位门槛和风险约束，不作为唯一排序依据。",
+            "若存在高 impact 且岗位强相关项目，可适当突破学历门槛，但必须写明风险和补证据动作。",
+            "必须同时考虑本专业相关岗位和非本专业但能力可迁移岗位。",
+            "不得依赖用户主动输入目标岗位，必须由 Agent Team 自动推荐。",
+        ],
+    }
+    return context
+
+
+def normalize_job_matching(data: dict[str, Any], context: dict[str, Any] | None = None) -> dict[str, Any]:
+    context = context or {}
+    raw = data.get("job_matching") if isinstance(data, dict) else {}
+    if not isinstance(raw, dict):
+        raw = data if isinstance(data, dict) else {}
+    top_jobs = normalize_matching_jobs(raw.get("top_jobs") or raw.get("jobs") or raw.get("recommended_jobs"))
+    selected_job = normalize_matching_job(raw.get("selected_job"), default_rank=1)
+    if not selected_job and top_jobs:
+        selected_job = top_jobs[0]
+    if selected_job and not any(job.get("rank") == selected_job.get("rank") and job.get("title") == selected_job.get("title") for job in top_jobs):
+        top_jobs = [selected_job, *top_jobs]
+    top_jobs = normalize_matching_job_ranks(top_jobs[:5])
+
+    selected_title = selected_job.get("title") if selected_job else ""
+    selected_radar = selected_job.get("requirement_radar") if selected_job else None
+    selected_summary = selected_job.get("fit_summary") if selected_job else ""
+    target_role = str(raw.get("target_role") or selected_title or "").strip()
+    overall_match = clamp_int(numeric_int(raw.get("overall_match"), numeric_int(selected_job.get("match") if selected_job else 0, 0)), 0, 100)
+    match_level = str(raw.get("match_level") or match_level_label(overall_match))
+    student_radar = normalize_radar_dimensions(raw.get("student_radar") or context.get("student_radar_hint"), allow_empty=False)
+    target_radar = normalize_radar_dimensions(raw.get("target_radar") or selected_radar, allow_empty=False)
+    if selected_job and not selected_job.get("requirement_radar"):
+        selected_job["requirement_radar"] = target_radar
+    report_sections = normalize_report_rows(raw.get("report_sections"), student_radar, target_radar)
+    return {
+        "target_role": target_role,
+        "overall_match": overall_match,
+        "match_level": match_level[:24],
+        "source": str(raw.get("source") or "Legato Job Matching workflow"),
+        "method_summary": str(raw.get("method_summary") or "")[:180],
+        "fit_summary": str(raw.get("fit_summary") or selected_summary or "")[:220],
+        "selected_job": selected_job,
+        "student_radar": student_radar,
+        "target_radar": target_radar,
+        "report_sections": report_sections,
+        "gap_details": normalize_gap_details(raw.get("gap_details")),
+        "recommendations": normalize_text_list(raw.get("recommendations"), limit=5, max_chars=90),
+        "recommended_reasons": normalize_text_list(raw.get("recommended_reasons") or raw.get("reasons"), limit=5, max_chars=90),
+        "agent_notes": normalize_text_list(raw.get("agent_notes"), limit=5, max_chars=80),
+        "top_jobs": top_jobs,
+    }
+
+
+def validate_job_matching(matching: dict[str, Any]) -> None:
+    if not isinstance(matching, dict):
+        raise ValueError("job_matching must be an object")
+    if not matching.get("target_role"):
+        raise ValueError("job_matching.target_role is required")
+    if not isinstance(matching.get("overall_match"), int):
+        raise ValueError("job_matching.overall_match must be an integer")
+    for key in ("student_radar", "target_radar"):
+        radar = matching.get(key)
+        if not isinstance(radar, list) or len(radar) != 6:
+            raise ValueError(f"job_matching.{key} must contain six dimensions")
+    jobs = matching.get("top_jobs")
+    if not isinstance(jobs, list) or len(jobs) == 0:
+        raise ValueError("job_matching.top_jobs must contain at least one job")
+    for index, job in enumerate(jobs):
+        if not isinstance(job, dict):
+            raise ValueError(f"job_matching.top_jobs[{index}] must be an object")
+        if not job.get("title"):
+            raise ValueError(f"job_matching.top_jobs[{index}].title is required")
+        radar = job.get("requirement_radar")
+        if not isinstance(radar, list) or len(radar) != 6:
+            raise ValueError(f"job_matching.top_jobs[{index}].requirement_radar must contain six dimensions")
+
+
+def normalize_matching_education(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        out.append(
+            {
+                "school": str(item.get("school") or ""),
+                "degree": str(item.get("degree") or item.get("degree_level") or ""),
+                "department": str(item.get("department") or ""),
+                "major": str(item.get("major") or ""),
+                "is_985": bool(item.get("is_985") or item.get("is985")),
+                "is_211": bool(item.get("is_211") or item.get("is211")),
+                "is_double_first_class": bool(item.get("is_double_first_class")),
+                "ruanke_rank": numeric_int(item.get("ruanke_rank") or item.get("ruankeRank"), 0),
+                "school_kind": str(item.get("school_kind") or ""),
+                "parent_school": str(item.get("parent_school") or ""),
+            }
+        )
+    return out
+
+
+def normalize_matching_awards(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "")
+        result = str(item.get("result") or "")
+        if not name and not result:
+            continue
+        out.append(
+            {
+                "key": f"award:{index}",
+                "name": name,
+                "result": result,
+                "evidence_scope": normalize_evidence_scope(item.get("evidence_scope"), item),
+                "level": numeric_float(item.get("level"), 0),
+                "impact_factor": numeric_float(item.get("impact_factor"), 0),
+                "benchmark_scores": normalize_score_distribution_for_context(item.get("benchmark_scores")),
+                "reason": str(item.get("reason") or ""),
+            }
+        )
+    return out
+
+
+def normalize_matching_experiences(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "")
+        contribution = str(item.get("contribution") or "")
+        if not role and not contribution:
+            continue
+        out.append(
+            {
+                "key": f"experience:{index}",
+                "type": str(item.get("type") or ""),
+                "role": role,
+                "contribution": contribution,
+                "evidence_scope": normalize_evidence_scope(item.get("evidence_scope"), item),
+                "level": numeric_float(item.get("level"), 0),
+                "impact_factor": numeric_float(item.get("impact_factor"), 0),
+                "benchmark_scores": normalize_score_distribution_for_context(item.get("benchmark_scores")),
+                "reason": str(item.get("reason") or ""),
+            }
+        )
+    return out
+
+
+def normalize_matching_jobs(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    jobs: list[dict[str, Any]] = []
+    for index, item in enumerate(raw):
+        job = normalize_matching_job(item, default_rank=index + 1)
+        if job:
+            jobs.append(job)
+    return normalize_matching_job_ranks(jobs[:5])
+
+
+def normalize_matching_job(raw: Any, default_rank: int = 1) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    title = str(raw.get("title") or raw.get("role") or "").strip()
+    if not title:
+        return {}
+    requirement_radar = normalize_radar_dimensions(raw.get("requirement_radar") or raw.get("target_radar"), allow_empty=False)
+    match = clamp_int(numeric_int(raw.get("match"), numeric_int(raw.get("overall_match"), 0)), 0, 100)
+    return {
+        "rank": clamp_int(numeric_int(raw.get("rank"), default_rank), 1, 99),
+        "title": title[:40],
+        "category": str(raw.get("category") or "")[:24],
+        "match": match,
+        "ability_match": clamp_int(numeric_int(raw.get("ability_match"), match), 0, 100),
+        "experience_match": clamp_int(numeric_int(raw.get("experience_match"), 0), 0, 100),
+        "education_gate": str(raw.get("education_gate") or "")[:30],
+        "fit_summary": str(raw.get("fit_summary") or "")[:180],
+        "risk": str(raw.get("risk") or "")[:160],
+        "requirement_radar": requirement_radar,
+        "reasons": normalize_text_list(raw.get("reasons"), limit=4, max_chars=70),
+        "next_proof": str(raw.get("next_proof") or "")[:100],
+    }
+
+
+def normalize_matching_job_ranks(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ranked = sorted(jobs, key=lambda item: numeric_int(item.get("rank"), 99))
+    for index, job in enumerate(ranked):
+        job["rank"] = index + 1
+    return ranked
+
+
+def normalize_radar_dimensions(raw: Any, *, allow_empty: bool) -> list[dict[str, Any]]:
+    values = normalize_radar_score_values(raw, min_value=0, max_value=100)
+    if not values and allow_empty:
+        return []
+    if not values:
+        values = [50, 50, 50, 50, 50, 50]
+    return [{"name": name, "score": score, "max_score": 100} for name, score in zip(BENCHMARK_DIMENSIONS, values)]
+
+
+def normalize_radar_score_values(raw: Any, *, min_value: int, max_value: int) -> list[int]:
+    if isinstance(raw, dict):
+        values = [raw.get(name) for name in BENCHMARK_DIMENSIONS]
+    elif isinstance(raw, list):
+        if raw and all(isinstance(item, dict) for item in raw):
+            lookup = {str(item.get("name") or item.get("dimension") or ""): item.get("score") for item in raw}
+            values = [lookup.get(name) for name in BENCHMARK_DIMENSIONS]
+        else:
+            values = raw[:6]
+    else:
+        values = []
+    if len(values) < 6:
+        return []
+    scores: list[int] = []
+    for value in values[:6]:
+        score = numeric_float(value, 0)
+        if 0 <= score <= 1:
+            score *= 100
+        elif 1 < score <= 10:
+            score *= 10
+        scores.append(clamp_int(round(score), min_value, max_value))
+    return scores
+
+
+def normalize_score_distribution_for_context(raw: Any) -> list[float]:
+    scores = normalize_six_dim_scores(raw)
+    return [round(score, 3) for score in scores]
+
+
+def normalize_report_rows(raw: Any, student_radar: list[dict[str, Any]], target_radar: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or item.get("capability") or "").strip()
+            if not name:
+                continue
+            student = clamp_int(numeric_int(item.get("student"), 0), 0, 100)
+            role_need = clamp_int(numeric_int(item.get("role_need") or item.get("target"), 0), 0, 100)
+            rows.append(
+                {
+                    "name": name[:16],
+                    "student": student,
+                    "role_need": role_need,
+                    "difference": clamp_int(numeric_int(item.get("difference"), student - role_need), -100, 100),
+                }
+            )
+    if rows:
+        return rows[:6]
+    target_by_name = {item["name"]: item["score"] for item in target_radar}
+    for item in student_radar:
+        target = clamp_int(numeric_int(target_by_name.get(item["name"]), 0), 0, 100)
+        student = clamp_int(numeric_int(item.get("score"), 0), 0, 100)
+        rows.append({"name": item["name"], "student": student, "role_need": target, "difference": student - target})
+    return rows[:6]
+
+
+def normalize_gap_details(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    details: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        capability = str(item.get("capability") or item.get("name") or "").strip()
+        if not capability:
+            continue
+        details.append(
+            {
+                "capability": capability[:24],
+                "current": str(item.get("current") or "")[:90],
+                "expected": str(item.get("expected") or "")[:90],
+                "action": str(item.get("action") or "")[:100],
+                "severity": str(item.get("severity") or "")[:12],
+            }
+        )
+    return details[:6]
+
+
+def normalize_text_list(raw: Any, *, limit: int, max_chars: int) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        text = str(item or "").strip()
+        if text:
+            out.append(text[:max_chars])
+    return out[:limit]
+
+
+def match_level_label(score: int) -> str:
+    if score >= 85:
+        return "强匹配"
+    if score >= 75:
+        return "高潜力匹配"
+    if score >= 65:
+        return "可迁移匹配"
+    return "需补证据"
+
+
+def compact_resume_excerpt(resume_text: str) -> str:
+    lines = [line.strip() for line in resume_text.splitlines() if line.strip()]
+    selected = [line for line in lines if any(keyword in line for keyword in ("教育", "经历", "项目", "实习", "比赛", "竞赛", "证书", "技能", "奖"))]
+    if not selected:
+        selected = lines[:80]
+    return "\n".join(selected[:120])[:6000]
 
 
 def local_major_baseline(context: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -2089,6 +2692,7 @@ def normalize_llm_experience_candidate(candidate: dict[str, Any]) -> dict[str, A
         "role": role[:35],
         "contribution": contribution[:35],
         "level": max(0, min(int(round(level)), 10)),
+        "evidence_scope": normalize_evidence_scope(candidate.get("evidence_scope"), candidate),
     }
 
 

@@ -119,15 +119,15 @@ func (r *Runner) run(ctx context.Context, input RunInput, events chan<- Event) (
 			return RunResult{}, err
 		}
 		emit(events, Event{Type: EventModelStarted, RunID: runID, SessionID: sessionID, Step: step})
-		response, err := withRetry(ctx, r.config.LLMRetry, func(ctx context.Context) (ChatResponse, error) {
-			return r.provider.Chat(ctx, ChatRequest{
-				Model:       r.config.Model,
-				Messages:    r.prompt.Build(session.Messages),
-				Tools:       r.tools.Specs(),
-				Temperature: r.config.Temperature,
-				MaxTokens:   r.config.MaxTokens,
-			})
-		})
+		request := ChatRequest{
+			Model:       r.config.Model,
+			Messages:    r.prompt.Build(session.Messages),
+			Tools:       r.tools.Specs(),
+			Temperature: r.config.Temperature,
+			MaxTokens:   r.config.MaxTokens,
+			Stream:      input.Stream,
+		}
+		response, err := r.chat(ctx, request, runID, sessionID, step, events)
 		if err != nil {
 			return RunResult{}, err
 		}
@@ -172,6 +172,42 @@ func (r *Runner) run(ctx context.Context, input RunInput, events chan<- Event) (
 	}
 
 	return RunResult{}, fmt.Errorf("agent stopped after max steps: %d", r.config.MaxSteps)
+}
+
+func (r *Runner) chat(ctx context.Context, req ChatRequest, runID string, sessionID string, step int, events chan<- Event) (ChatResponse, error) {
+	if req.Stream {
+		if streaming, ok := r.provider.(StreamingProvider); ok {
+			return streaming.ChatStream(ctx, req, func(delta ChatStreamDelta) {
+				if delta.Content != "" {
+					emit(events, Event{
+						Type:      EventModelDelta,
+						RunID:     runID,
+						SessionID: sessionID,
+						Step:      step,
+						Data: map[string]any{
+							"channel": "content",
+							"text":    delta.Content,
+						},
+					})
+				}
+				if delta.ReasoningContent != "" {
+					emit(events, Event{
+						Type:      EventModelDelta,
+						RunID:     runID,
+						SessionID: sessionID,
+						Step:      step,
+						Data: map[string]any{
+							"channel": "reasoning",
+							"text":    delta.ReasoningContent,
+						},
+					})
+				}
+			})
+		}
+	}
+	return withRetry(ctx, r.config.LLMRetry, func(ctx context.Context) (ChatResponse, error) {
+		return r.provider.Chat(ctx, req)
+	})
 }
 
 func (r *Runner) loadSession(ctx context.Context, id string) (Session, error) {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 from legato.resume_workflow_formatter import (
@@ -15,8 +16,10 @@ from legato.resume_workflow_formatter import (
     normalize_evidence_scope,
     normalize_item_benchmark,
     normalize_major_baseline,
+    normalize_stage_experience_item,
     repair_orphan_certification_scores,
     school_tags_for,
+    select_hybrid_experience_item,
     score_contest_level,
     slice_certifications_awards_text,
     slice_experience_text,
@@ -117,6 +120,147 @@ class ResumeWorkflowFormatterTest(unittest.TestCase):
                 },
             )
 
+    def test_full_workflow_runs_experience_refine_agent(self) -> None:
+        formatter = ResumeWorkflowFormatter(max_retries=1)
+        calls: list[str] = []
+
+        def fake_call(prompt: str, group: str) -> str:
+            calls.append(group)
+            if group == "profile":
+                return json.dumps(
+                    {"identity": {"name": "郭怡婷", "birth_year": "", "sex": "女"}, "education": []},
+                    ensure_ascii=False,
+                )
+            if group == "certifications_awards":
+                return json.dumps({"certifications_awards": []}, ensure_ascii=False)
+            if group == "experience_refine":
+                self.assertIn("Local candidates:", prompt)
+                return json.dumps(
+                    {
+                        "experience": [
+                            {
+                                "type": "任职",
+                                "role": "哈尔滨威科赛斯生物科技有限公司 / 生物实验员",
+                                "contribution": "生物实验员岗位实践",
+                                "level": 4,
+                                "evidence_scope": "校外",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                )
+            raise AssertionError(group)
+
+        formatter._call_presto = fake_call  # type: ignore[method-assign]
+        result = formatter.format("工作经历\n哈尔滨威科赛斯生物科技有限公司\n生物实验员 2024-04 至今")
+        self.assertIn("experience_refine", calls)
+        self.assertEqual(result.data["experience"][0]["role"], "哈尔滨威科赛斯生物科技有限公司 / 生物实验员")
+        self.assertIn("experience_refine", result.debug["agents"])
+
+    def test_job_matching_stage_normalizes_agent_output(self) -> None:
+        formatter = ResumeWorkflowFormatter(
+            max_retries=1,
+            stage_input={
+                "basic_info": {"school": "东北农业大学", "major": "计算机科学与技术", "degree": "本科"},
+                "education": [{"school": "东北农业大学", "major": "计算机科学与技术", "degree": "本科", "is_211": True, "ruanke_rank": 120}],
+                "major_baseline": {"major_family": "工科类", "base_score": 62, "scores": [60, 52, 66, 48, 55, 58]},
+                "awards": [{"name": "创新大赛", "result": "全国六强总决赛", "level": 9, "impact_factor": 6.8, "benchmark_scores": [0.18, 0.1, 0.22, 0.22, 0.14, 0.14]}],
+                "experiences": [{"type": "比赛", "role": "队长", "contribution": "完成产品方案设计并进入全国六强", "level": 9, "impact_factor": 6.5, "benchmark_scores": [0.16, 0.12, 0.20, 0.24, 0.14, 0.14]}],
+            },
+        )
+
+        def fake_call(prompt: str, group: str) -> str:
+            self.assertEqual(group, "job_matching")
+            self.assertIn("Agent Team protocol", prompt)
+            radar = [
+                {"name": "逻辑", "score": 72},
+                {"name": "语言", "score": 62},
+                {"name": "专业", "score": 70},
+                {"name": "领导", "score": 78},
+                {"name": "抗压", "score": 66},
+                {"name": "成长", "score": 74},
+            ]
+            target = [
+                {"name": "逻辑", "score": 76},
+                {"name": "语言", "score": 68},
+                {"name": "专业", "score": 74},
+                {"name": "领导", "score": 80},
+                {"name": "抗压", "score": 70},
+                {"name": "成长", "score": 76},
+            ]
+            return json.dumps(
+                {
+                    "job_matching": {
+                        "target_role": "产品经理助理",
+                        "overall_match": 78,
+                        "match_level": "高潜力匹配",
+                        "method_summary": "六维能力优先，经历证据第二，学历门槛通过。",
+                        "fit_summary": "竞赛产品方案和队长经历支撑岗位，但需要补充用户研究证据。",
+                        "student_radar": radar,
+                        "target_radar": target,
+                        "selected_job": {
+                            "rank": 1,
+                            "title": "产品经理助理",
+                            "category": "跨专业可迁移",
+                            "match": 78,
+                            "ability_match": 76,
+                            "experience_match": 82,
+                            "education_gate": "通过",
+                            "fit_summary": "产品方案经历相关。",
+                            "risk": "缺少正式产品实习。",
+                            "requirement_radar": target,
+                            "reasons": ["竞赛产品方案相关", "领导维度突出"],
+                            "next_proof": "补充用户访谈和 PRD 作品。",
+                        },
+                        "top_jobs": [
+                            {
+                                "rank": 1,
+                                "title": "产品经理助理",
+                                "category": "跨专业可迁移",
+                                "match": 78,
+                                "ability_match": 76,
+                                "experience_match": 82,
+                                "education_gate": "通过",
+                                "fit_summary": "产品方案经历相关。",
+                                "risk": "缺少正式产品实习。",
+                                "requirement_radar": target,
+                                "reasons": ["竞赛产品方案相关"],
+                                "next_proof": "补充 PRD。",
+                            },
+                            {
+                                "rank": 2,
+                                "title": "前端开发工程师",
+                                "category": "本专业相关",
+                                "match": 74,
+                                "ability_match": 75,
+                                "experience_match": 66,
+                                "education_gate": "通过",
+                                "fit_summary": "专业相关。",
+                                "risk": "工程证据不足。",
+                                "requirement_radar": target,
+                                "reasons": ["专业背景相关"],
+                                "next_proof": "补充项目。",
+                            },
+                        ],
+                        "report_sections": [],
+                        "gap_details": [{"capability": "用户研究", "current": "未体现", "expected": "能展示访谈或调研", "action": "补 PRD", "severity": "中"}],
+                        "recommendations": ["优先补产品作品集"],
+                        "recommended_reasons": ["经历相关性强"],
+                        "agent_notes": ["六维能力优先"],
+                    }
+                },
+                ensure_ascii=False,
+            )
+
+        formatter._call_presto = fake_call  # type: ignore[method-assign]
+        result = formatter.format_stage("教育背景\n项目经历\n创新大赛全国六强", "job_matching")
+        matching = result.data["job_matching"]
+        self.assertEqual(matching["target_role"], "产品经理助理")
+        self.assertEqual(len(matching["student_radar"]), 6)
+        self.assertEqual(len(matching["target_radar"]), 6)
+        self.assertEqual(len(matching["top_jobs"]), 2)
+        self.assertEqual(matching["top_jobs"][0]["category"], "跨专业可迁移")
+
     def test_build_local_experience_keeps_only_described_experiences(self) -> None:
         experience = build_local_experience(
             (
@@ -167,6 +311,39 @@ class ResumeWorkflowFormatterTest(unittest.TestCase):
         self.assertIn("MCP标注", experience[0]["contribution"])
         self.assertEqual(experience[0]["level"], 4)
 
+    def test_build_local_experience_prefers_nearby_company_over_department(self) -> None:
+        experience = build_local_experience(
+            "\n".join(
+                [
+                    "实习经历",
+                    "参与公司主线产品 高新兴视频云平台 GoCloud-Video 的监控前台系统CMVS-UI3.0",
+                    "高新兴科技集团股份有限公司",
+                    "中央研究院 公共平台部 | 前端开发实习生 2023-07 至 2023-08",
+                ]
+            ),
+            [],
+        )
+        self.assertEqual(len(experience), 1)
+        self.assertEqual(experience[0]["role"], "高新兴科技集团股份有限公司 / 前端开发实习生")
+        self.assertEqual(experience[0]["contribution"], "视频云平台前端开发")
+
+    def test_build_local_experience_extracts_company_role_with_present_date(self) -> None:
+        experience = build_local_experience(
+            "\n".join(
+                [
+                    "工作经历",
+                    "哈尔滨威科赛斯生物科技有限公司",
+                    "生物实验员 2024-04 至今",
+                ]
+            ),
+            [],
+        )
+        self.assertEqual(len(experience), 1)
+        self.assertEqual(experience[0]["type"], "任职")
+        self.assertEqual(experience[0]["role"], "哈尔滨威科赛斯生物科技有限公司 / 生物实验员")
+        self.assertEqual(experience[0]["contribution"], "生物实验员岗位实践")
+        self.assertEqual(experience[0]["level"], 4)
+
     def test_build_local_experience_recalls_security_project_bullets(self) -> None:
         experience = build_local_experience(
             "\n".join(
@@ -202,6 +379,24 @@ class ResumeWorkflowFormatterTest(unittest.TestCase):
         self.assertEqual(len(experience), 1)
         self.assertEqual(experience[0]["role"], "GNSS轨迹田路分割研究项目")
         self.assertEqual(experience[0]["contribution"], "数据清洗与研究方法实现")
+
+    def test_build_local_experience_attaches_nearby_lab_affiliation(self) -> None:
+        experience = build_local_experience(
+            "\n".join(
+                [
+                    "在马文川教授指导下参与国家级实验室中的各个科研项目,在研究中针对研究中各",
+                    "数据集开发分析与清洗工具,独立提出了基于时间戳的GNSS点云滤波方法以及基",
+                    "于DBSCAN的GNSS点云分块处理方法,对于研究项目使用的数据集开发了一系列数据清洗模块。",
+                    "独立领导了基于视觉与时序模型的农机GNSS轨迹的田路分割的研究项目,对学界前沿的非开源文章独立复现与分析。",
+                    "农业农村部东北智慧农业技术重点实验室",
+                    "指导老师:马文川教授 2023-07 至 2025-01",
+                ]
+            ),
+            [],
+        )
+        self.assertEqual(len(experience), 1)
+        self.assertEqual(experience[0]["role"], "农业农村部东北智慧农业技术重点实验室 / GNSS轨迹田路分割研究项目")
+        self.assertEqual(experience[0]["level"], 8)
 
     def test_build_local_experience_names_generic_research_description(self) -> None:
         experience = build_local_experience(
@@ -542,6 +737,19 @@ class ResumeWorkflowFormatterTest(unittest.TestCase):
         self.assertIn("中文命名实体识别模型研究项目", prompt)
         self.assertNotIn("{{local_candidates}}", prompt)
         self.assertNotIn("{{resume_text}}", prompt)
+
+    def test_normalize_stage_experience_item_keeps_scope_and_caps_level(self) -> None:
+        item = normalize_stage_experience_item(
+            {"type": "比赛", "role": "队长", "contribution": "产品方案设计全国六强", "level": 12, "evidence_scope": "校外"}
+        )
+        self.assertEqual(item["type"], "比赛")
+        self.assertEqual(item["level"], 10)
+        self.assertEqual(item["evidence_scope"], "校外")
+
+    def test_select_hybrid_experience_item_rejects_unrelated_candidate(self) -> None:
+        local_item = {"type": "科研项目", "role": "GNSS轨迹研究项目", "contribution": "数据清洗与研究方法实现", "level": 6}
+        unrelated = {"type": "社团", "role": "吉他协会副会长", "contribution": "活动组织", "level": 4}
+        self.assertEqual(select_hybrid_experience_item(local_item, [unrelated]), local_item)
 
     def test_school_tags_match_ruanke_cache(self) -> None:
         tags = school_tags_for("东北农业大学 · 本科")

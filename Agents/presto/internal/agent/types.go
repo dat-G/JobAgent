@@ -14,12 +14,13 @@ const (
 )
 
 type Message struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content,omitempty"`
-	Name       string     `json:"name,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	CreatedAt  time.Time  `json:"created_at,omitempty"`
+	Role             string     `json:"role"`
+	Content          string     `json:"content,omitempty"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	Name             string     `json:"name,omitempty"`
+	ToolCallID       string     `json:"tool_call_id,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	CreatedAt        time.Time  `json:"created_at,omitempty"`
 }
 
 type ToolCall struct {
@@ -65,6 +66,7 @@ type ChatRequest struct {
 	Tools       []ToolSpec
 	Temperature float64
 	MaxTokens   int
+	Stream      bool
 }
 
 type ChatResponse struct {
@@ -73,8 +75,21 @@ type ChatResponse struct {
 	Raw     json.RawMessage
 }
 
+type ChatStreamDelta struct {
+	Content          string
+	ReasoningContent string
+	Raw              json.RawMessage
+}
+
+type ChatStreamHandler func(ChatStreamDelta)
+
 type Provider interface {
 	Chat(context.Context, ChatRequest) (ChatResponse, error)
+}
+
+type StreamingProvider interface {
+	Provider
+	ChatStream(context.Context, ChatRequest, ChatStreamHandler) (ChatResponse, error)
 }
 
 type EventType string
@@ -82,6 +97,7 @@ type EventType string
 const (
 	EventRunStarted   EventType = "run.started"
 	EventModelStarted EventType = "model.started"
+	EventModelDelta   EventType = "model.delta"
 	EventModelDone    EventType = "model.done"
 	EventToolStarted  EventType = "tool.started"
 	EventToolDone     EventType = "tool.done"

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>学生成长诊断与路径规划</title>
     <meta name="description" content="上传简历后生成能力画像、岗位匹配分析和成长路径规划。">
-    <link rel="stylesheet" href="/styles.css?v=20260606-suggestions-attached">
+    <link rel="stylesheet" href="/styles.css?v=20260607-synthesis-terminal-input-rect-grid">
   </head>
   <body>
     <header class="topbar" aria-label="页面导航">
@@ -85,7 +85,7 @@
         </div>
       </section>
 
-      <section class="slide module-slide is-module-locked" id="profile" data-step="profile" data-lock-message="能力画像 agent 正在生成" aria-labelledby="profileTitle">
+      <section class="slide module-slide is-module-locked" id="profile" data-step="profile" data-lock-message="能力画像 Agent 正在生成" aria-labelledby="profileTitle">
         <div class="slide-shell profile-layout">
           <div class="section-copy reveal">
             <p class="section-label">能力画像</p>
@@ -128,7 +128,7 @@
                     <h4 id="awardTitle">奖项与证书</h4>
                     <p>Level 快速给出，Impact 等待 Benchmark。</p>
                   </div>
-                  <span class="status-pill is-warning" id="awardDataState">等待奖项 agent</span>
+                  <span class="status-pill is-warning" id="awardDataState">等待奖项 Agent</span>
                 </div>
                 <div class="evidence-list" id="awardList"></div>
               </section>
@@ -138,43 +138,61 @@
                     <h4 id="experienceTitle">经历评分</h4>
                     <p>保留 hybrid level，再补充 impact。</p>
                   </div>
-                  <span class="status-pill is-warning" id="experienceDataState">等待经历 agent</span>
+                  <span class="status-pill is-warning" id="experienceDataState">等待经历 Agent</span>
                 </div>
                 <div class="evidence-list" id="experienceList"></div>
               </section>
             </div>
           </section>
-
-          <section class="score-board reveal" aria-labelledby="scoreTitle">
-            <div class="panel-heading">
-              <h3 id="scoreTitle">基础分值</h3>
-              <span class="status-pill is-simulated">模拟数据</span>
-            </div>
-            <div id="dimensionScores" class="score-list"></div>
-          </section>
         </div>
       </section>
 
-      <section class="slide module-slide is-module-locked" id="matching" data-step="matching" data-lock-message="岗位匹配 agent 正在生成" aria-labelledby="matchingTitle">
+      <section class="slide module-slide is-module-locked" id="matching" data-step="matching" data-lock-message="岗位匹配 Agent 正在生成" aria-labelledby="matchingTitle">
         <div class="slide-shell matching-layout">
           <div class="section-copy reveal">
             <p class="section-label">岗位能力匹配</p>
-            <h2 id="matchingTitle">匹配度、差距明细和推荐理由</h2>
-            <p>匹配度、差距明细和推荐理由当前由规则样例生成，用于占位展示后续真实匹配 agent 的输出形态。</p>
+            <h2 id="matchingTitle">推荐岗位、目标雷达和差距证据</h2>
+            <p>Legato Job Matching 基于六维能力、经历证据和学历门槛排序岗位，并同时比较学生画像与岗位目标能力。</p>
           </div>
 
-          <section class="match-score reveal" aria-labelledby="overallMatchLabel">
-            <span id="overallMatchLabel">总体匹配度</span>
-            <span class="sim-badge">模拟数据</span>
-            <strong id="overallMatch">82%</strong>
-            <small id="matchLevel">高潜力匹配</small>
-            <div class="meter" aria-hidden="true"><span id="overallMeter"></span></div>
+          <section class="match-summary reveal" aria-labelledby="overallMatchLabel">
+            <div class="match-score" aria-labelledby="overallMatchLabel">
+              <span id="overallMatchLabel">首选岗位匹配度</span>
+              <strong id="overallMatch">--</strong>
+              <small id="matchLevel">等待 Job Matching</small>
+              <div class="meter" aria-hidden="true"><span id="overallMeter"></span></div>
+            </div>
+            <div class="match-narrative">
+              <span id="selectedJobLabel">首选岗位</span>
+              <h3 id="selectedJobTitle">等待推荐</h3>
+              <p id="matchNarrative">Benchmark 完成后，Legato 会返回首选岗位、推荐理由和需要补齐的证据。</p>
+              <div id="matchAgentNotes" class="agent-note-list"></div>
+            </div>
+          </section>
+
+          <section class="data-panel reveal matching-radar-panel" aria-labelledby="matchingRadarTitle">
+            <div class="panel-heading">
+              <h3 id="matchingRadarTitle">个人画像与岗位目标雷达</h3>
+            </div>
+            <div class="matching-radar-grid">
+              <svg id="matchingRadarChart" class="radar-chart matching-radar-chart" viewBox="0 0 360 320" role="img" aria-labelledby="matchingRadarTitle"></svg>
+              <div class="matching-radar-copy">
+                <div id="matchingRadarLegend" class="radar-legend"></div>
+                <p id="matchingRadarText">等待首选岗位目标能力雷达。</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="data-panel reveal job-recommendation-panel" aria-labelledby="matchingJobsTitle">
+            <div class="panel-heading">
+              <h3 id="matchingJobsTitle">推荐岗位队列</h3>
+            </div>
+            <div id="matchingJobs" class="matching-job-list"></div>
           </section>
 
           <section class="data-panel reveal report-panel" aria-labelledby="reportTitle">
             <div class="panel-heading">
-              <h3 id="reportTitle">可视化报表</h3>
-              <span class="status-pill is-simulated">模拟数据</span>
+              <h3 id="reportTitle">六维差距报表</h3>
             </div>
             <div id="reportRows" class="report-rows"></div>
           </section>
@@ -182,7 +200,6 @@
           <section class="data-panel reveal gap-panel" aria-labelledby="gapTitle">
             <div class="panel-heading">
               <h3 id="gapTitle">差距明细</h3>
-              <span class="status-pill is-simulated">模拟数据</span>
             </div>
             <div class="table-wrap">
               <table>
@@ -202,7 +219,7 @@
         </div>
       </section>
 
-      <section class="slide module-slide is-module-locked" id="path" data-step="path" data-lock-message="路径规划 agent 正在生成" aria-labelledby="pathTitle">
+      <section class="slide module-slide is-module-locked" id="path" data-step="path" data-lock-message="路径规划 Agent 正在生成" aria-labelledby="pathTitle">
         <div class="slide-shell path-layout">
           <div class="section-copy reveal">
             <p class="section-label">路径规划</p>
@@ -243,7 +260,7 @@
             <article>
               <span>匹配结果</span>
               <strong>可视化报表</strong>
-              <span class="sim-badge">含模拟匹配</span>
+              <span>含目标岗位雷达</span>
               <div class="button-row">
                 <button type="button" data-export="match-json">导出报表 JSON</button>
               </div>
@@ -253,7 +270,6 @@
           <section class="data-panel reveal" aria-labelledby="jobsTitle">
             <div class="panel-heading">
               <h3 id="jobsTitle">TOP5 匹配岗位</h3>
-              <span class="status-pill is-simulated">模拟数据</span>
             </div>
             <div id="topJobs" class="job-list"></div>
           </section>
@@ -331,7 +347,6 @@
 
         <div class="assistant-context" id="assistantContext" role="status">
           <span class="status-pill is-warning">等待诊断</span>
-          <p>生成诊断后，助手会把能力画像、岗位匹配和路径规划作为回答上下文。</p>
         </div>
 
         <details class="assistant-archive" id="assistantArchive">
@@ -341,20 +356,22 @@
 
         <div class="assistant-messages" id="assistantMessages" role="log" aria-live="polite" aria-relevant="additions"></div>
 
-        <div class="assistant-suggestions" id="assistantSuggestions" aria-label="建议问题"></div>
+        <div class="assistant-input-zone">
+          <div class="assistant-suggestions" id="assistantSuggestions" aria-label="建议问题"></div>
 
-        <form class="assistant-composer" id="assistantForm">
-          <label class="sr-only" for="assistantInput">输入要询问AI助手的问题</label>
-          <textarea id="assistantInput" rows="3" maxlength="1200" placeholder="要求后续变更" enterkeyhint="send"></textarea>
-          <div class="assistant-composer-footer">
-            <span id="assistantInputMeta">最多 1200 字</span>
-            <button type="submit" id="assistantSend" aria-label="发送问题">↑</button>
-          </div>
-        </form>
+          <form class="assistant-composer" id="assistantForm">
+            <label class="sr-only" for="assistantInput">输入要询问AI助手的问题</label>
+            <textarea id="assistantInput" rows="3" maxlength="1200" placeholder="要求后续变更" enterkeyhint="send"></textarea>
+            <div class="assistant-composer-footer">
+              <span id="assistantInputMeta">最多 1200 字</span>
+              <button type="submit" id="assistantSend" aria-label="发送问题">↑</button>
+            </div>
+          </form>
+        </div>
       </section>
     </aside>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/app.js?v=20260606-suggestions-attached"></script>
+    <script type="module" src="/app.js?v=20260607-synthesis-terminal-input-rect-grid"></script>
   </body>
 </html>

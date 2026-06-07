@@ -1,12 +1,15 @@
 Return only JSON. Use facts from resume only.
 {
   "experience": [
-    {"type": "", "role": "", "contribution": "", "level": 0}
+    {"type": "", "role": "", "contribution": "", "level": 0, "evidence_scope": "校外"}
   ]
 }
 
 Rules:
-- Preserve real local candidates; improve wording and split broad project entries.
+- Use full resume as fuzzy recall; local candidates are hints, not limits.
+- Preserve real local candidates; add missing work/research/project/role items when full text has evidence.
+- Merge split lines: company/lab/org may appear above/below role, date, teacher, or description.
+- Prefer concrete org/company/lab + project/position when available; avoid department-only org names.
 - Exclude pure awards/certs/scholarships/skills/education/self-evaluation/generic participation.
 - type in: 实习, 科研项目, 项目, 比赛, 社团, 任职.
 - role: company/org/event/project / role; contribution: <=35 chars ability evidence.

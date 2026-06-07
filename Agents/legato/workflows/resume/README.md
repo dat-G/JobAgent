@@ -84,6 +84,7 @@ prompts/profile.md     identity + education in one request
 prompts/certifications_awards.md certificates and awards
 prompts/item_benchmark.md six-dimensional item scoring
 prompts/major_baseline.md major-family academic baseline scoring
+prompts/job_matching.md agent-team job recommendation and target radar
 prompts/combined.md    profile + certifications_awards + experience in one request
 prompts/merge.md       final schema merge
 prompts/retry_json.md  short retry instruction for invalid JSON
@@ -188,14 +189,48 @@ When multiple education records exist, the stage should not simply pick the stro
 If the school has a clear field specialty or the context mentions `王牌专业` / `特色专业` / `优势专业` / `一流学科`, the stage can slightly raise `专业` and adjacent dimensions, but it should not erase the school-tier debuff.
 The scores are ability priors, not raw grade scores. A missing GPA or transcript average near 80 maps to an ability prior around 50.
 
+## Job Matching
+
+`--workflow-stage job_matching` runs after `item_benchmark` and `major_baseline`.
+The backend passes `basic_info`, `education`, `major_baseline`, `awards`, and `experiences` through `--workflow-stage-input`.
+The prompt uses an agent team protocol: Capability Strategist, Evidence Auditor, Education Gatekeeper, Role Mapper, Ranking Arbiter, and Report Writer.
+
+Ranking principles:
+
+- Six-dimensional ability fit is the first ranking signal.
+- Experience relevance and evidence quality are the second ranking signal.
+- Education is a threshold and risk gate, not the only ranking signal.
+- A high impact and highly relevant project can partially break the education threshold, but the result must expose risk and next proof.
+- Recommendations should consider both major-related roles and cross-major transferable roles when the evidence supports them.
+
+Output includes:
+
+```json
+{
+  "job_matching": {
+    "target_role": "前端开发工程师",
+    "overall_match": 81,
+    "match_level": "高潜力匹配",
+    "student_radar": [{"name": "逻辑", "score": 72}],
+    "target_radar": [{"name": "逻辑", "score": 76}],
+    "selected_job": {"rank": 1, "title": "前端开发工程师", "requirement_radar": []},
+    "top_jobs": [],
+    "report_sections": [],
+    "gap_details": [],
+    "recommendations": []
+  }
+}
+```
+
 Frontend radar aggregation uses the current item scores:
 
 - Evidence strength = `0.4 * level/10 + 0.6 * impact_factor/10`.
 - Per-dimension contribution = `six_dim_score * evidence_strength`, capped at `0.96`.
 - Multiple items combine with strong diminishing returns: after evidence score reaches about 65, marginal gain drops below 16%; after about 70, marginal gain is about 4%.
 - Low-confidence evidence is capped twice: each item has a low contribution cap, and its bucket has a strict per-dimension total cap. Current capped buckets include untitled professional projects, campus/internal awards, low-impact awards/basic certificates, and generic campus roles. Quantity cannot replace concrete project titles, strong competitions, internships, or measured outcomes.
-- 校内 and 综合 blend the `major_baseline` academic prior with evidence scores. If no usable transcript GPA exists, the academic prior defaults near 50 rather than 80.
-- Three radar series are rendered: `综合` over all items plus academic baseline, `校内` over campus/internal items plus academic baseline, and `校外` over external items.
+- Final ability uses `school_tier_prior + evidence_lift`, not a simple evidence/baseline blend. School tier sets the base and ceiling; evidence can only add within that ceiling.
+- Ceiling is tiered: 985/top-50 can reach the highest band with high-impact evidence; 211/双一流 is lower; non-双一流 and ordinary schools have tighter caps; independent/private/former-third-tier backgrounds require B3/B4 evidence to break out and usually only approach the basic band of a 双一流 student. A later stronger degree can partially offset this prior, but does not erase the undergraduate signal.
+- Three radar series are rendered: `综合` over all items plus school-tier academic prior, `校内` over campus/internal items plus school-tier academic prior, and `校外` over external items constrained by the same school-tier ceiling.
 
 For DeepSeek thinking mode, run Presto with:
 

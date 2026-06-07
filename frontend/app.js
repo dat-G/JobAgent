@@ -47,6 +47,8 @@ let failedRunStep = "";
 let firstResultRevealed = false;
 let activeStep = "upload";
 let scrollSyncFrame = 0;
+let radarAnimationFrame = 0;
+let radarRenderState = null;
 
 const benchmarkDimensions = ["逻辑", "语言", "专业", "领导", "抗压", "成长"];
 const radarEvidenceGain = 1.0;
@@ -54,17 +56,38 @@ const radarEvidenceDiminishThreshold = 0.65;
 const radarEvidenceTailThreshold = 0.7;
 const radarEvidenceTailGain = 0.04;
 const radarEvidenceSoftCap = 0.88;
+const radarVisualGamma = 0.86;
+const radarGridScores = [25, 50, 75, 100];
 const cappedEvidenceBucketRules = {
   lowImpactAwardCertificate: { singleCap: 0.035, totalCap: 0.08 },
   campusAward: { singleCap: 0.045, totalCap: 0.1 },
   genericCampusRole: { singleCap: 0.045, totalCap: 0.1 },
-  untitledProject: { singleCap: 0.06, totalCap: 0.15 }
+  untitledProject: { singleCap: 0.06, totalCap: 0.15 },
+  impactLow: { singleCap: 0.06, totalCap: 0.14 },
+  impactMedium: { singleCap: 0.1, totalCap: 0.24 },
+  impactHigh: { singleCap: 0.16, totalCap: 0.38 },
+  impactExceptional: { singleCap: 0.24, totalCap: 0.52 }
+};
+const schoolTierConfigs = {
+  T0: { label: "985/Top50", base: 68, noHighCap: 78, highCap: 92, exceptionalCap: 94, liftScale: 0.25 },
+  T1: { label: "211/双一流/Top150", base: 62, noHighCap: 72, highCap: 86, exceptionalCap: 88, liftScale: 0.28 },
+  T2: { label: "非双一流Top151-250", base: 52, noHighCap: 62, highCap: 76, exceptionalCap: 78, liftScale: 0.3 },
+  T3: { label: "普通本科", base: 46, noHighCap: 56, highCap: 68, exceptionalCap: 72, liftScale: 0.28 },
+  T4A: { label: "独立学院历史+较高学历", base: 45, noHighCap: 54, highCap: 66, exceptionalCap: 70, liftScale: 0.24 },
+  T4: { label: "独立学院/原三本", base: 38, noHighCap: 52, highCap: 60, exceptionalCap: 62, liftScale: 0.22 },
+  T5: { label: "专科", base: 34, noHighCap: 48, highCap: 56, exceptionalCap: 60, liftScale: 0.2 }
 };
 const academicPriorWeight = 0.28;
 const academicPriorFloorRatio = 0.85;
 let assistantState = loadAssistantState();
 let assistantBusy = false;
 let assistantAbort = null;
+let assistantFocusedEvidence = null;
+let assistantAgentStreamMessageId = "";
+let assistantAgentStreamActive = false;
+let assistantAgentStreamAutoOpened = false;
+let assistantAgentTypewriterTimers = new Map();
+let assistantStateSaveTimer = 0;
 
 const agentSteps = ["resume_agent", "transcript_agent", "profile", "matching", "path", "outputs"];
 const moduleLocks = {
@@ -75,12 +98,12 @@ const moduleLocks = {
 };
 
 const runStepDetails = {
-  resume_agent: "简历解析 agent 正在读取材料并抽取基础信息。",
-  transcript_agent: "成绩单解析 agent 正在整理课程和成绩证据。",
-  profile: "画像 agent 正在合并简历与成绩单证据。",
-  matching: "岗位匹配 agent 正在计算推荐岗位和匹配度。",
-  path: "路径规划 agent 正在生成阶段目标和周任务。",
-  outputs: "导出 agent 正在整理结构化输出。"
+  resume_agent: "简历解析 Agent 正在读取材料并抽取基础信息。",
+  transcript_agent: "成绩单解析 Agent 正在整理课程和成绩证据。",
+  profile: "画像 Agent 正在合并简历与成绩单证据。",
+  matching: "岗位匹配 Agent 正在计算推荐岗位和匹配度。",
+  path: "路径规划 Agent 正在生成阶段目标和周任务。",
+  outputs: "导出 Agent 正在整理结构化输出。"
 };
 
 function createDiagnosisShell() {
@@ -91,7 +114,6 @@ function createDiagnosisShell() {
     ability_profile: {
       basic_info: {},
       education: [],
-      four_dim_scores: [],
       radar_data: [],
       evidence_summary: [],
       awards_status: "waiting",
@@ -99,10 +121,20 @@ function createDiagnosisShell() {
       experiences_status: "waiting",
       experiences: [],
       benchmark_status: "waiting",
+      major_baseline_status: "waiting",
+      major_baseline: {},
       top5_matching_jobs: []
     },
     path_plan: { export_formats: [], stages: [] },
-    matching_result: { report_sections: [], gap_details: [], recommendations: [], recommended_reasons: [] },
+    matching_result: {
+      selected_job: {},
+      student_radar: [],
+      target_radar: [],
+      report_sections: [],
+      gap_details: [],
+      recommendations: [],
+      recommended_reasons: []
+    },
     backend_requirements: [],
     production_limitations: []
   };
@@ -282,6 +314,7 @@ async function runDiagnosis() {
   document.querySelector(".generation-dock").classList.add("is-running");
   resetRunSteps();
   resetResultModules();
+  const diagnosisSession = startAssistantDiagnosisSession();
 
   const payload = new FormData(form);
 
@@ -289,6 +322,7 @@ async function runDiagnosis() {
     const response = await fetch("/api/diagnosis", { method: "POST", body: payload });
     if (!response.ok) throw new Error("diagnosis request failed");
     const job = await response.json();
+    bindAssistantDiagnosisJob(diagnosisSession, job);
     if (job.events_url) {
       currentJobId = job.job_id || "";
       connectDiagnosisEvents(job.events_url);
@@ -309,24 +343,86 @@ async function runDiagnosis() {
     throw new Error("diagnosis job missing events_url");
   } catch {
     setRunFailed("无法连接 Legato 诊断服务。");
+    markAssistantAgentTeamFailed("无法连接 Legato 诊断服务。");
     showToast("Legato 诊断服务不可用，未生成诊断。");
   }
 }
 
-function resetRunSteps() {
+function closeDiagnosisEvents() {
   if (diagnosisEvents) {
     diagnosisEvents.close();
     diagnosisEvents = null;
   }
+}
+
+function resetRunSteps() {
+  closeDiagnosisEvents();
   baseJobDone = false;
   failedRunStep = "";
+  assistantAgentStreamMessageId = "";
+  assistantAgentStreamActive = false;
+  assistantAgentStreamAutoOpened = false;
+  stopAgentTypewriters();
   document.querySelectorAll("[data-run-step]").forEach((item) => {
     item.classList.remove("is-done", "is-running", "is-failed");
     setRunStepRetryable(item.dataset.runStep, false);
   });
   document.querySelector("#runStatus").textContent = "生成中";
-  document.querySelector("#runDetail").textContent = "正在创建诊断任务并启动 agent。";
+  document.querySelector("#runDetail").textContent = "正在创建诊断任务并启动 Agent。";
   setRunProgress(0);
+  syncAssistantAvailability();
+}
+
+function startAssistantDiagnosisSession() {
+  pruneEmptyActiveAssistantSession();
+  const session = createAssistantSession(false, {
+    title: buildDiagnosisSessionTitle(),
+    diagnosisJobId: "",
+    diagnosisFileName: resumeInput.files?.[0]?.name || ""
+  });
+  assistantArchive.open = false;
+  assistantAgentStreamActive = true;
+  assistantAgentStreamAutoOpened = true;
+  const { message } = ensureAgentTeamStreamMessage(session);
+  message.content = agentTeamStreamFallback(message.agentStream);
+  message.updatedAt = new Date().toISOString();
+  session.updatedAt = message.updatedAt;
+  saveAssistantState();
+  setAssistantExpanded(true, { silent: true, force: true });
+  renderAssistant();
+  return session;
+}
+
+function buildDiagnosisSessionTitle() {
+  const fileName = resumeInput.files?.[0]?.name || "";
+  const cleanName = fileName.replace(/\.[^.]+$/, "").trim();
+  if (cleanName) return `诊断 · ${cleanName}`.slice(0, 80);
+  return `诊断 · ${formatTime(new Date().toISOString())}`;
+}
+
+function bindAssistantDiagnosisJob(session, job) {
+  if (!session || !job) return;
+  session.diagnosisJobId = String(job.job_id || session.diagnosisJobId || "");
+  session.updatedAt = new Date().toISOString();
+  saveAssistantState();
+  renderAssistantArchive();
+}
+
+function markAssistantAgentTeamFailed(messageText) {
+  const { session, message } = findActiveAgentStreamMessage();
+  if (!session || !message) return;
+  const now = new Date().toISOString();
+  message.status = "error";
+  message.updatedAt = now;
+  message.content = messageText;
+  message.agentStream = message.agentStream || createAgentTeamStreamState();
+  message.agentStream.status = "failed";
+  message.agentStream.summary = messageText;
+  message.agentStream.updatedAt = now;
+  session.updatedAt = now;
+  assistantAgentStreamActive = false;
+  saveAssistantState();
+  renderAssistant();
 }
 
 function setRunDone() {
@@ -338,15 +434,17 @@ function setRunDone() {
   runButton.textContent = "重新生成";
   updateAssistantContext();
   renderAssistantSuggestions();
+  syncAssistantAvailability();
 }
 
 function setRunFailed(message) {
   document.querySelector("#runStatus").textContent = "诊断失败";
-  document.querySelector("#runDetail").textContent = message || "Legato 必需解析失败，请检查材料或后端服务。";
+  document.querySelector("#runDetail").textContent = formatAgentDisplayText(message || "Legato 必需解析失败，请检查材料或后端服务。");
   document.querySelector(".generation-dock").classList.remove("is-running");
   runButton.disabled = false;
   runButton.textContent = "重新生成";
   updateAssistantContext();
+  syncAssistantAvailability();
 }
 
 function setRunWaitingForBenchmark() {
@@ -357,6 +455,7 @@ function setRunWaitingForBenchmark() {
   document.querySelector(".generation-dock").classList.add("is-running");
   runButton.disabled = true;
   runButton.textContent = "生成中";
+  syncAssistantAvailability();
 }
 
 function setRunProgress(value) {
@@ -373,7 +472,7 @@ function connectDiagnosisEvents(eventsUrl) {
   diagnosisEvents.addEventListener("job.started", (event) => {
     const payload = JSON.parse(event.data);
     document.querySelector("#runStatus").textContent = "生成中";
-    document.querySelector("#runDetail").textContent = payload.message || "异步诊断已开始。";
+    document.querySelector("#runDetail").textContent = formatAgentDisplayText(payload.message || "异步诊断已开始。");
   });
   diagnosisEvents.addEventListener("job.done", (event) => {
     const payload = JSON.parse(event.data);
@@ -388,16 +487,17 @@ function connectDiagnosisEvents(eventsUrl) {
       }
     }
     unlockModule("outputs");
-    if (benchmarkRequestInFlight || diagnosis?.ability_profile?.benchmark_status === "benchmarking") {
+    const keepEventsForBenchmark = benchmarkRequestInFlight || diagnosis?.ability_profile?.benchmark_status === "benchmarking";
+    if (keepEventsForBenchmark) {
       setRunWaitingForBenchmark();
     } else if (diagnosis?.ability_profile?.benchmark_status === "failed") {
       setBenchmarkRunFailed();
     } else {
       setRunDone();
     }
-    if (diagnosisEvents) {
-      diagnosisEvents.close();
-      diagnosisEvents = null;
+    if (!keepEventsForBenchmark) {
+      closeDiagnosisEvents();
+      updateAssistantContext();
     }
   });
   diagnosisEvents.addEventListener("job.failed", (event) => {
@@ -406,17 +506,11 @@ function connectDiagnosisEvents(eventsUrl) {
     const detail = errors.filter(Boolean).join("；");
     const message = detail ? `${payload.message || "诊断失败"}：${detail}` : payload.message;
     setRunFailed(message);
-    showToast(message || "简历解析失败，请检查材料或后端服务。");
-    if (diagnosisEvents) {
-      diagnosisEvents.close();
-      diagnosisEvents = null;
-    }
+    showToast(formatAgentDisplayText(message || "简历解析失败，请检查材料或后端服务。"));
+    closeDiagnosisEvents();
   });
   diagnosisEvents.onerror = () => {
-    if (diagnosisEvents) {
-      diagnosisEvents.close();
-      diagnosisEvents = null;
-    }
+    closeDiagnosisEvents();
     setRunFailed("诊断事件流中断，请重新生成。");
     showToast("诊断事件流中断，请重新生成。");
   };
@@ -430,19 +524,21 @@ function handleDiagnosisEvent(event) {
       ? `失败：${stepLabel(event.step)}`
       : `已完成：${stepLabel(event.step)}`;
   document.querySelector("#runStatus").textContent = statusText;
-  document.querySelector("#runDetail").textContent = event.message || runStepDetails[event.step] || "正在生成诊断结果。";
+  document.querySelector("#runDetail").textContent = formatAgentDisplayText(event.message || runStepDetails[event.step] || "正在生成诊断结果。");
 
   const data = event.data || {};
+  if (data.agent_team_event) {
+    handleAgentTeamChatEvent(data.agent_team_event);
+  }
   if (data.ability_profile) {
     diagnosis = diagnosis || createDiagnosisShell();
     diagnosis.ability_profile = data.ability_profile;
     renderBasicInfo(diagnosis);
-    renderScores(data.ability_profile.four_dim_scores || []);
     renderAbilityRadar(data.ability_profile);
     renderResumeEvidence(data.ability_profile);
     maybeRequestItemBenchmark(data.ability_profile);
     if (event.step === "profile" && event.status === "failed" && data.ability_profile.benchmark_status === "failed") {
-      setBenchmarkRunFailed(data.error || event.message);
+      setBenchmarkRunFailed(formatAgentDisplayText(data.error || event.message));
     }
     unlockModule("profile");
   }
@@ -483,6 +579,333 @@ function handleDiagnosisEvent(event) {
   }
   updateAssistantContext();
   renderAssistantSuggestions();
+}
+
+function handleAgentTeamChatEvent(event) {
+  const normalized = normalizeAgentTeamEvent(event);
+  const teamTerminal = normalized.agentKey === "team" && (normalized.status === "done" || normalized.status === "failed");
+  const isTokenDelta = normalized.tokenChannel === "content" && Boolean(normalized.tokenDelta);
+  assistantAgentStreamActive = !teamTerminal;
+  const session = ensureAssistantSession();
+  const now = new Date().toISOString();
+  const { message, created } = ensureAgentTeamStreamMessage(session, normalized);
+  message.agentStream = updateAgentTeamStreamState(message.agentStream, normalized);
+  message.content = agentTeamStreamFallback(message.agentStream);
+  message.status = message.agentStream.status === "failed"
+    ? "error"
+    : message.agentStream.status === "done"
+      ? "done"
+      : "loading";
+  message.updatedAt = now;
+  session.updatedAt = now;
+  if (isTokenDelta) {
+    scheduleAssistantStateSave();
+  } else {
+    saveAssistantState();
+  }
+  if (normalized.agentKey && normalized.agentKey !== "team") {
+    syncAgentTypewriterForEvent(message.id, normalized.agentKey);
+  }
+  if (created && !assistantAgentStreamAutoOpened && !assistantState.expanded) {
+    assistantAgentStreamAutoOpened = true;
+  }
+  if (isTokenDelta && patchAgentStreamText(message.id, normalized.agentKey)) {
+    return;
+  }
+  if (isTokenDelta && !isAgentStreamExpanded(message.agentStream, normalized.agentKey)) return;
+  renderAssistant();
+  if (teamTerminal && baseJobDone && !benchmarkRequestInFlight) {
+    if (normalized.status === "done" && !failedRunStep) setRunDone();
+    closeDiagnosisEvents();
+  }
+}
+
+function ensureAgentTeamStreamMessage(session, event = null) {
+  const phaseGroup = agentStreamGroupForEvent(event);
+  let message = session.messages.find((item) => {
+    if (item.streamType !== "agent_team") return false;
+    const streamGroup = item.agentStream?.phaseGroup || "team";
+    return streamGroup === phaseGroup;
+  });
+  if (message) {
+    if (!message.agentStream) message.agentStream = createAgentTeamStreamState(phaseGroup);
+    if (!message.agentStream.phaseGroup) message.agentStream.phaseGroup = phaseGroup;
+    assistantAgentStreamMessageId = message.id;
+    return { message, created: false };
+  }
+  const now = new Date().toISOString();
+  const stream = createAgentTeamStreamState(phaseGroup);
+  message = {
+    id: uniqueId("msg"),
+    role: "assistant",
+    content: agentTeamStreamFallback(stream),
+    createdAt: now,
+    updatedAt: now,
+    status: "loading",
+    retryPrompt: "",
+    streamType: "agent_team",
+    agentStream: stream
+  };
+  assistantAgentStreamMessageId = message.id;
+  session.messages.push(message);
+  return { message, created: true };
+}
+
+function createAgentTeamStreamState(phaseGroup = "planning") {
+  const config = agentStreamPhaseConfig(phaseGroup);
+  return {
+    title: config.title,
+    phaseGroup: config.group,
+    stageOrder: config.stageOrder,
+    status: "running",
+    complexity: "",
+    agentCount: config.agentCount,
+    phase: config.phase,
+    summary: config.summary,
+    order: [],
+    agents: {},
+    expandedAgents: {},
+    logs: [],
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function updateAgentTeamStreamState(stream, event) {
+  const phaseGroup = stream?.phaseGroup || agentStreamGroupForEvent(event);
+  stream = stream || createAgentTeamStreamState(phaseGroup);
+  const isTokenDelta = event.tokenChannel === "content" && Boolean(event.tokenDelta);
+  stream.phaseGroup = phaseGroup;
+  stream.stageOrder = agentStreamPhaseConfig(phaseGroup).stageOrder;
+  stream.complexity = event.complexity || stream.complexity;
+  if (phaseGroup === "team") {
+    stream.agentCount = event.agentCount || event.agentTotal || stream.agentCount;
+  } else {
+    stream.agentCount = 1;
+  }
+  stream.phase = event.phase || stream.phase;
+  stream.updatedAt = event.time;
+  if (event.message) stream.summary = event.message;
+  if (event.agentKey && event.agentKey !== "team") {
+    upsertAgentStreamAgent(stream, event);
+  }
+  if (phaseGroup === "synthesis" && event.agentKey === "team" && event.status === "done") {
+    completeSynthesisAgentFromTeamEvent(stream, event);
+  }
+  stream.status = resolveAgentStreamStatus(stream, event);
+  if (!isTokenDelta) {
+    stream.logs.push({
+      time: event.time,
+      agentKey: event.agentKey,
+      agent: event.agent,
+      status: event.status,
+      message: event.message,
+      runID: event.runID
+    });
+    if (stream.logs.length > 20) stream.logs = stream.logs.slice(-20);
+  }
+  return stream;
+}
+
+function completeSynthesisAgentFromTeamEvent(stream, event) {
+  const existing = stream.agents.synthesis_arbiter;
+  const message = existing?.message && existing.status === "done"
+    ? existing.message
+    : "Synthesis Arbiter 已返回结构化岗位匹配结果。";
+  upsertAgentStreamAgent(stream, {
+    ...event,
+    agentKey: "synthesis_arbiter",
+    agent: "Synthesis Arbiter",
+    status: "done",
+    phase: "final_synthesis",
+    perspective: existing?.perspective || "multi_view_decision",
+    reasoningEffort: existing?.reasoningEffort || "",
+    focus: existing?.focus || "综合所有视角结果，输出岗位匹配报告。",
+    agentIndex: 1,
+    agentTotal: 1,
+    runID: existing?.runID || event.runID || "",
+    message,
+    outputPreview: existing?.outputPreview || event.outputPreview || ""
+  });
+  const item = stream.agents.synthesis_arbiter;
+  if (item?.outputPreview && !item.typedOutput) {
+    item.typedOutput = item.outputPreview;
+    item.typingDone = true;
+  }
+}
+
+function agentStreamPhaseConfig(phaseGroup = "planning") {
+  const group = ["planning", "team", "synthesis"].includes(phaseGroup) ? phaseGroup : "team";
+  const configs = {
+    planning: {
+      group: "planning",
+      title: "规划阶段",
+      label: "Adaptive Planner",
+      phase: "planning",
+      stageOrder: 1,
+      agentCount: 1,
+      summary: "Planner 正在判断简历复杂度并派生多视角 Agent。",
+      empty: "等待 Adaptive Planner 返回派生方案。"
+    },
+    team: {
+      group: "team",
+      title: "多视角 Agent Team",
+      label: "并行分析",
+      phase: "orchestration",
+      stageOrder: 2,
+      agentCount: 0,
+      summary: "多视角 Agent 将从能力、证据、教育背景、岗位族等角度并发分析。",
+      empty: "等待 Planner 派生的 Agent 队列。"
+    },
+    synthesis: {
+      group: "synthesis",
+      title: "Synthesis Arbiter",
+      label: "综合裁决",
+      phase: "final_synthesis",
+      stageOrder: 3,
+      agentCount: 1,
+      summary: "Synthesis Arbiter 将综合所有视角结果并输出可渲染的岗位匹配报告。",
+      empty: "等待 Synthesis Arbiter 启动。"
+    }
+  };
+  return configs[group];
+}
+
+function agentStreamGroupForEvent(event = null) {
+  if (!event) return "planning";
+  const agentKey = String(event.agentKey || "");
+  const phase = String(event.phase || "");
+  if (agentKey === "synthesis_arbiter" || phase === "final_synthesis") return "synthesis";
+  if (agentKey === "adaptive_planner" || phase === "planning") return "planning";
+  if (agentKey === "team" && event.status === "done") return "synthesis";
+  if (agentKey === "team" && phase === "orchestration" && !event.agentCount && event.status !== "failed") return "planning";
+  return "team";
+}
+
+function resolveAgentStreamStatus(stream, event) {
+  if (event.status === "failed") return "failed";
+  if (stream.phaseGroup === "planning") {
+    return stream.agents.adaptive_planner?.status === "done" ? "done" : "running";
+  }
+  if (stream.phaseGroup === "synthesis") {
+    if (event.agentKey === "team" && event.status === "done") return "done";
+    return stream.agents.synthesis_arbiter?.status === "done" ? "done" : "running";
+  }
+  const total = stream.agentCount || stream.order.length;
+  const completed = stream.order.filter((key) => stream.agents[key]?.status === "done").length;
+  const failed = stream.order.filter((key) => stream.agents[key]?.status === "failed").length;
+  if (failed > 0) return "failed";
+  if (total > 0 && completed >= total) return "done";
+  return "running";
+}
+
+function upsertAgentStreamAgent(stream, event) {
+  const key = event.agentKey || event.agent || "agent";
+  if (!stream.agents[key]) {
+    stream.order.push(key);
+    stream.agents[key] = {
+      key,
+      agent: event.agent || key,
+      status: "queued",
+      phase: event.phase || "",
+      perspective: event.perspective || "",
+      reasoningEffort: event.reasoningEffort || "",
+      focus: event.focus || "",
+      agentIndex: event.agentIndex || 0,
+      agentTotal: event.agentTotal || 0,
+      runID: event.runID || "",
+      message: "",
+      outputPreview: "",
+      typedOutput: "",
+      typingDone: false,
+      tokenStreamed: false,
+      updatedAt: event.time
+    };
+  }
+  const item = stream.agents[key];
+  item.agent = event.agent || item.agent;
+  item.status = normalizeAgentStreamStatus(event.status || item.status);
+  if (item.tokenStreamed && item.status === "done") {
+    item.typingDone = true;
+  }
+  item.phase = event.phase || item.phase;
+  item.perspective = event.perspective || item.perspective;
+  item.reasoningEffort = event.reasoningEffort || item.reasoningEffort;
+  item.focus = event.focus || item.focus;
+  item.agentIndex = event.agentIndex || item.agentIndex;
+  item.agentTotal = event.agentTotal || item.agentTotal;
+  item.runID = event.runID || item.runID;
+  item.message = event.message || item.message;
+  if (event.tokenDelta && event.tokenChannel === "content") {
+    item.outputPreview = `${item.outputPreview || ""}${event.tokenDelta}`.slice(0, 3600);
+    item.typedOutput = item.outputPreview;
+    item.typingDone = false;
+    item.tokenStreamed = true;
+  }
+  if (event.outputPreview) {
+    const outputPreview = event.outputPreview.slice(0, 3600);
+    if (!item.tokenStreamed && outputPreview !== item.outputPreview) {
+      const previousTyped = item.typedOutput || "";
+      item.outputPreview = outputPreview;
+      item.typedOutput = outputPreview.startsWith(previousTyped) ? previousTyped : "";
+      item.typingDone = item.typedOutput.length >= item.outputPreview.length;
+    }
+  }
+  item.updatedAt = event.time;
+  stream.order.sort((a, b) => {
+    const left = stream.agents[a]?.agentIndex || 999;
+    const right = stream.agents[b]?.agentIndex || 999;
+    return left - right;
+  });
+}
+
+function normalizeAgentTeamEvent(event) {
+  return {
+    agentKey: String(event.agent_key || ""),
+    agent: String(event.agent || event.agent_key || "Agent"),
+    status: normalizeAgentStreamStatus(event.status || "running"),
+    phase: String(event.phase || ""),
+    perspective: String(event.perspective || ""),
+    reasoningEffort: String(event.reasoning_effort || ""),
+    focus: String(event.focus || ""),
+    complexity: String(event.complexity || ""),
+    agentCount: Number(event.agent_count || 0),
+    agentIndex: Number(event.agent_index || 0),
+    agentTotal: Number(event.agent_total || 0),
+    runID: String(event.presto_run_id || ""),
+    prestoEventType: String(event.presto_event_type || ""),
+    message: String(event.message || ""),
+    tokenChannel: String(event.token_channel || ""),
+    tokenDelta: String(event.token_delta || ""),
+    outputPreview: String(event.output_preview || ""),
+    time: new Date().toISOString()
+  };
+}
+
+function normalizeAgentStreamStatus(status) {
+  if (status === "done" || status === "failed" || status === "streaming" || status === "queued") return status;
+  return status === "running" ? "running" : "running";
+}
+
+function agentTeamStreamFallback(stream) {
+  const config = agentStreamPhaseConfig(stream.phaseGroup);
+  const completed = stream.order.filter((key) => stream.agents[key]?.status === "done").length;
+  const total = stream.phaseGroup === "team" ? stream.agentCount || stream.order.length : 1;
+  const complexity = stream.complexity ? `复杂度 ${stream.complexity}，` : "";
+  const progress = stream.phaseGroup === "team" ? `${completed}/${total || "--"} 个视角 Agent 已完成` : config.label;
+  return formatAgentDisplayText(`${config.title}：${complexity}${progress}。${stream.summary || ""}`);
+}
+
+function agentTeamChatLine(event) {
+  const agent = event.agent || event.agent_key || "Agent";
+  const message = event.message || "";
+  const runID = event.presto_run_id ? ` · ${shortRunId(event.presto_run_id)}` : "";
+  const statusIcon = event.status === "failed" ? "失败" : event.status === "done" ? "完成" : "运行";
+  return formatAgentDisplayText(`${statusIcon} ${agent}${runID}：${message}`.trim());
+}
+
+function shortRunId(value) {
+  const text = String(value || "");
+  return text.length > 12 ? text.slice(0, 12) : text;
 }
 
 function markAgentStep(step, status) {
@@ -551,15 +974,19 @@ function resetResultModules() {
   basicInfoState.className = "status-pill is-warning";
   document.querySelector("#sourceList").innerHTML = "";
   renderResumeEvidence(createDiagnosisShell().ability_profile);
-  document.querySelector("#dimensionScores").innerHTML = "";
   renderAbilityRadar(createDiagnosisShell().ability_profile);
   document.querySelector("#overallMatch").textContent = "--";
-  document.querySelector("#matchLevel").textContent = "等待生成";
+  document.querySelector("#matchLevel").textContent = "等待 Job Matching";
   document.querySelector("#overallMeter").style.width = "0%";
+  document.querySelector("#selectedJobTitle").textContent = "等待推荐";
+  document.querySelector("#matchNarrative").textContent = "Benchmark 完成后，Legato 会返回首选岗位、推荐理由和需要补齐的证据。";
+  document.querySelector("#matchAgentNotes").innerHTML = "";
+  renderMatchingRadar({});
   document.querySelector("#reportRows").innerHTML = "";
   document.querySelector("#gapTable").innerHTML = "";
   document.querySelector("#pathStages").innerHTML = "";
   document.querySelector("#topJobs").innerHTML = "";
+  document.querySelector("#matchingJobs").innerHTML = "";
   document.querySelector("#requirementsList").innerHTML = "";
   document.querySelector("#limitationsList").innerHTML = "";
 }
@@ -599,7 +1026,6 @@ function stepLabel(step) {
 
 function renderDiagnosis(data) {
   renderBasicInfo(data);
-  renderScores(data.ability_profile.four_dim_scores);
   renderAbilityRadar(data.ability_profile);
   renderResumeEvidence(data.ability_profile);
   maybeRequestItemBenchmark(data.ability_profile);
@@ -727,22 +1153,6 @@ function renderEducationCard(item) {
   `;
 }
 
-function renderScores(scores) {
-  scores = scores || [];
-  const container = document.querySelector("#dimensionScores");
-  container.innerHTML = scores.map((item) => `
-    <article class="score-item">
-      <div class="score-top">
-        <span>${escapeHTML(item.name)}</span>
-        <span class="sim-badge">模拟数据</span>
-        <strong>${item.score}</strong>
-      </div>
-      <div class="score-bar" aria-hidden="true"><span style="width:${safeScore(item.score)}%"></span></div>
-      <p>${escapeHTML(item.level)}：${escapeHTML(item.reason)}</p>
-    </article>
-  `).join("");
-}
-
 function renderAbilityRadar(profile) {
   profile = profile || {};
   const svg = document.querySelector("#radarChart");
@@ -760,30 +1170,31 @@ function renderAbilityRadar(profile) {
     status.className = `status-pill ${isFailed ? "is-danger" : evidenceItems.length ? "is-real" : "is-warning"}`;
   }
   if (isFailed && evidenceItems.length === 0) {
+    clearRadarAnimationState();
     renderRadarFailed(svg);
-    text.textContent = "Item Benchmark 失败，六维分布未生成。点击下方 dock 中红色“画像”可从失败处继续。";
+    if (text) text.textContent = "";
     return;
   }
   if (isLoading || evidenceItems.length === 0) {
+    clearRadarAnimationState();
     renderRadarLoading(svg);
-    text.textContent = "等待 Item Benchmark 返回 Level、Impact 和六维分布后生成能力画像。";
+    if (text) text.textContent = "";
     return;
   }
   const items = benchmarkDimensions.map((name) => ({ name }));
   const center = { x: 180, y: 158 };
   const radius = 104;
-  const levels = [0.25, 0.5, 0.75, 1];
-  const academicBaseline = academicBaselineVector(profile);
   const series = buildRadarSeries(profile, evidenceItems);
-  const maxPolygon = (scale) => items.map((_, index) => {
-    const point = pointFor(index, items.length, radius * scale, center);
+  const startSeries = radarStartSeries(series);
+  const maxPolygon = (score) => items.map((_, index) => {
+    const point = pointFor(index, items.length, radius * radarVisualRatio(score), center);
     return `${point.x.toFixed(2)},${point.y.toFixed(2)}`;
   }).join(" ");
 
   svg.innerHTML = `
     <title id="radarChartTitle">六维能力雷达图</title>
     <desc id="radarChartDesc">${escapeHTML(series.map((entry) => `${entry.label}${entry.scores.map((score, index) => `${benchmarkDimensions[index]}${score}分`).join("，")}`).join("；"))}</desc>
-    ${levels.map((level) => `<polygon class="radar-grid" points="${maxPolygon(level)}"></polygon>`).join("")}
+    ${radarGridScores.map((score) => `<polygon class="radar-grid" points="${maxPolygon(score)}"></polygon>`).join("")}
     ${items.map((item, index) => {
       const outer = pointFor(index, items.length, radius, center);
       const label = pointFor(index, items.length, radius + 28, center);
@@ -792,14 +1203,15 @@ function renderAbilityRadar(profile) {
         <text class="radar-label" x="${label.x.toFixed(2)}" y="${label.y.toFixed(2)}" text-anchor="middle">${escapeHTML(item.name)}</text>
       `;
     }).join("")}
-    ${series.map((entry, seriesIndex) => {
-      const points = entry.scores.map((score, index) => pointFor(index, entry.scores.length, radius * safeScore(score) / 100, center));
+    ${startSeries.map((entry, seriesIndex) => {
+      const points = entry.scores.map((score, index) => pointFor(index, entry.scores.length, radius * radarVisualRatio(score), center));
       const area = points.map((point) => `${point.x.toFixed(2)},${point.y.toFixed(2)}`).join(" ");
       return `
-        <polygon class="radar-area radar-area-${entry.key}" style="--radar-delay:${seriesIndex * 80}ms" points="${area}"></polygon>
-        ${points.map((point) => `<circle class="radar-dot radar-dot-${entry.key}" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="${entry.key === "overall" ? 4 : 3}"></circle>`).join("")}
+        <polygon class="radar-area radar-area-${entry.key}" data-radar-series="${escapeAttribute(entry.key)}" style="--radar-delay:${seriesIndex * 80}ms" points="${area}"></polygon>
+        ${points.map((point, index) => `<circle class="radar-dot radar-dot-${entry.key}" data-radar-dot="${escapeAttribute(entry.key)}" data-radar-index="${index}" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="${entry.key === "overall" ? 4 : 3}"></circle>`).join("")}
       `;
     }).join("")}
+    ${radarValueHoverLayer(items, series, center, radius)}
   `;
 
   const legend = document.querySelector("#radarLegend");
@@ -810,26 +1222,170 @@ function renderAbilityRadar(profile) {
       </span>
     `).join("");
   }
-  const overall = series.find((entry) => entry.key === "overall") || series[0];
-  const topIndex = overall.scores.reduce((best, score, index) => score > overall.scores[best] ? index : best, 0);
-  const campusCount = series.find((entry) => entry.key === "campus")?.count || 0;
-  const externalCount = series.find((entry) => entry.key === "external")?.count || 0;
-  const baselineLabel = academicBaseline.major_family || "学业";
-  text.textContent = `综合画像最高维度为${benchmarkDimensions[topIndex]}${overall.scores[topIndex]}分；校内含${baselineLabel}基础${academicBaseline.base}分，当前纳入校内证据 ${campusCount} 条、校外证据 ${externalCount} 条。`;
+  if (text) text.textContent = "";
+  animateRadarToSeries(svg, startSeries, series, {
+    center,
+    radius
+  });
+}
+
+function radarValueHoverLayer(items, series, center, radius) {
+  return items.map((item, index) => {
+    const outer = pointFor(index, items.length, radius + 8, center);
+    const card = radarValueCardPosition(index, items.length, radius, center);
+    const aria = `${item.name}分值：${series.map((entry) => `${entry.label}${Math.round(Number(entry.scores[index]) || 0)}分`).join("，")}`;
+    return `
+      <g class="radar-dimension-hover" tabindex="0" aria-label="${escapeAttribute(aria)}">
+        <line class="radar-hover-zone" x1="${center.x}" y1="${center.y}" x2="${outer.x.toFixed(2)}" y2="${outer.y.toFixed(2)}"></line>
+        <circle class="radar-hover-point" cx="${outer.x.toFixed(2)}" cy="${outer.y.toFixed(2)}" r="7"></circle>
+        <g class="radar-value-card" transform="translate(${card.x}, ${card.y})" aria-hidden="true">
+          <rect width="108" height="76" rx="8"></rect>
+          <text class="radar-value-title" x="12" y="20">${escapeHTML(item.name)}</text>
+          ${series.map((entry, rowIndex) => `
+            <circle class="radar-value-swatch radar-value-swatch-${entry.key}" cx="15" cy="${36 + rowIndex * 16}" r="4"></circle>
+            <text class="radar-value-row" x="25" y="${39 + rowIndex * 16}">${escapeHTML(entry.label)} ${Math.round(Number(entry.scores[index]) || 0)}分</text>
+          `).join("")}
+        </g>
+      </g>
+    `;
+  }).join("");
+}
+
+function radarValueCardPosition(index, count, radius, center) {
+  const anchor = pointFor(index, count, radius + 30, center);
+  const x = Math.max(8, Math.min(244, Math.round(anchor.x - 54)));
+  const y = Math.max(10, Math.min(234, Math.round(anchor.y - 36)));
+  return { x, y };
+}
+
+function radarStartSeries(series) {
+  const previous = radarRenderState?.currentSeries || radarRenderState?.targetSeries || [];
+  return series.map((entry) => {
+    const matched = previous.find((item) => item.key === entry.key && item.scores.length === entry.scores.length);
+    return {
+      ...entry,
+      scores: matched ? matched.scores.map(Number) : entry.scores.map(() => 0)
+    };
+  });
+}
+
+function animateRadarToSeries(svg, startSeries, targetSeries, context) {
+  if (radarAnimationFrame) {
+    cancelAnimationFrame(radarAnimationFrame);
+    radarAnimationFrame = 0;
+  }
+  const targetSnapshot = cloneRadarSeries(targetSeries);
+  radarRenderState = {
+    currentSeries: cloneRadarSeries(startSeries),
+    targetSeries: targetSnapshot
+  };
+  const shouldReduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+  if (shouldReduceMotion || radarSeriesNearlyEqual(startSeries, targetSnapshot)) {
+    applyRadarSeriesToSvg(svg, targetSnapshot, context.center, context.radius);
+    radarRenderState.currentSeries = cloneRadarSeries(targetSnapshot);
+    return;
+  }
+
+  const duration = 680;
+  const startedAt = performance.now();
+  const step = (now) => {
+    const progress = Math.min(1, (now - startedAt) / duration);
+    const eased = 1 - Math.pow(1 - progress, 4);
+    const currentSeries = interpolateRadarSeries(startSeries, targetSnapshot, eased);
+    applyRadarSeriesToSvg(svg, currentSeries, context.center, context.radius);
+    radarRenderState.currentSeries = cloneRadarSeries(currentSeries);
+    if (progress < 1) {
+      radarAnimationFrame = requestAnimationFrame(step);
+    } else {
+      radarAnimationFrame = 0;
+      radarRenderState.currentSeries = cloneRadarSeries(targetSnapshot);
+      radarRenderState.targetSeries = cloneRadarSeries(targetSnapshot);
+    }
+  };
+  radarAnimationFrame = requestAnimationFrame(step);
+}
+
+function applyRadarSeriesToSvg(svg, series, center, radius) {
+  series.forEach((entry) => {
+    const area = svg.querySelector(`[data-radar-series="${entry.key}"]`);
+    if (area) area.setAttribute("points", radarPolygonPoints(entry.scores, center, radius));
+    const dots = svg.querySelectorAll(`[data-radar-dot="${entry.key}"]`);
+    entry.scores.forEach((score, index) => {
+      const dot = dots[index];
+      if (!dot) return;
+      const point = pointFor(index, entry.scores.length, radius * radarVisualRatio(score), center);
+      dot.setAttribute("cx", point.x.toFixed(2));
+      dot.setAttribute("cy", point.y.toFixed(2));
+    });
+  });
+}
+
+function radarPolygonPoints(scores, center, radius) {
+  return scores
+    .map((score, index) => {
+      const point = pointFor(index, scores.length, radius * radarVisualRatio(score), center);
+      return `${point.x.toFixed(2)},${point.y.toFixed(2)}`;
+    })
+    .join(" ");
+}
+
+function radarVisualRatio(score) {
+  const normalized = safeScore(score) / 100;
+  if (normalized <= 0) return 0;
+  return Math.pow(normalized, radarVisualGamma);
+}
+
+function interpolateRadarSeries(startSeries, targetSeries, progress) {
+  return targetSeries.map((target) => {
+    const start = startSeries.find((entry) => entry.key === target.key && entry.scores.length === target.scores.length);
+    return {
+      ...target,
+      scores: target.scores.map((score, index) => {
+        const from = start ? Number(start.scores[index]) || 0 : 0;
+        return from + (Number(score) - from) * progress;
+      })
+    };
+  });
+}
+
+function cloneRadarSeries(series) {
+  return series.map((entry) => ({
+    key: entry.key,
+    label: entry.label,
+    count: entry.count,
+    scores: entry.scores.map(Number)
+  }));
+}
+
+function radarSeriesNearlyEqual(left, right) {
+  if (left.length !== right.length) return false;
+  return right.every((entry) => {
+    const matched = left.find((item) => item.key === entry.key && item.scores.length === entry.scores.length);
+    if (!matched || matched.count !== entry.count) return false;
+    return entry.scores.every((score, index) => Math.abs(score - matched.scores[index]) < 0.2);
+  });
+}
+
+function clearRadarAnimationState() {
+  if (radarAnimationFrame) {
+    cancelAnimationFrame(radarAnimationFrame);
+    radarAnimationFrame = 0;
+  }
+  radarRenderState = null;
 }
 
 function renderRadarLoading(svg) {
   const center = { x: 180, y: 158 };
   const radius = 104;
   const items = benchmarkDimensions.map((name) => ({ name }));
-  const maxPolygon = (scale) => items.map((_, index) => {
-    const point = pointFor(index, items.length, radius * scale, center);
+  const maxPolygon = (score) => items.map((_, index) => {
+    const point = pointFor(index, items.length, radius * radarVisualRatio(score), center);
     return `${point.x.toFixed(2)},${point.y.toFixed(2)}`;
   }).join(" ");
   svg.innerHTML = `
     <title id="radarChartTitle">六维能力雷达图加载中</title>
     <desc id="radarChartDesc">Item Benchmark 正在返回六维分布。</desc>
-    ${[0.25, 0.5, 0.75, 1].map((level) => `<polygon class="radar-grid" points="${maxPolygon(level)}"></polygon>`).join("")}
+    ${radarGridScores.map((score) => `<polygon class="radar-grid" points="${maxPolygon(score)}"></polygon>`).join("")}
     ${items.map((item, index) => {
       const outer = pointFor(index, items.length, radius, center);
       const label = pointFor(index, items.length, radius + 28, center);
@@ -838,7 +1394,7 @@ function renderRadarLoading(svg) {
         <text class="radar-label" x="${label.x.toFixed(2)}" y="${label.y.toFixed(2)}" text-anchor="middle">${escapeHTML(item.name)}</text>
       `;
     }).join("")}
-    <polygon class="radar-loading-area" points="${maxPolygon(0.42)}"></polygon>
+    <polygon class="radar-loading-area" points="${maxPolygon(42)}"></polygon>
   `;
   const legend = document.querySelector("#radarLegend");
   if (legend) {
@@ -854,14 +1410,14 @@ function renderRadarFailed(svg) {
   const center = { x: 180, y: 158 };
   const radius = 104;
   const items = benchmarkDimensions.map((name) => ({ name }));
-  const maxPolygon = (scale) => items.map((_, index) => {
-    const point = pointFor(index, items.length, radius * scale, center);
+  const maxPolygon = (score) => items.map((_, index) => {
+    const point = pointFor(index, items.length, radius * radarVisualRatio(score), center);
     return `${point.x.toFixed(2)},${point.y.toFixed(2)}`;
   }).join(" ");
   svg.innerHTML = `
     <title id="radarChartTitle">六维能力雷达图生成失败</title>
     <desc id="radarChartDesc">Item Benchmark 未返回六维分布。</desc>
-    ${[0.25, 0.5, 0.75, 1].map((level) => `<polygon class="radar-grid" points="${maxPolygon(level)}"></polygon>`).join("")}
+    ${radarGridScores.map((score) => `<polygon class="radar-grid" points="${maxPolygon(score)}"></polygon>`).join("")}
     ${items.map((item, index) => {
       const outer = pointFor(index, items.length, radius, center);
       const label = pointFor(index, items.length, radius + 28, center);
@@ -870,7 +1426,7 @@ function renderRadarFailed(svg) {
         <text class="radar-label" x="${label.x.toFixed(2)}" y="${label.y.toFixed(2)}" text-anchor="middle">${escapeHTML(item.name)}</text>
       `;
     }).join("")}
-    <polygon class="radar-failed-area" points="${maxPolygon(0.38)}"></polygon>
+    <polygon class="radar-failed-area" points="${maxPolygon(38)}"></polygon>
   `;
   const legend = document.querySelector("#radarLegend");
   if (legend) {
@@ -889,15 +1445,17 @@ function buildRadarSeries(profile, items) {
   const academicBaseline = academicBaselineVector(profile);
   const campusItems = items.filter((item) => normalizedEvidenceScope(item) === "校内");
   const externalItems = items.filter((item) => normalizedEvidenceScope(item) === "校外");
+  const schoolTier = schoolTierProfile(profile);
   return [
-    buildRadarSeriesEntry("overall", "综合", items, academicBaseline.scores),
-    buildRadarSeriesEntry("campus", "校内", campusItems, academicBaseline.scores),
-    buildRadarSeriesEntry("external", "校外", externalItems)
+    buildRadarSeriesEntry("overall", "综合", items, academicBaseline, schoolTier, { includeAcademicPrior: true }),
+    buildRadarSeriesEntry("campus", "校内", campusItems, academicBaseline, schoolTier, { includeAcademicPrior: true }),
+    buildRadarSeriesEntry("external", "校外", externalItems, academicBaseline, schoolTier, { includeAcademicPrior: false })
   ];
 }
 
-function buildRadarSeriesEntry(key, label, items, baselineScores = []) {
+function buildRadarSeriesEntry(key, label, items, academicBaseline, schoolTier, options = {}) {
   const dimensionContributions = Array.from({ length: 6 }, emptyDimensionContributionBucket);
+  const quality = evidenceQualitySummary(items);
   items.forEach((item) => {
     const distribution = normalizedBenchmarkScores(item);
     if (distribution.length !== 6) return;
@@ -927,8 +1485,15 @@ function buildRadarSeriesEntry(key, label, items, baselineScores = []) {
   });
   const scaledScores = scores.map((score, index) => {
     const evidenceScore = Math.round(score * 100);
-    const baseline = Number(baselineScores[index]);
-    return combineEvidenceWithAcademicPrior(evidenceScore, baseline, items.length);
+    return combineEvidenceWithSchoolTier(
+      evidenceScore,
+      academicBaseline,
+      schoolTier,
+      quality,
+      items.length,
+      index,
+      options
+    );
   });
   return {
     key,
@@ -955,7 +1520,39 @@ function cappedEvidenceBucketKey(item) {
   if (isCampusAwardEvidence(item)) return "campusAward";
   if (isGenericCampusRoleEvidence(item)) return "genericCampusRole";
   if (isUntitledProfessionalProjectEvidence(item)) return "untitledProject";
-  return "";
+  return impactEvidenceBucketKey(item);
+}
+
+function impactEvidenceBucketKey(item) {
+  const impact = numericMetric(item?.impact_factor);
+  const level = numericMetric(item?.level);
+  const signal = Number.isFinite(impact) ? impact : level;
+  if (!Number.isFinite(signal)) return "impactLow";
+  if (signal >= 8.5) return "impactExceptional";
+  if (signal >= 7) return "impactHigh";
+  if (signal >= 5.5) return "impactMedium";
+  return "impactLow";
+}
+
+function evidenceQualitySummary(items) {
+  const summary = {
+    highImpactCount: 0,
+    exceptionalImpactCount: 0,
+    cappedLowCount: 0
+  };
+  items.forEach((item) => {
+    const bucketKey = cappedEvidenceBucketKey(item);
+    const impact = numericMetric(item?.impact_factor);
+    if (["lowImpactAwardCertificate", "campusAward", "genericCampusRole", "untitledProject", "impactLow"].includes(bucketKey)) {
+      summary.cappedLowCount += 1;
+    }
+    if (Number.isFinite(impact) && impact >= 8.5 && bucketKey === "impactExceptional") {
+      summary.exceptionalImpactCount += 1;
+    } else if (Number.isFinite(impact) && impact >= 7 && (bucketKey === "impactHigh" || bucketKey === "impactExceptional")) {
+      summary.highImpactCount += 1;
+    }
+  });
+  return summary;
 }
 
 function isLowImpactAwardOrCertificateEvidence(item) {
@@ -1095,6 +1692,84 @@ function evidenceTailGainAt(score) {
   return radarEvidenceTailGain + (0.15 - radarEvidenceTailGain) * Math.pow(1 - progress, 2);
 }
 
+function combineEvidenceWithSchoolTier(evidenceScore, academicBaseline, schoolTier, quality, itemCount, dimensionIndex, options = {}) {
+  const includeAcademicPrior = options.includeAcademicPrior !== false;
+  const config = schoolTier?.config || schoolTierConfigs.T3;
+  const cap = schoolTierScoreCap(config, quality);
+  if (!includeAcademicPrior) {
+    if (itemCount === 0) return 0;
+    return Math.round(Math.min(cap, evidenceScore));
+  }
+  const prior = academicPriorForDimension(academicBaseline, schoolTier, dimensionIndex);
+  if (itemCount === 0) return Math.round(Math.min(cap, prior));
+  const lift = evidenceScore * config.liftScale;
+  return Math.round(Math.min(cap, prior + lift));
+}
+
+function schoolTierScoreCap(config, quality) {
+  if ((quality?.exceptionalImpactCount || 0) > 0) return config.exceptionalCap;
+  if ((quality?.highImpactCount || 0) > 0) return config.highCap;
+  return config.noHighCap;
+}
+
+function academicPriorForDimension(academicBaseline, schoolTier, dimensionIndex) {
+  const config = schoolTier?.config || schoolTierConfigs.T3;
+  const scores = Array.isArray(academicBaseline?.scores) && academicBaseline.scores.length === 6
+    ? academicBaseline.scores.map(Number)
+    : Array(6).fill(50);
+  const validScores = scores.filter(Number.isFinite);
+  const baselineMean = validScores.length
+    ? validScores.reduce((sum, value) => sum + value, 0) / validScores.length
+    : 50;
+  const dimensionOffset = Number.isFinite(scores[dimensionIndex]) ? scores[dimensionIndex] - baselineMean : 0;
+  const transcriptBase = Number(academicBaseline?.transcript_base);
+  const transcriptOffset = Number.isFinite(transcriptBase) ? Math.max(-8, Math.min(12, transcriptBase - 50)) * 0.45 : 0;
+  return Math.max(25, Math.min(85, config.base + transcriptOffset + dimensionOffset * 0.55));
+}
+
+function schoolTierProfile(profile) {
+  const education = normalizedEducation(profile);
+  const tiers = education.map(educationTierKey).filter(Boolean);
+  const hasIndependent = education.some(isIndependentCollegeEducation);
+  const bestNonIndependent = tiers
+    .filter((tier) => tier !== "T4")
+    .sort((left, right) => schoolTierRank(left) - schoolTierRank(right))[0] || "";
+  let tierKey = tiers.sort((left, right) => schoolTierRank(left) - schoolTierRank(right))[0] || "T3";
+  if (hasIndependent) {
+    if (bestNonIndependent === "T0" || bestNonIndependent === "T1" || bestNonIndependent === "T2") {
+      tierKey = "T4A";
+    } else {
+      tierKey = "T4";
+    }
+  }
+  return {
+    key: tierKey,
+    config: schoolTierConfigs[tierKey] || schoolTierConfigs.T3,
+    hasIndependent
+  };
+}
+
+function schoolTierRank(tierKey) {
+  return { T0: 0, T1: 1, T2: 2, T3: 3, T4A: 4, T4: 5, T5: 6 }[tierKey] ?? 3;
+}
+
+function educationTierKey(item) {
+  if (isIndependentCollegeEducation(item)) return "T4";
+  const degree = cleanDisplayText(item?.degree || item?.degree_level);
+  if (degree.includes("专科")) return "T5";
+  const rank = Number(item?.ruanke_rank);
+  if (item?.is_985 || (Number.isFinite(rank) && rank > 0 && rank <= 50)) return "T0";
+  if (item?.is_211 || item?.is_double_first_class || (Number.isFinite(rank) && rank > 0 && rank <= 150)) return "T1";
+  if (Number.isFinite(rank) && rank > 0 && rank <= 250) return "T2";
+  return "T3";
+}
+
+function isIndependentCollegeEducation(item) {
+  const school = cleanDisplayText(item?.school);
+  const kind = cleanDisplayText(item?.school_kind);
+  return kind === "independent_college" || (/大学.+学院$/.test(school) && !school.includes("大学院"));
+}
+
 function combineEvidenceWithAcademicPrior(evidenceScore, baseline, itemCount) {
   if (!Number.isFinite(baseline)) return evidenceScore;
   const academicPrior = Math.round(Math.max(25, Math.min(85, baseline)));
@@ -1122,7 +1797,7 @@ function academicBaselineVector(profile) {
     base - 4,
     base
   ].map((score) => Math.round(Math.max(25, Math.min(85, score))));
-  return { base, scores, major_family: isStem ? "工科类" : "未知", source: "frontend_fallback" };
+  return { base, transcript_base: base, scores, major_family: isStem ? "工科类" : "未知", source: "frontend_fallback" };
 }
 
 function workflowAcademicBaseline(profile) {
@@ -1137,6 +1812,7 @@ function workflowAcademicBaseline(profile) {
   const base = Number(baseline.base_score);
   return {
     base: Number.isFinite(base) ? Math.round(Math.max(30, Math.min(85, base))) : 50,
+    transcript_base: academicBaseScore(profile),
     scores,
     major_name: String(baseline.major_name || ""),
     major_family: String(baseline.major_family || ""),
@@ -1224,9 +1900,17 @@ function maybeRequestItemBenchmark(profile, options = {}) {
       diagnosis = diagnosis || createDiagnosisShell();
       diagnosis.ability_profile = payload.ability_profile;
       renderBasicInfo(diagnosis);
-      renderScores(payload.ability_profile.four_dim_scores || []);
       renderAbilityRadar(payload.ability_profile);
       renderResumeEvidence(payload.ability_profile);
+      if (payload.matching_result) {
+        diagnosis.matching_result = payload.matching_result;
+        renderMatching(payload.matching_result);
+        finalizeAgentTeamStreamFromMatchingPayload(payload);
+      }
+      if (payload.top_jobs) {
+        diagnosis.ability_profile.top5_matching_jobs = payload.top_jobs;
+        renderTopJobs(payload.top_jobs);
+      }
       if (payload.ability_profile.benchmark_status === "failed" || payload.error) {
         setBenchmarkRunFailed(payload.error);
         return;
@@ -1243,7 +1927,36 @@ function maybeRequestItemBenchmark(profile, options = {}) {
     })
     .finally(() => {
       benchmarkRequestInFlight = false;
+      if (baseJobDone && !assistantAgentStreamActive) closeDiagnosisEvents();
+      updateAssistantContext();
     });
+}
+
+function finalizeAgentTeamStreamFromMatchingPayload(payload = {}) {
+  if (!payload.matching_result && !payload.match_generated) return;
+  const session = activeAssistantSession();
+  if (!session) return;
+  const hasAgentTeamStream = session.messages.some((item) => item.streamType === "agent_team");
+  if (!hasAgentTeamStream) return;
+  const selected = payload.matching_result?.selected_job || {};
+  const preview = payload.matching_result?.fit_summary || selected.fit_summary || selected.title || "";
+  const event = normalizeAgentTeamEvent({
+    agent_key: "team",
+    agent: "Legato Job Matching Team",
+    status: "done",
+    phase: "orchestration",
+    message: "动态 Presto Agent Team 已完成岗位推荐和匹配报告。",
+    output_preview: preview
+  });
+  const { message } = ensureAgentTeamStreamMessage(session, event);
+  message.agentStream = updateAgentTeamStreamState(message.agentStream, event);
+  message.content = agentTeamStreamFallback(message.agentStream);
+  message.status = "done";
+  message.updatedAt = event.time;
+  session.updatedAt = event.time;
+  assistantAgentStreamActive = false;
+  saveAssistantState();
+  renderAssistant();
 }
 
 function setBenchmarkRunFailed(errorMessage = "") {
@@ -1258,6 +1971,8 @@ function setBenchmarkRunFailed(errorMessage = "") {
   document.querySelector(".generation-dock").classList.remove("is-running");
   runButton.disabled = false;
   runButton.textContent = "重新生成";
+  setAssistantExpanded(false, { silent: true });
+  syncAssistantAvailability();
 }
 
 function retryItemBenchmark() {
@@ -1314,7 +2029,7 @@ function renderResumeEvidence(profile) {
   const isBenchmarkFailed = benchmarkStatus === "failed";
 
   setEvidencePill("#awardDataState", awardStatus, {
-    waiting: "等待奖项 agent",
+    waiting: "等待奖项 Agent",
     loading: "奖项解析中",
     refining: "奖项解析中",
     ready: "",
@@ -1323,7 +2038,7 @@ function renderResumeEvidence(profile) {
     mock: "模拟数据"
   });
   setEvidencePill("#experienceDataState", experienceStatus, {
-    waiting: "等待经历 agent",
+    waiting: "等待经历 Agent",
     ready: "",
     refining: "hybrid 分析中",
     empty: "未识别到经历",
@@ -1356,18 +2071,19 @@ function renderResumeEvidence(profile) {
   awardList.classList.toggle("is-loading", isAwardLoading);
   const awardSkeleton = isAwardLoading && awards.length === 0 ? renderAwardLoadingSkeleton(false) : "";
   awardList.innerHTML = awards.length
-    ? awards.map((item) => renderAwardItem(item, isAwardLoading, isBenchmarkLoading, isBenchmarkFailed)).join("")
-    : awardSkeleton || renderEvidenceEmpty(awardStatus, "等待 Resume workflow 返回奖项与证书。", "Legato 未识别到奖项或证书。", "奖项 agent 未返回可用结果。");
+    ? awards.map((item, index) => renderAwardItem(item, isAwardLoading, isBenchmarkLoading, isBenchmarkFailed, index)).join("")
+    : awardSkeleton || renderEvidenceEmpty(awardStatus, "等待 Resume workflow 返回奖项与证书。", "Legato 未识别到奖项或证书。", "奖项 Agent 未返回可用结果。");
 
   const experienceList = document.querySelector("#experienceList");
   experienceList.classList.toggle("is-refining", isExperienceRefining);
   const hybridSkeleton = isExperienceRefining && experiences.length === 0 ? renderExperienceHybridSkeleton(false) : "";
   experienceList.innerHTML = experiences.length
-    ? experiences.map((item) => renderExperienceItem(item, isExperienceRefining, isBenchmarkLoading, isBenchmarkFailed)).join("")
-    : hybridSkeleton || renderEvidenceEmpty(experienceStatus, "等待 Resume workflow 返回经历评分。", "Legato 未识别到项目、实习或活动经历。", "经历 agent 未返回可用结果。");
+    ? experiences.map((item, index) => renderExperienceItem(item, isExperienceItemRefining(item, isExperienceRefining), isBenchmarkLoading, isBenchmarkFailed, index)).join("")
+    : hybridSkeleton || renderEvidenceEmpty(experienceStatus, "等待 Resume workflow 返回经历评分。", "Legato 未识别到项目、实习或活动经历。", "经历 Agent 未返回可用结果。");
+  syncAssistantAvailability();
 }
 
-function renderAwardItem(item, loading = false, benchmarkLoading = false, benchmarkFailed = false) {
+function renderAwardItem(item, loading = false, benchmarkLoading = false, benchmarkFailed = false, index = 0) {
   const title = cleanDisplayText(item.name);
   const result = cleanDisplayText(item.result);
   return `
@@ -1382,11 +2098,12 @@ function renderAwardItem(item, loading = false, benchmarkLoading = false, benchm
       </header>
       ${renderDimensionMeter(item, benchmarkLoading, benchmarkFailed)}
       ${renderEvidenceReason(item.signal, item.reason)}
+      ${renderEvidenceChatButton("award", index, title || result || "奖项")}
     </article>
   `;
 }
 
-function renderExperienceItem(item, refining = false, benchmarkLoading = false, benchmarkFailed = false) {
+function renderExperienceItem(item, refining = false, benchmarkLoading = false, benchmarkFailed = false, index = 0) {
   const type = cleanDisplayText(item.type);
   const role = cleanDisplayText(item.role);
   const contribution = cleanDisplayText(item.contribution);
@@ -1404,8 +2121,36 @@ function renderExperienceItem(item, refining = false, benchmarkLoading = false, 
       </header>
       ${renderDimensionMeter(item, benchmarkLoading, benchmarkFailed)}
       ${renderEvidenceReason("", item.reason)}
+      ${renderEvidenceChatButton("experience", index, title || "经历")}
     </article>
   `;
+}
+
+function renderEvidenceChatButton(kind, index, label) {
+  const ready = isAssistantReady();
+  const aria = `添加到聊天：${kind === "award" ? "奖项" : "经历"} ${label}`;
+  return `
+    <button
+      type="button"
+      class="evidence-chat-button"
+      data-evidence-chat="${escapeAttribute(kind)}"
+      data-evidence-index="${index}"
+      data-evidence-key="${escapeAttribute(`${kind}:${index}`)}"
+      aria-label="${escapeAttribute(aria)}"
+      aria-pressed="false"
+      title="${ready ? "添加到聊天" : "全部结果生成后才能追问"}"
+      ${ready ? "" : "disabled"}
+    >
+      <span aria-hidden="true">+</span>
+      <strong>添加到聊天</strong>
+    </button>
+  `;
+}
+
+function isExperienceItemRefining(item, listRefining) {
+  if (!listRefining) return false;
+  const status = item?.hybrid_status || "pending";
+  return !["ready", "failed"].includes(status);
 }
 
 function renderEvidenceReason(signal, reason) {
@@ -1664,11 +2409,18 @@ function pointFor(index, total, radius, center) {
 }
 
 function renderMatching(match) {
-  document.querySelector("#overallMatch").textContent = `${match.overall_match}%`;
-  document.querySelector("#matchLevel").textContent = match.match_level;
-  document.querySelector("#overallMeter").style.width = `${safeScore(match.overall_match)}%`;
+  match = match || {};
+  const selected = match.selected_job || {};
+  const overall = Number.isFinite(Number(match.overall_match)) ? safeScore(match.overall_match) : 0;
+  document.querySelector("#overallMatch").textContent = overall ? `${Math.round(overall)}%` : "--";
+  document.querySelector("#matchLevel").textContent = match.match_level || "等待 Job Matching";
+  document.querySelector("#overallMeter").style.width = `${overall}%`;
+  document.querySelector("#selectedJobTitle").textContent = selected.title || match.target_role || "等待推荐";
+  document.querySelector("#matchNarrative").textContent = formatAgentDisplayText(match.fit_summary || selected.fit_summary || "Benchmark 完成后，Legato 会返回首选岗位、推荐理由和需要补齐的证据。");
+  document.querySelector("#matchAgentNotes").innerHTML = (match.agent_notes || []).map((note) => `<span>${escapeHTML(formatAgentDisplayText(note))}</span>`).join("");
+  renderMatchingRadar(match);
 
-  document.querySelector("#reportRows").innerHTML = match.report_sections.map((row) => `
+  document.querySelector("#reportRows").innerHTML = (match.report_sections || []).map((row) => `
     <div class="report-row">
       <strong>${escapeHTML(row.name)}</strong>
       <div class="report-bar" aria-label="学生分值 ${row.student}"><span style="width:${safeScore(row.student)}%"></span></div>
@@ -1677,7 +2429,7 @@ function renderMatching(match) {
     </div>
   `).join("");
 
-  document.querySelector("#gapTable").innerHTML = match.gap_details.map((gap) => `
+  document.querySelector("#gapTable").innerHTML = (match.gap_details || []).map((gap) => `
     <tr>
       <td>${escapeHTML(gap.capability)}</td>
       <td>${escapeHTML(gap.current)}</td>
@@ -1686,6 +2438,99 @@ function renderMatching(match) {
       <td><span class="severity ${gap.severity === "高" ? "high" : ""}">${escapeHTML(gap.severity)}</span></td>
     </tr>
   `).join("");
+}
+
+function renderMatchingRadar(match) {
+  const svg = document.querySelector("#matchingRadarChart");
+  const text = document.querySelector("#matchingRadarText");
+  const legend = document.querySelector("#matchingRadarLegend");
+  if (!svg) return;
+  const student = normalizeMatchingRadar(match?.student_radar);
+  const target = normalizeMatchingRadar(match?.target_radar || match?.selected_job?.requirement_radar);
+  if (student.length !== benchmarkDimensions.length || target.length !== benchmarkDimensions.length) {
+    renderMatchingRadarWaiting(svg);
+    if (legend) legend.innerHTML = "";
+    if (text) text.textContent = "等待首选岗位目标能力雷达。";
+    return;
+  }
+  const center = { x: 180, y: 158 };
+  const radius = 104;
+  const ring = (score) => benchmarkDimensions.map((_, index) => {
+    const point = pointFor(index, benchmarkDimensions.length, radius * radarVisualRatio(score), center);
+    return `${point.x.toFixed(2)},${point.y.toFixed(2)}`;
+  }).join(" ");
+  const studentPoints = radarPolygonPoints(student.map((item) => item.score), center, radius);
+  const targetPoints = radarPolygonPoints(target.map((item) => item.score), center, radius);
+  svg.innerHTML = `
+    <title>个人画像与岗位目标雷达对比</title>
+    <desc>${escapeHTML(benchmarkDimensions.map((name, index) => `${name}个人${student[index].score}分，岗位${target[index].score}分`).join("；"))}</desc>
+    ${radarGridScores.map((score) => `<polygon class="radar-grid" points="${ring(score)}"></polygon>`).join("")}
+    ${benchmarkDimensions.map((name, index) => {
+      const outer = pointFor(index, benchmarkDimensions.length, radius, center);
+      const label = pointFor(index, benchmarkDimensions.length, radius + 28, center);
+      return `
+        <line class="radar-axis" x1="${center.x}" y1="${center.y}" x2="${outer.x.toFixed(2)}" y2="${outer.y.toFixed(2)}"></line>
+        <text class="radar-label" x="${label.x.toFixed(2)}" y="${label.y.toFixed(2)}" text-anchor="middle">${escapeHTML(name)}</text>
+      `;
+    }).join("")}
+    <polygon class="matching-radar-area is-target" points="${targetPoints}"></polygon>
+    <polygon class="matching-radar-area is-student" points="${studentPoints}"></polygon>
+    ${student.map((item, index) => {
+      const point = pointFor(index, benchmarkDimensions.length, radius * radarVisualRatio(item.score), center);
+      return `<circle class="matching-radar-dot is-student" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="3.5"></circle>`;
+    }).join("")}
+    ${target.map((item, index) => {
+      const point = pointFor(index, benchmarkDimensions.length, radius * radarVisualRatio(item.score), center);
+      return `<circle class="matching-radar-dot is-target" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="3"></circle>`;
+    }).join("")}
+  `;
+  if (legend) {
+    legend.innerHTML = `
+      <span><i class="legend-dot is-student"></i>个人画像</span>
+      <span><i class="legend-dot is-target"></i>岗位目标</span>
+    `;
+  }
+  if (text) {
+    const gaps = benchmarkDimensions.map((name, index) => ({
+      name,
+      gap: student[index].score - target[index].score
+    }));
+    const weakest = gaps.reduce((current, item) => item.gap < current.gap ? item : current, gaps[0]);
+    const strongest = gaps.reduce((current, item) => item.gap > current.gap ? item : current, gaps[0]);
+    text.textContent = `${match?.target_role || match?.selected_job?.title || "首选岗位"}要求下，最大短板为${weakest.name}${weakest.gap}分，当前相对优势为${strongest.name}${strongest.gap >= 0 ? "+" : ""}${strongest.gap}分。`;
+  }
+}
+
+function renderMatchingRadarWaiting(svg) {
+  const center = { x: 180, y: 158 };
+  const radius = 104;
+  const ring = (score) => benchmarkDimensions.map((_, index) => {
+    const point = pointFor(index, benchmarkDimensions.length, radius * radarVisualRatio(score), center);
+    return `${point.x.toFixed(2)},${point.y.toFixed(2)}`;
+  }).join(" ");
+  svg.innerHTML = `
+    <title>个人画像与岗位目标雷达等待中</title>
+    <desc>等待 Job Matching 返回岗位目标雷达。</desc>
+    ${radarGridScores.map((score) => `<polygon class="radar-grid" points="${ring(score)}"></polygon>`).join("")}
+    ${benchmarkDimensions.map((name, index) => {
+      const outer = pointFor(index, benchmarkDimensions.length, radius, center);
+      const label = pointFor(index, benchmarkDimensions.length, radius + 28, center);
+      return `
+        <line class="radar-axis" x1="${center.x}" y1="${center.y}" x2="${outer.x.toFixed(2)}" y2="${outer.y.toFixed(2)}"></line>
+        <text class="radar-label" x="${label.x.toFixed(2)}" y="${label.y.toFixed(2)}" text-anchor="middle">${escapeHTML(name)}</text>
+      `;
+    }).join("")}
+    <polygon class="radar-loading-area" points="${ring(42)}"></polygon>
+  `;
+}
+
+function normalizeMatchingRadar(items) {
+  if (!Array.isArray(items)) return [];
+  const lookup = new Map(items.map((item) => [String(item?.name || item?.dimension || ""), safeScore(item?.score)]));
+  return benchmarkDimensions.map((name) => ({
+    name,
+    score: lookup.has(name) ? Math.round(lookup.get(name)) : NaN
+  })).filter((item) => Number.isFinite(item.score));
 }
 
 function renderPath(plan) {
@@ -1717,20 +2562,79 @@ function renderPath(plan) {
 
 function renderTopJobs(jobs) {
   jobs = jobs || [];
-  document.querySelector("#topJobs").innerHTML = jobs.map((job) => `
+  const matchingList = document.querySelector("#matchingJobs");
+  const outputList = document.querySelector("#topJobs");
+  if (matchingList) {
+    matchingList.innerHTML = jobs.map((job) => renderMatchingJobCard(job)).join("");
+  }
+  if (outputList) {
+    outputList.innerHTML = jobs.map((job) => renderOutputJobCard(job)).join("");
+  }
+}
+
+function renderMatchingJobCard(job) {
+  const reasons = Array.isArray(job.reasons) ? job.reasons : [];
+  const category = job.category || "推荐岗位";
+  const educationGate = job.education_gate || "";
+  return `
+    <article class="matching-job-card">
+      <header>
+        <div>
+          <span class="job-rank">${job.rank || ""}</span>
+          <h3>${escapeHTML(job.title || "")}</h3>
+        </div>
+        <strong>${safeScore(job.match)}%</strong>
+      </header>
+      <div class="job-tags">
+        <span>${escapeHTML(category)}</span>
+        ${educationGate ? `<span>${escapeHTML(educationGate)}</span>` : ""}
+      </div>
+      <div class="job-progress-group">
+        ${renderJobProgress("综合", job.match)}
+        ${renderJobProgress("六维", job.ability_match || job.match)}
+        ${renderJobProgress("经历", job.experience_match)}
+      </div>
+      ${job.fit_summary ? `<p>${escapeHTML(formatAgentDisplayText(job.fit_summary))}</p>` : ""}
+      ${reasons.length ? `<p>${escapeHTML(formatAgentDisplayText(reasons.join("；")))}</p>` : ""}
+      ${job.next_proof ? `<small>${escapeHTML(formatAgentDisplayText(job.next_proof))}</small>` : ""}
+    </article>
+  `;
+}
+
+function renderOutputJobCard(job) {
+  const reasons = Array.isArray(job.reasons) ? job.reasons : [];
+  const mockBadge = isMockMatchingResult() ? `<span class="sim-badge">模拟数据</span>` : "";
+  return `
     <article class="job-item">
       <div class="job-head">
-        <strong>${job.rank}. ${escapeHTML(job.title)}</strong>
-        <span class="sim-badge">模拟数据</span>
-        <span class="match">${job.match}%</span>
+        <strong>${job.rank}. ${escapeHTML(job.title || "")}</strong>
+        ${mockBadge}
+        <span class="match">${safeScore(job.match)}%</span>
       </div>
-      <div class="job-match-bar" aria-label="${escapeHTML(job.title)}能力匹配度 ${job.match}%">
+      <div class="job-match-bar" aria-label="${escapeHTML(job.title || "")}能力匹配度 ${safeScore(job.match)}%">
         <span style="width:${safeScore(job.match)}%"></span>
       </div>
-      <p>${escapeHTML(job.reasons.join("；"))}</p>
-      <p>${escapeHTML(job.next_proof)}</p>
+      ${job.category ? `<p>${escapeHTML(formatAgentDisplayText(job.category))}${job.education_gate ? `，${escapeHTML(formatAgentDisplayText(job.education_gate))}` : ""}</p>` : ""}
+      ${reasons.length ? `<p>${escapeHTML(formatAgentDisplayText(reasons.join("；")))}</p>` : ""}
+      ${job.next_proof ? `<p>${escapeHTML(formatAgentDisplayText(job.next_proof))}</p>` : ""}
     </article>
-  `).join("");
+  `;
+}
+
+function renderJobProgress(label, value) {
+  const score = Math.round(safeScore(value));
+  return `
+    <div class="job-progress">
+      <span>${escapeHTML(label)}</span>
+      <div class="job-progress-bar" aria-hidden="true"><i style="width:${score}%"></i></div>
+      <strong>${score}%</strong>
+    </div>
+  `;
+}
+
+function isMockMatchingResult() {
+  const source = String(diagnosis?.matching_result?.source || diagnosis?.mode || "");
+  return source.toLowerCase().includes("mock");
 }
 
 function renderRequirements(requirements) {
@@ -1786,10 +2690,21 @@ function setupAssistant() {
   ensureAssistantSession();
   renderAssistant();
 
-  assistantToggle.addEventListener("click", () => setAssistantExpanded(assistant.classList.contains("is-collapsed")));
+  assistantToggle.addEventListener("click", () => {
+    if (!isAssistantInspectable()) {
+      setAssistantExpanded(false, { silent: true });
+      showToast("生成诊断后可查看 AI 助手。");
+      return;
+    }
+    setAssistantExpanded(assistant.classList.contains("is-collapsed"));
+  });
   assistantClose.addEventListener("click", () => setAssistantExpanded(false));
   assistantHistoryBack.addEventListener("click", closeAssistantHistory);
   assistantNewSession.addEventListener("click", () => {
+    if (!isAssistantReady()) {
+      showToast("全部诊断结果生成后才能追问。");
+      return;
+    }
     assistantArchive.open = false;
     syncAssistantHistoryView();
     createAssistantSession();
@@ -1797,7 +2712,13 @@ function setupAssistant() {
     renderAssistant();
     assistantInput.focus();
   });
-  assistantArchiveSession.addEventListener("click", toggleAssistantHistory);
+  assistantArchiveSession.addEventListener("click", () => {
+    if (!isAssistantReady()) {
+      showToast("全部诊断结果生成后才能追问。");
+      return;
+    }
+    toggleAssistantHistory();
+  });
   assistantArchive.addEventListener("toggle", () => {
     syncAssistantHistoryView();
   });
@@ -1809,18 +2730,33 @@ function setupAssistant() {
     }
     const button = event.target.closest("[data-restore-session]");
     if (!button) return;
+    if (!isAssistantReady()) {
+      showToast("全部诊断结果生成后才能追问。");
+      return;
+    }
     restoreAssistantSession(button.dataset.restoreSession);
+  });
+  document.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-evidence-chat]");
+    if (!button) return;
+    addEvidenceToAssistant(button.dataset.evidenceChat, Number(button.dataset.evidenceIndex));
   });
   assistantSuggestions.addEventListener("click", (event) => {
     const button = event.target.closest("[data-suggestion]");
-    if (!button || assistantBusy) return;
+    if (!button || assistantBusy || !isAssistantReady()) return;
     assistantInput.value = button.dataset.suggestion;
     updateAssistantInputMeta();
     assistantInput.focus();
   });
   assistantMessages.addEventListener("click", (event) => {
+    if (event.target.closest(".agent-stream-detail")) return;
+    const agentButton = event.target.closest("[data-agent-stream-toggle]");
+    if (agentButton) {
+      toggleAgentStreamDetail(agentButton.dataset.agentStreamToggle, agentButton.dataset.agentStreamMessage);
+      return;
+    }
     const button = event.target.closest("[data-retry-message]");
-    if (!button || assistantBusy) return;
+    if (!button || assistantBusy || !isAssistantReady()) return;
     retryAssistantMessage(button.dataset.retryMessage);
   });
   setupAssistantScrollbar(assistantMessages);
@@ -1839,6 +2775,7 @@ function setupAssistant() {
   });
   window.addEventListener("beforeunload", () => {
     if (assistantAbort) assistantAbort.abort();
+    if (assistantStateSaveTimer) saveAssistantState();
   });
 }
 
@@ -1864,23 +2801,39 @@ function loadAssistantState() {
         id: session.id,
         title: String(session.title || "新会话").slice(0, 80),
         prestoSessionId: typeof session.prestoSessionId === "string" ? session.prestoSessionId : "",
+        diagnosisJobId: typeof session.diagnosisJobId === "string" ? session.diagnosisJobId : "",
+        diagnosisFileName: typeof session.diagnosisFileName === "string" ? session.diagnosisFileName : "",
         archived: Boolean(session.archived),
         createdAt: session.createdAt || new Date().toISOString(),
         updatedAt: session.updatedAt || new Date().toISOString(),
         messages: Array.isArray(session.messages)
-          ? session.messages.slice(-assistantMaxMessages).map(normalizeAssistantMessage).filter(Boolean)
+          ? normalizeAssistantMessages(session.messages.slice(-assistantMaxMessages))
           : []
       }));
     return {
       version: 1,
       activeId: typeof parsed.activeId === "string" ? parsed.activeId : "",
-      expanded: Boolean(parsed.expanded),
+      expanded: false,
       sessions
     };
   } catch {
     window.localStorage.removeItem(assistantStorageKey);
     return defaultAssistantState();
   }
+}
+
+function normalizeAssistantMessages(messages) {
+  const normalized = [];
+  messages.forEach((message) => {
+    const item = normalizeAssistantMessage(message);
+    if (!item) return;
+    if (shouldSplitLegacyAgentStreamMessage(message, item)) {
+      normalized.push(...splitLegacyAgentStreamMessage(item));
+      return;
+    }
+    normalized.push(item);
+  });
+  return normalized.slice(-assistantMaxMessages);
 }
 
 function normalizeAssistantMessage(message) {
@@ -1891,9 +2844,153 @@ function normalizeAssistantMessage(message) {
     role,
     content: message.content.slice(0, 8000),
     createdAt: message.createdAt || new Date().toISOString(),
+    updatedAt: message.updatedAt || message.createdAt || new Date().toISOString(),
     status: ["loading", "error", "done"].includes(message.status) ? message.status : "done",
-    retryPrompt: typeof message.retryPrompt === "string" ? message.retryPrompt : ""
+    retryPrompt: typeof message.retryPrompt === "string" ? message.retryPrompt : "",
+    streamType: ["agent_team", "evidence_context"].includes(message.streamType) ? message.streamType : "",
+    focusEvidenceKey: typeof message.focusEvidenceKey === "string" ? message.focusEvidenceKey : "",
+    agentStream: message.streamType === "agent_team" ? normalizeAgentStreamState(message.agentStream) : null
   };
+}
+
+function shouldSplitLegacyAgentStreamMessage(rawMessage, normalizedMessage) {
+  const rawStream = rawMessage?.agentStream;
+  const stream = normalizedMessage?.agentStream;
+  if (normalizedMessage?.streamType !== "agent_team" || !stream) return false;
+  const keys = new Set(stream.order || []);
+  const mixedLegacyTeam = keys.has("adaptive_planner") && keys.has("synthesis_arbiter") && stream.order.length > 2;
+  return mixedLegacyTeam && (!rawStream?.phaseGroup || rawStream.phaseGroup === "team");
+}
+
+function splitLegacyAgentStreamMessage(message) {
+  const source = message.agentStream;
+  const groups = {
+    planning: source.order.filter((key) => key === "adaptive_planner"),
+    team: source.order.filter((key) => key !== "adaptive_planner" && key !== "synthesis_arbiter"),
+    synthesis: source.order.filter((key) => key === "synthesis_arbiter")
+  };
+  return ["planning", "team", "synthesis"]
+    .filter((group) => groups[group].length > 0)
+    .map((group) => {
+      const stream = createAgentTeamStreamState(group);
+      stream.complexity = source.complexity || "";
+      stream.order = groups[group];
+      stream.agents = {};
+      stream.expandedAgents = {};
+      stream.order.forEach((key) => {
+        stream.agents[key] = source.agents[key];
+        if (source.expandedAgents?.[key]) stream.expandedAgents[key] = true;
+      });
+      stream.logs = Array.isArray(source.logs)
+        ? source.logs.filter((item) => {
+          if (group === "planning") return item.agentKey === "adaptive_planner" || item.agentKey === "team";
+          if (group === "synthesis") return item.agentKey === "synthesis_arbiter" || (item.agentKey === "team" && item.status === "done");
+          return stream.order.includes(item.agentKey);
+        })
+        : [];
+      stream.agentCount = group === "team" ? source.agentCount || stream.order.length : 1;
+      stream.status = legacyAgentStreamGroupStatus(stream, group);
+      stream.summary = legacyAgentStreamGroupSummary(stream, source.summary);
+      stream.updatedAt = source.updatedAt || message.updatedAt;
+      return {
+        ...message,
+        id: `${message.id}-${group}`,
+        status: stream.status === "failed" ? "error" : stream.status === "done" ? "done" : "loading",
+        content: agentTeamStreamFallback(stream),
+        agentStream: stream
+      };
+    });
+}
+
+function legacyAgentStreamGroupStatus(stream, group) {
+  if (stream.order.some((key) => stream.agents[key]?.status === "failed")) return "failed";
+  if (group !== "team") {
+    return stream.order.every((key) => stream.agents[key]?.status === "done") ? "done" : "running";
+  }
+  const total = stream.agentCount || stream.order.length;
+  const completed = stream.order.filter((key) => stream.agents[key]?.status === "done").length;
+  return total > 0 && completed >= total ? "done" : "running";
+}
+
+function legacyAgentStreamGroupSummary(stream, fallback) {
+  const latestAgent = [...stream.order].reverse()
+    .map((key) => stream.agents[key])
+    .find((agent) => agent?.message);
+  return latestAgent?.message || fallback || stream.summary;
+}
+
+function normalizeAgentStreamState(stream) {
+  if (!stream || typeof stream !== "object") return createAgentTeamStreamState();
+  const phaseGroup = ["planning", "team", "synthesis"].includes(stream.phaseGroup) ? stream.phaseGroup : "team";
+  const defaults = createAgentTeamStreamState(phaseGroup);
+  const agents = {};
+  const order = Array.isArray(stream.order) ? stream.order.slice(0, 8).map(String) : [];
+  const sourceAgents = stream.agents && typeof stream.agents === "object" ? stream.agents : {};
+  order.forEach((key) => {
+    const item = sourceAgents[key];
+    if (!item || typeof item !== "object") return;
+    agents[key] = {
+      key,
+      agent: String(item.agent || key).slice(0, 80),
+      status: normalizeAgentStreamStatus(item.status || "queued"),
+      phase: String(item.phase || "").slice(0, 40),
+      perspective: String(item.perspective || "").slice(0, 140),
+      reasoningEffort: String(item.reasoningEffort || "").slice(0, 12),
+      focus: String(item.focus || "").slice(0, 220),
+      agentIndex: Number(item.agentIndex || 0),
+      agentTotal: Number(item.agentTotal || 0),
+      runID: String(item.runID || "").slice(0, 80),
+      message: String(item.message || "").slice(0, 260),
+      outputPreview: String(item.outputPreview || "").slice(0, 3600),
+      typedOutput: String(item.typedOutput || "").slice(0, 3600),
+      typingDone: Boolean(item.typingDone),
+      tokenStreamed: Boolean(item.tokenStreamed),
+      updatedAt: item.updatedAt || new Date().toISOString()
+    };
+  });
+  const expandedAgents = {};
+  const sourceExpanded = stream.expandedAgents && typeof stream.expandedAgents === "object" ? stream.expandedAgents : {};
+  Object.keys(sourceExpanded).forEach((key) => {
+    if (agents[key] && sourceExpanded[key]) expandedAgents[key] = true;
+  });
+  const normalized = {
+    title: String(stream.title || defaults.title).slice(0, 80),
+    phaseGroup,
+    stageOrder: Number(stream.stageOrder || defaults.stageOrder),
+    status: normalizeAgentStreamStatus(stream.status || "running"),
+    complexity: String(stream.complexity || "").slice(0, 32),
+    agentCount: Number(stream.agentCount || defaults.agentCount),
+    phase: String(stream.phase || defaults.phase).slice(0, 40),
+    summary: String(stream.summary || defaults.summary).slice(0, 260),
+    order: order.filter((key) => agents[key]),
+    agents,
+    expandedAgents,
+    logs: Array.isArray(stream.logs) ? stream.logs.slice(-20).map((item) => ({
+      time: item.time || new Date().toISOString(),
+      agentKey: String(item.agentKey || ""),
+      agent: String(item.agent || "").slice(0, 80),
+      status: normalizeAgentStreamStatus(item.status || "running"),
+      message: String(item.message || "").slice(0, 260),
+      runID: String(item.runID || "").slice(0, 80)
+    })) : [],
+    updatedAt: stream.updatedAt || new Date().toISOString()
+  };
+  return repairStaleSynthesisStream(normalized);
+}
+
+function repairStaleSynthesisStream(stream) {
+  if (stream.phaseGroup !== "synthesis" || stream.status !== "running") return stream;
+  const item = stream.agents.synthesis_arbiter;
+  if (!item || item.status === "done" || item.status === "failed") return stream;
+  const updatedAt = Date.parse(item.updatedAt || stream.updatedAt || "");
+  if (!Number.isFinite(updatedAt) || Date.now() - updatedAt < 2 * 60 * 1000) return stream;
+  item.status = "done";
+  item.message = "Synthesis Arbiter 已返回结构化岗位匹配结果。";
+  item.typingDone = true;
+  if (item.outputPreview && !item.typedOutput) item.typedOutput = item.outputPreview;
+  stream.status = "done";
+  stream.summary = item.message;
+  return stream;
 }
 
 function defaultAssistantState() {
@@ -1901,6 +2998,10 @@ function defaultAssistantState() {
 }
 
 function saveAssistantState() {
+  if (assistantStateSaveTimer) {
+    window.clearTimeout(assistantStateSaveTimer);
+    assistantStateSaveTimer = 0;
+  }
   assistantState.sessions = assistantState.sessions.slice(0, assistantMaxSessions).map((session) => ({
     ...session,
     messages: session.messages.slice(-assistantMaxMessages)
@@ -1919,18 +3020,28 @@ function saveAssistantState() {
   }
 }
 
+function scheduleAssistantStateSave(delay = 600) {
+  if (assistantStateSaveTimer) window.clearTimeout(assistantStateSaveTimer);
+  assistantStateSaveTimer = window.setTimeout(() => {
+    assistantStateSaveTimer = 0;
+    saveAssistantState();
+  }, delay);
+}
+
 function ensureAssistantSession() {
   const active = activeAssistantSession();
   if (active && !active.archived) return active;
   return createAssistantSession(false);
 }
 
-function createAssistantSession(announce = true) {
+function createAssistantSession(announce = true, options = {}) {
   const now = new Date().toISOString();
   const session = {
     id: uniqueId("chat"),
-    title: "新诊断对话",
+    title: String(options.title || "新诊断对话").slice(0, 80),
     prestoSessionId: "",
+    diagnosisJobId: String(options.diagnosisJobId || ""),
+    diagnosisFileName: String(options.diagnosisFileName || ""),
     archived: false,
     createdAt: now,
     updatedAt: now,
@@ -1941,6 +3052,22 @@ function createAssistantSession(announce = true) {
   saveAssistantState();
   if (announce) showToast("已创建新对话。");
   return session;
+}
+
+function isEmptyAssistantSession(session) {
+  return Boolean(
+    session &&
+    !session.diagnosisJobId &&
+    !session.diagnosisFileName &&
+    (!Array.isArray(session.messages) || session.messages.length === 0)
+  );
+}
+
+function pruneEmptyActiveAssistantSession() {
+  const active = activeAssistantSession();
+  if (!isEmptyAssistantSession(active)) return;
+  assistantState.sessions = assistantState.sessions.filter((session) => session.id !== active.id);
+  assistantState.activeId = "";
 }
 
 function activeAssistantSession() {
@@ -1983,17 +3110,175 @@ function deleteAssistantSession(sessionID) {
   showToast("历史对话已删除。");
 }
 
+function addEvidenceToAssistant(kind, index) {
+  if (!isAssistantReady()) {
+    showToast("全部诊断结果生成后才能追问。");
+    return;
+  }
+  const evidence = evidenceContextByKey(kind, index);
+  if (!evidence) {
+    showToast("未找到这条证据，请重新生成诊断。");
+    return;
+  }
+  assistantFocusedEvidence = evidence;
+  const session = ensureAssistantSession();
+  const now = new Date().toISOString();
+  const previous = session.messages[session.messages.length - 1];
+  if (previous?.streamType !== "evidence_context" || previous.focusEvidenceKey !== evidence.key) {
+    session.messages.push({
+      id: uniqueId("msg"),
+      role: "assistant",
+      content: assistantEvidenceContextMessage(evidence),
+      createdAt: now,
+      updatedAt: now,
+      status: "done",
+      retryPrompt: "",
+      streamType: "evidence_context",
+      focusEvidenceKey: evidence.key
+    });
+  }
+  session.updatedAt = now;
+  assistantInput.value = assistantEvidencePrompt(evidence);
+  updateAssistantInputMeta();
+  saveAssistantState();
+  setAssistantExpanded(true);
+  renderAssistant();
+  assistantInput.focus();
+  showToast("已加入聊天上下文。");
+}
+
+function evidenceContextByKey(kind, index) {
+  const profile = diagnosis?.ability_profile || {};
+  const list = kind === "award"
+    ? Array.isArray(profile.awards) ? profile.awards : []
+    : kind === "experience"
+      ? Array.isArray(profile.experiences) ? profile.experiences : []
+      : [];
+  const item = list[index];
+  if (!item) return null;
+  const context = kind === "award" ? assistantAwardContext(item) : assistantExperienceContext(item);
+  const title = kind === "award"
+    ? cleanDisplayText(item.name || item.result)
+    : cleanDisplayText([item.type, item.role].filter(Boolean).join(" · ") || item.contribution);
+  return {
+    ...context,
+    key: `${kind}:${index}`,
+    kind,
+    title: title || (kind === "award" ? "奖项与证书" : "经历"),
+    score_summary: evidenceScoreSummary(item),
+    dimension_summary: evidenceDimensionSummary(item)
+  };
+}
+
+function evidenceScoreSummary(item) {
+  const level = numericMetric(item?.level);
+  const impact = numericMetric(item?.impact_factor);
+  return {
+    level: hasMetricValue(level) ? formatMetric(level) : "",
+    impact_factor: hasMetricValue(impact) ? formatMetric(impact) : ""
+  };
+}
+
+function evidenceDimensionSummary(item) {
+  const scores = normalizedBenchmarkScores(item);
+  if (!scores.length) return [];
+  const dimensions = Array.isArray(item?.benchmark_dimensions) && item.benchmark_dimensions.length === scores.length
+    ? item.benchmark_dimensions
+    : benchmarkDimensions;
+  return scores.map((score, index) => ({
+    name: dimensions[index] || benchmarkDimensions[index] || `维度${index + 1}`,
+    weight: Math.round(score * 100)
+  }));
+}
+
+function assistantEvidenceContextMessage(evidence) {
+  const typeLabel = evidence.kind === "award" ? "奖项与证书" : "经历证据";
+  const scoreParts = [
+    evidence.score_summary.level ? `Level ${evidence.score_summary.level}/10` : "",
+    evidence.score_summary.impact_factor ? `Impact ${evidence.score_summary.impact_factor}/10` : ""
+  ].filter(Boolean);
+  const dimensionText = evidence.dimension_summary.length
+    ? `六维权重：${evidence.dimension_summary.map((item) => `${item.name}${item.weight}%`).join("，")}`
+    : "六维权重尚未返回。";
+  const reason = cleanDisplayText(evidence.reason);
+  return [
+    `已加入重点上下文：${typeLabel}「${evidence.title}」`,
+    scoreParts.length ? scoreParts.join("，") : "Level / Impact 仍在等待评分。",
+    dimensionText,
+    reason ? `评分依据：${reason}` : ""
+  ].filter(Boolean).join("\n");
+}
+
+function assistantEvidencePrompt(evidence) {
+  const score = evidence.score_summary.level || evidence.score_summary.impact_factor
+    ? `Level ${evidence.score_summary.level || "未返回"}、Impact ${evidence.score_summary.impact_factor || "未返回"}`
+    : "当前评分";
+  return `请重点解释「${evidence.title}」为什么给出 ${score}，它对岗位匹配和后续补强有什么影响？`;
+}
+
+function isAssistantReady() {
+  const allModulesReady = moduleLocks.profile && moduleLocks.matching && moduleLocks.path && moduleLocks.outputs;
+  const benchmarkStatus = diagnosis?.ability_profile?.benchmark_status || "";
+  return Boolean(
+    diagnosis &&
+    allModulesReady &&
+    !diagnosisEvents &&
+    !benchmarkRequestInFlight &&
+    !failedRunStep &&
+    benchmarkStatus !== "benchmarking" &&
+    benchmarkStatus !== "failed"
+  );
+}
+
+function isAssistantInspectable() {
+  return isAssistantReady() || assistantAgentStreamActive || Boolean(diagnosisEvents) || benchmarkRequestInFlight || Boolean(diagnosis);
+}
+
+function syncAssistantAvailability() {
+  const ready = isAssistantReady();
+  const inspectable = isAssistantInspectable();
+  const inspectOnly = inspectable && !ready;
+  assistant.classList.toggle("is-locked", !inspectable);
+  assistant.classList.toggle("is-inspect-only", inspectOnly);
+  assistant.classList.toggle("is-streaming", assistantAgentStreamActive && !ready);
+  assistantToggle.setAttribute("aria-disabled", String(!inspectable));
+  assistantPanel.setAttribute("aria-disabled", "false");
+  assistantInput.disabled = assistantBusy || !ready;
+  assistantSend.disabled = assistantBusy || !ready;
+  assistantNewSession.disabled = assistantBusy || !ready;
+  assistantArchiveSession.disabled = assistantBusy || !ready;
+  assistantSuggestions.querySelectorAll("button").forEach((button) => {
+    button.disabled = assistantBusy || !ready;
+  });
+  document.querySelectorAll("[data-evidence-chat]").forEach((button) => {
+    const selected = assistantFocusedEvidence?.key === button.dataset.evidenceKey;
+    button.disabled = !ready;
+    button.setAttribute("aria-disabled", String(!ready));
+    button.setAttribute("aria-pressed", String(selected));
+    button.classList.toggle("is-added", selected);
+    button.title = selected ? "已加入聊天" : ready ? "添加到聊天" : "全部结果生成后才能追问";
+  });
+  if (!inspectable && !assistant.classList.contains("is-collapsed")) {
+    setAssistantExpanded(false, { silent: true });
+  }
+  if (ready) {
+    updateAssistantRailStatus(assistantBusy ? "生成中" : "可追问");
+  } else if (inspectOnly) {
+    updateAssistantRailStatus("生成中可查看");
+  } else {
+    updateAssistantRailStatus(diagnosisEvents || benchmarkRequestInFlight ? "结果生成中" : "结果完成后可追问");
+  }
+}
+
 function renderAssistant() {
   ensureAssistantSession();
-  setAssistantExpanded(assistantState.expanded);
+  applyAssistantExpandedState(assistantState.expanded);
   renderAssistantArchive();
   renderAssistantMessages();
   renderAssistantSuggestions();
   updateAssistantContext();
   updateAssistantInputMeta();
-  assistantSend.disabled = assistantBusy;
-  assistantNewSession.disabled = assistantBusy;
-  assistantArchiveSession.disabled = assistantBusy;
+  syncAssistantAvailability();
   syncAssistantHistoryView();
 }
 
@@ -2005,7 +3290,7 @@ function syncAssistantHistoryView() {
 }
 
 function renderAssistantArchive() {
-  const history = assistantState.sessions.filter((session) => session.id !== assistantState.activeId);
+  const history = assistantState.sessions.filter((session) => session.id !== assistantState.activeId && !isEmptyAssistantSession(session));
   assistantArchiveCount.textContent = String(history.length);
   assistantArchiveList.innerHTML = history.length
     ? history.map((session) => `
@@ -2018,37 +3303,318 @@ function renderAssistantArchive() {
     : `<div class="assistant-archive-empty">暂无历史对话。</div>`;
 }
 
-function renderAssistantMessages() {
+function renderAssistantMessages(options = {}) {
   const session = activeAssistantSession();
-  const messages = session?.messages || [];
+  const messages = assistantDisplayMessages(session?.messages || []);
   if (messages.length === 0) {
-    assistantMessages.innerHTML = `<div class="assistant-empty">${diagnosis ? "继续追问诊断结果。" : "生成诊断后可直接追问。"}</div>`;
+    assistantMessages.innerHTML = `<div class="assistant-empty">${isAssistantReady() ? "继续追问诊断结果。" : assistantAgentStreamActive ? "正在接收 Agent Team 流。" : "诊断完成后可追问。"}</div>`;
     return;
   }
+  const stickToBottom = options.stickToBottom === true;
+  const previousScrollTop = assistantMessages.scrollTop;
+  const openLogs = new Set([...assistantMessages.querySelectorAll("[data-agent-stream-log][open]")]
+    .map((node) => node.dataset.agentStreamLog));
+  const typeoutState = captureAgentTypeoutState();
   assistantMessages.innerHTML = messages.map((message) => {
-    const label = message.role === "user" ? "你" : message.role === "system" ? "系统" : "AI助手";
+    const label = message.streamType === "evidence_context" ? "重点证据" : message.role === "user" ? "你" : message.role === "system" ? "系统" : "AI助手";
     const stateClass = message.status === "loading" ? " is-loading" : message.status === "error" ? " is-error" : "";
+    const streamClass = message.streamType === "agent_team" ? " is-agent-stream" : message.streamType === "evidence_context" ? " is-evidence-context" : "";
+    const content = message.role === "user" ? message.content : formatAgentDisplayText(message.content);
+    const body = message.streamType === "agent_team" && message.agentStream
+      ? renderAgentTeamStreamMessage(message.agentStream, message.id)
+      : `<div class="assistant-bubble">${escapeHTML(content)}</div>`;
     return `
-      <article class="assistant-message is-${escapeAttribute(message.role)}${stateClass}">
+      <article class="assistant-message is-${escapeAttribute(message.role)}${stateClass}${streamClass}">
         <b>${escapeHTML(label)} · ${formatTime(message.createdAt)}</b>
-        <div class="assistant-bubble">${escapeHTML(message.content)}</div>
+        ${body}
         ${message.status === "error" && message.retryPrompt ? `<button type="button" class="assistant-retry" data-retry-message="${escapeAttribute(message.id)}">重试这条问题</button>` : ""}
       </article>
     `;
   }).join("");
-  assistantMessages.scrollTop = assistantMessages.scrollHeight;
+  openLogs.forEach((key) => {
+    const detail = assistantMessages.querySelector(`[data-agent-stream-log="${CSS.escape(key)}"]`);
+    if (detail) detail.open = true;
+  });
+  restoreAgentTypeoutState(typeoutState);
+  if (stickToBottom) {
+    assistantMessages.scrollTop = assistantMessages.scrollHeight;
+  } else {
+    const maxScrollTop = Math.max(0, assistantMessages.scrollHeight - assistantMessages.clientHeight);
+    assistantMessages.scrollTop = Math.min(previousScrollTop, maxScrollTop);
+  }
+}
+
+function captureAgentTypeoutState() {
+  const state = new Map();
+  assistantMessages.querySelectorAll("[data-agent-typeout]").forEach((node) => {
+    const key = node.dataset.agentTypeout;
+    const textNode = node.querySelector("[data-agent-typeout-text]");
+    if (!key || !textNode) return;
+    state.set(key, {
+      text: textNode.textContent || "",
+      scrollTop: node.scrollTop,
+      stickToBottom: node.scrollHeight - node.scrollTop - node.clientHeight < 24
+    });
+  });
+  return state;
+}
+
+function restoreAgentTypeoutState(state) {
+  if (!state?.size) return;
+  assistantMessages.querySelectorAll("[data-agent-typeout]").forEach((node) => {
+    const key = node.dataset.agentTypeout;
+    const previous = state.get(key);
+    const textNode = node.querySelector("[data-agent-typeout-text]");
+    if (!previous || !textNode) return;
+    if (!textNode.textContent && previous.text) textNode.textContent = previous.text;
+    window.requestAnimationFrame(() => {
+      node.scrollTop = previous.stickToBottom ? node.scrollHeight : Math.min(previous.scrollTop, node.scrollHeight);
+    });
+  });
+}
+
+function assistantDisplayMessages(messages) {
+  return messages.flatMap((message) => (
+    shouldSplitRenderedAgentStreamMessage(message)
+      ? splitLegacyAgentStreamMessage(message)
+      : [message]
+  ));
+}
+
+function shouldSplitRenderedAgentStreamMessage(message) {
+  const stream = message?.agentStream;
+  if (message?.streamType !== "agent_team" || !stream) return false;
+  const keys = new Set(stream.order || []);
+  return keys.has("adaptive_planner") && keys.has("synthesis_arbiter") && stream.order.length > 2;
+}
+
+function isAgentStreamExpanded(stream, agentKey) {
+  const key = String(agentKey || "");
+  return Boolean(key && stream?.expandedAgents?.[key]);
+}
+
+function shouldStickAssistantToBottom() {
+  const distance = assistantMessages.scrollHeight - assistantMessages.scrollTop - assistantMessages.clientHeight;
+  return distance < 96;
+}
+
+function renderAgentTeamStreamMessage(stream, messageID = "") {
+  const config = agentStreamPhaseConfig(stream.phaseGroup);
+  const completed = stream.order.filter((key) => stream.agents[key]?.status === "done").length;
+  const failed = stream.order.filter((key) => stream.agents[key]?.status === "failed").length;
+  const total = stream.phaseGroup === "team" ? stream.agentCount || stream.order.length : 1;
+  const statusLabel = stream.status === "done" ? "完成" : stream.status === "failed" ? "失败" : "运行中";
+  const progressLabel = stream.phaseGroup === "team"
+    ? `${completed}/${total || "--"} 个视角${failed ? ` · ${failed} 个失败` : ""}`
+    : config.label;
+  return `
+    <div class="assistant-bubble agent-stream-card is-${escapeAttribute(config.group)}">
+      <div class="agent-stream-head">
+        <div class="agent-stream-title">
+          <strong>${escapeHTML(stream.title || "Agent Team 正在匹配岗位")}</strong>
+          <span>阶段 ${config.stageOrder}/3 · ${escapeHTML(statusLabel)} · ${escapeHTML(progressLabel)}</span>
+        </div>
+        ${stream.complexity ? `<span class="agent-stream-complexity">${escapeHTML(stream.complexity)}</span>` : ""}
+      </div>
+      ${stream.summary ? `<p class="agent-stream-summary">${escapeHTML(formatAgentDisplayText(stream.summary))}</p>` : ""}
+      <div class="agent-stream-queue">
+        ${stream.order.length ? stream.order.map((key) => renderAgentQueueItem(stream.agents[key], Boolean(stream.expandedAgents?.[key]), messageID)).join("") : `<div class="agent-stream-empty">${escapeHTML(config.empty)}</div>`}
+      </div>
+      ${renderAgentStreamLog(stream.logs, `${messageID}:${config.group}`)}
+    </div>
+  `;
+}
+
+function renderAgentStreamStage(label, active, done) {
+  return `<span class="agent-stream-stage${active ? " is-active" : ""}${done ? " is-done" : ""}">${escapeHTML(label)}</span>`;
+}
+
+function renderAgentQueueItem(agent, expanded = false, messageID = "") {
+  if (!agent) return "";
+  const status = agent.status || "queued";
+  const statusLabel = {
+    queued: "等待",
+    running: "运行",
+    streaming: "推理",
+    done: "完成",
+    failed: "失败"
+  }[status] || "运行";
+  const index = agent.agentIndex && agent.agentTotal ? `${agent.agentIndex}/${agent.agentTotal}` : "";
+  return `
+    <button type="button" class="agent-stream-agent is-${escapeAttribute(status)}${expanded ? " is-expanded" : ""}" data-agent-stream-toggle="${escapeAttribute(agent.key)}" data-agent-stream-message="${escapeAttribute(messageID)}" aria-expanded="${expanded}">
+      <span class="agent-stream-agent-head">
+        <span class="agent-stream-state">${escapeHTML(statusLabel)}</span>
+        <strong class="agent-stream-agent-name">${escapeHTML(formatAgentDisplayText(agent.agent || agent.key))}</strong>
+        ${index ? `<span class="agent-stream-index">${escapeHTML(index)}</span>` : ""}
+        <span class="agent-stream-expand" aria-hidden="true">${expanded ? "-" : "+"}</span>
+      </span>
+      <span class="agent-stream-meta">
+        ${agent.perspective ? `<span>${escapeHTML(formatAgentDisplayText(agent.perspective))}</span>` : ""}
+        ${agent.reasoningEffort ? `<span class="agent-stream-effort">${renderEffortBars(agent.reasoningEffort)}${escapeHTML(agent.reasoningEffort)}</span>` : ""}
+        ${agent.runID ? `<span class="agent-stream-run-id">${escapeHTML(shortRunId(agent.runID))}</span>` : ""}
+      </span>
+      ${agent.focus ? `<span class="agent-stream-focus">${escapeHTML(formatAgentDisplayText(agent.focus))}</span>` : ""}
+      ${agent.message ? `<span class="agent-stream-message">${escapeHTML(formatAgentDisplayText(agent.message))}</span>` : ""}
+      ${expanded ? renderAgentStreamDetail(agent, messageID) : ""}
+    </button>
+  `;
+}
+
+function renderAgentStreamDetail(agent, messageID = "") {
+  const hasOutput = Boolean(agent.outputPreview);
+  const text = hasOutput ? agent.typedOutput || agent.outputPreview || "" : agent.message || agent.focus || "等待 Agent 输出。";
+  const cursor = hasOutput && !agent.typingDone ? `<span class="agent-stream-cursor" aria-hidden="true"></span>` : "";
+  const typeoutKey = `${messageID}:${agent.key}`;
+  return `
+    <span class="agent-stream-detail"><span class="agent-stream-typeout" data-agent-typeout="${escapeAttribute(typeoutKey)}" data-agent-message="${escapeAttribute(messageID)}" data-agent-key="${escapeAttribute(agent.key)}"><span data-agent-typeout-text="${escapeAttribute(typeoutKey)}" data-agent-message="${escapeAttribute(messageID)}" data-agent-key="${escapeAttribute(agent.key)}">${escapeHTML(formatAgentDisplayText(text))}</span>${cursor}</span></span>
+  `;
+}
+
+function toggleAgentStreamDetail(agentKey, messageID = "") {
+  const key = String(agentKey || "");
+  if (!key) return;
+  const { session, message } = findActiveAgentStreamMessage(messageID, key);
+  const stream = message?.agentStream;
+  if (!session || !message || !stream?.agents?.[key]) return;
+  stream.expandedAgents = stream.expandedAgents || {};
+  if (stream.expandedAgents[key]) {
+    delete stream.expandedAgents[key];
+  } else {
+    stream.expandedAgents[key] = true;
+  }
+  const now = new Date().toISOString();
+  message.updatedAt = now;
+  session.updatedAt = now;
+  saveAssistantState();
+  renderAssistantMessages();
+  if (stream.expandedAgents[key]) startAgentOutputTypewriter(message.id, key);
+}
+
+function patchAgentStreamText(messageID, agentKey) {
+  const key = String(agentKey || "");
+  if (!key) return false;
+  const { message } = findActiveAgentStreamMessage(messageID);
+  const stream = message?.agentStream;
+  const agent = stream?.agents?.[key];
+  if (!stream?.expandedAgents?.[key] || !agent) return false;
+  const typeoutKey = `${messageID}:${key}`;
+  const textNode = assistantMessages.querySelector(`[data-agent-typeout-text="${CSS.escape(typeoutKey)}"]`)
+    || [...assistantMessages.querySelectorAll("[data-agent-typeout-text]")]
+      .find((node) => node.dataset.agentKey === key || node.dataset.agentTypeoutText === key);
+  if (!textNode) return false;
+  const typeout = textNode.closest("[data-agent-typeout]");
+  const stickToBottom = typeout ? typeout.scrollHeight - typeout.scrollTop - typeout.clientHeight < 24 : false;
+  textNode.textContent = formatAgentDisplayText(agent.typedOutput || agent.outputPreview || "");
+  if (typeout) {
+    let cursor = typeout.querySelector(".agent-stream-cursor");
+    if (!agent.typingDone && !cursor) {
+      cursor = document.createElement("span");
+      cursor.className = "agent-stream-cursor";
+      cursor.setAttribute("aria-hidden", "true");
+      typeout.append(cursor);
+    }
+    if (cursor) cursor.hidden = Boolean(agent.typingDone);
+    if (stickToBottom) {
+      window.requestAnimationFrame(() => {
+        typeout.scrollTop = typeout.scrollHeight;
+      });
+    }
+  }
+  return true;
+}
+
+function syncAgentTypewriterForEvent(messageID, agentKey) {
+  const { message } = findActiveAgentStreamMessage(messageID);
+  const stream = message?.agentStream;
+  const key = String(agentKey || "");
+  if (!stream?.expandedAgents?.[key] || !stream.agents?.[key]?.outputPreview) return;
+  if (stream.agents[key]?.tokenStreamed) return;
+  startAgentOutputTypewriter(message.id, key);
+}
+
+function findActiveAgentStreamMessage(messageID = "", agentKey = "") {
+  const session = activeAssistantSession();
+  if (!session) return { session: null, message: null };
+  let message = messageID
+    ? session.messages.find((item) => item.id === messageID)
+    : null;
+  if (!message && agentKey) {
+    message = [...session.messages].reverse().find((item) => item.streamType === "agent_team" && item.agentStream?.agents?.[agentKey]);
+  }
+  if (!message && assistantAgentStreamMessageId) {
+    message = session.messages.find((item) => item.id === assistantAgentStreamMessageId);
+  }
+  if (!message) {
+    message = [...session.messages].reverse().find((item) => item.streamType === "agent_team");
+  }
+  return { session, message: message || null };
+}
+
+function startAgentOutputTypewriter(messageID, agentKey) {
+  const key = String(agentKey || "");
+  const timerKey = `${messageID}:${key}`;
+  if (!messageID || !key || assistantAgentTypewriterTimers.has(timerKey)) return;
+  const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+  const tick = () => {
+    const { session, message } = findActiveAgentStreamMessage(messageID);
+    const stream = message?.agentStream;
+    const agent = stream?.agents?.[key];
+    if (!session || !message || !stream?.expandedAgents?.[key] || !agent?.outputPreview) {
+      assistantAgentTypewriterTimers.delete(timerKey);
+      return;
+    }
+    const target = agent.outputPreview;
+    const current = agent.typedOutput || "";
+    if (reducedMotion || current.length >= target.length) {
+      agent.typedOutput = target;
+      agent.typingDone = true;
+      saveAssistantState();
+      patchAgentStreamText(messageID, key);
+      assistantAgentTypewriterTimers.delete(timerKey);
+      return;
+    }
+    const step = target.length > 1200 ? 4 : target.length > 600 ? 2 : 1;
+    agent.typedOutput = target.slice(0, current.length + step);
+    agent.typingDone = agent.typedOutput.length >= target.length;
+    message.updatedAt = new Date().toISOString();
+    session.updatedAt = message.updatedAt;
+    if (agent.typingDone || agent.typedOutput.length % 24 === 0) saveAssistantState();
+    patchAgentStreamText(messageID, key);
+    const delay = target.length > 1200 ? 14 : 18;
+    assistantAgentTypewriterTimers.set(timerKey, window.setTimeout(tick, delay));
+  };
+  assistantAgentTypewriterTimers.set(timerKey, window.setTimeout(tick, 0));
+}
+
+function stopAgentTypewriters() {
+  assistantAgentTypewriterTimers.forEach((timer) => window.clearTimeout(timer));
+  assistantAgentTypewriterTimers.clear();
+}
+
+function renderEffortBars(effort) {
+  const count = { low: 1, medium: 2, high: 3, xhigh: 4 }[String(effort || "").toLowerCase()] || 2;
+  return `<i class="agent-effort-bars">${[0, 1, 2, 3].map((index) => `<em class="${index < count ? "is-on" : ""}"></em>`).join("")}</i>`;
+}
+
+function renderAgentStreamLog(logs, key = "agent-stream-log") {
+  if (!Array.isArray(logs) || logs.length === 0) return "";
+  const recent = logs.slice(-3);
+  return `
+    <details class="agent-stream-log" data-agent-stream-log="${escapeAttribute(key)}">
+      <summary>事件日志</summary>
+      ${recent.map((item) => `
+        <span>${escapeHTML(formatTime(item.time))} · ${escapeHTML(formatAgentDisplayText(item.agent || item.agentKey || "Agent"))} · ${escapeHTML(formatAgentDisplayText(item.message || item.status))}</span>
+      `).join("")}
+    </details>
+  `;
 }
 
 function renderAssistantSuggestions() {
-  const suggestions = diagnosis ? [
-    "我最应该优先补强哪一项能力？",
-    "根据当前结果，推荐岗位为什么排第一？",
-    "把 30 天路径压缩成本周行动清单。"
-  ] : [
-    "我应该上传哪些材料才能得到更准的诊断？",
-    "成绩单是必传的吗？",
-    "诊断完成后我可以追问哪些问题？"
-  ];
+  const suggestions = isAssistantReady() ? [
+    "优先补哪项能力？",
+    "首位岗位为什么匹配？",
+    "本周行动清单"
+  ] : [];
   assistantSuggestions.innerHTML = suggestions.map((text) => `
     <button type="button" data-suggestion="${escapeAttribute(text)}">${escapeHTML(text)}</button>
   `).join("");
@@ -2056,34 +3622,47 @@ function renderAssistantSuggestions() {
 
 function updateAssistantContext() {
   if (!assistantContext) return;
-  const hasDiagnosis = Boolean(diagnosis?.ability_profile || diagnosis?.matching_result || diagnosis?.path_plan);
-  const label = hasDiagnosis ? "已接入诊断" : diagnosisEvents ? "诊断生成中" : "等待诊断";
-  const pillClass = hasDiagnosis ? "is-real" : diagnosisEvents ? "is-warning" : "is-warning";
-  const detail = hasDiagnosis
-    ? assistantContextSummary()
-    : "生成诊断后，助手会把能力画像、岗位匹配和路径规划作为回答上下文。";
-  assistantContext.innerHTML = `
-    <span class="status-pill ${pillClass}">${escapeHTML(label)}</span>
-    <p>${escapeHTML(detail)}</p>
-  `;
-  updateAssistantRailStatus(hasDiagnosis ? "可追问" : assistantBusy ? "生成中" : "待机");
+  const ready = isAssistantReady();
+  const label = ready ? "可追问" : assistantAgentStreamActive ? "Agent Team 流式生成" : diagnosisEvents || benchmarkRequestInFlight || diagnosis ? "诊断生成中" : "等待诊断";
+  const pillClass = ready ? "is-real" : "is-warning";
+  assistantContext.setAttribute("aria-label", label);
+  assistantContext.innerHTML = `<span class="status-pill ${pillClass}">${escapeHTML(label)}</span>`;
+  syncAssistantAvailability();
 }
 
 function updateAssistantInputMeta() {
   const length = assistantInput.value.length;
-  assistantInputMeta.textContent = length ? `${length}/${assistantPromptLimit}` : `最多 ${assistantPromptLimit} 字`;
+  const ready = isAssistantReady();
+  assistantInput.placeholder = ready ? "追问能力短板、岗位理由或任务优先级" : "诊断完成后可追问";
+  assistantInputMeta.textContent = ready
+    ? length ? `${length}/${assistantPromptLimit}` : `最多 ${assistantPromptLimit} 字`
+    : isAssistantInspectable() ? "当前仅可查看 Agent Team 进度" : `最多 ${assistantPromptLimit} 字`;
   assistantInputMeta.style.color = length > assistantPromptLimit * 0.9 ? "var(--danger)" : "";
 }
 
-function setAssistantExpanded(expanded) {
+function setAssistantExpanded(expanded, options = {}) {
+  if (expanded && !options.force && !isAssistantInspectable()) {
+    if (!options.silent) showToast("生成诊断后可查看 AI 助手。");
+    expanded = false;
+  }
+  const changed = assistantState.expanded !== expanded;
   assistantState.expanded = expanded;
+  applyAssistantExpandedState(expanded);
+  if (changed || !options.silent) saveAssistantState();
+}
+
+function applyAssistantExpandedState(expanded) {
   assistant.classList.toggle("is-collapsed", !expanded);
   document.body.classList.toggle("assistant-expanded", expanded);
   assistantToggle.setAttribute("aria-expanded", String(expanded));
-  saveAssistantState();
 }
 
 async function sendAssistantMessage(promptOverride = "") {
+  if (!isAssistantReady()) {
+    showToast("诊断仍在生成。你可以查看 Agent Team 进度，结果完成后再追问。");
+    if (!isAssistantInspectable()) setAssistantExpanded(false, { silent: true });
+    return;
+  }
   const session = ensureAssistantSession();
   const prompt = String(promptOverride || assistantInput.value).trim();
   if (!prompt) {
@@ -2104,7 +3683,7 @@ async function sendAssistantMessage(promptOverride = "") {
   const now = new Date().toISOString();
   session.messages.push({ id: uniqueId("msg"), role: "user", content: prompt, createdAt: now, status: "done" });
   const loadingID = uniqueId("msg");
-  session.messages.push({ id: loadingID, role: "assistant", content: "正在结合当前诊断结果生成回答。", createdAt: now, status: "loading", retryPrompt: prompt });
+  session.messages.push({ id: loadingID, role: "assistant", content: "正在通过 Legato Chat workflow 生成回答。", createdAt: now, status: "loading", retryPrompt: prompt });
   session.title = titleForPrompt(prompt);
   session.updatedAt = now;
   assistantInput.value = "";
@@ -2147,40 +3726,22 @@ async function retryAssistantMessage(messageID) {
 
 async function requestAssistantAnswer(session, prompt) {
   assistantAbort = new AbortController();
-  const timeout = window.setTimeout(() => assistantAbort.abort(), 65000);
+  const timeout = window.setTimeout(() => assistantAbort.abort(), 70000);
   try {
-    const run = await runAssistantPrompt(session, prompt, true);
-    if (run.status === "failed") throw new Error(run.error || "model_failed");
-    return String(run.output || "").trim();
+    const payload = await fetchJSON("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        question: prompt,
+        diagnosis: assistantContextForModel(),
+        history: assistantHistoryForModel(session, prompt)
+      }),
+      signal: assistantAbort.signal
+    });
+    return String(payload.answer || payload.chat?.answer || "").trim();
   } finally {
     window.clearTimeout(timeout);
     assistantAbort = null;
-  }
-}
-
-async function runAssistantPrompt(session, prompt, allowSessionRepair) {
-  if (!session.prestoSessionId) {
-    const created = await fetchJSON("/api/presto/sessions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ metadata: { app: "jobagent", surface: "llm-assistant" } }),
-      signal: assistantAbort.signal
-    });
-    session.prestoSessionId = created.id;
-  }
-  try {
-    return await fetchJSON(`/api/presto/sessions/${encodeURIComponent(session.prestoSessionId)}/runs`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: assistantPrompt(prompt) }),
-      signal: assistantAbort.signal
-    });
-  } catch (error) {
-    if (allowSessionRepair && error?.status === 404) {
-      session.prestoSessionId = "";
-      return runAssistantPrompt(session, prompt, false);
-    }
-    throw error;
   }
 }
 
@@ -2203,38 +3764,39 @@ async function fetchJSON(url, options) {
   return data;
 }
 
-function assistantPrompt(prompt) {
-  return [
-    "你是 Growth Lens 的AI助手。请使用中文回答，语气精确、冷静、可执行。",
-    "只基于页面诊断上下文和用户问题回答；无法确定时说明缺少哪些证据。",
-    "回答结构要求：先给结论，再给 2 到 4 条行动建议。不要编造未出现在上下文中的学校、成绩、证书或岗位事实。",
-    "",
-    "当前诊断上下文：",
-    assistantContextForModel(),
-    "",
-    "用户问题：",
-    prompt
-  ].join("\n");
-}
-
 function assistantContextForModel() {
-  if (!diagnosis) return "尚未生成诊断。用户可能仍在材料上传阶段。";
+  if (!diagnosis) return { status: "no_diagnosis", message: "尚未生成诊断。用户可能仍在材料上传阶段。" };
   const profile = diagnosis.ability_profile || {};
   const info = profile.basic_info || {};
   const match = diagnosis.matching_result || {};
   const topJobs = Array.isArray(profile.top5_matching_jobs) ? profile.top5_matching_jobs.slice(0, 5) : [];
-  const scores = Array.isArray(profile.four_dim_scores) ? profile.four_dim_scores : [];
+  const sixDimScores = Array.isArray(match.student_radar) && match.student_radar.length
+    ? match.student_radar
+    : Array.isArray(profile.radar_data) ? profile.radar_data : [];
+  const radarItems = benchmarkedEvidenceItems(profile);
+  const radarSeries = radarItems.length ? buildRadarSeries(profile, radarItems) : [];
   const gaps = Array.isArray(match.gap_details) ? match.gap_details.slice(0, 5) : [];
   const stages = Array.isArray(diagnosis.path_plan?.stages) ? diagnosis.path_plan.stages.slice(0, 3) : [];
-  return JSON.stringify({
+  return {
+    status: "ready",
     basic_info: {
       name: info.name || "",
       school: info.school || "",
       major: info.major || "",
       degree: info.degree || "",
-      target_role: info.target_role || match.target_role || ""
+      target_role: info.target_role || match.target_role || "",
+      transcript_use: info.transcript_use || ""
     },
-    scores,
+    education: Array.isArray(profile.education) ? profile.education : [],
+    awards_status: profile.awards_status || "",
+    awards: Array.isArray(profile.awards) ? profile.awards.slice(0, 24).map(assistantAwardContext) : [],
+    experiences_status: profile.experiences_status || "",
+    experiences: Array.isArray(profile.experiences) ? profile.experiences.slice(0, 24).map(assistantExperienceContext) : [],
+    benchmark_status: profile.benchmark_status || "",
+    major_baseline_status: profile.major_baseline_status || "",
+    major_baseline: profile.major_baseline || {},
+    six_dim_scores: sixDimScores,
+    radar_series: radarSeries,
     top_jobs: topJobs,
     matching: {
       target_role: match.target_role || "",
@@ -2247,8 +3809,47 @@ function assistantContextForModel() {
       goal: stage.goal,
       deliverable: stage.deliverable
     })),
+    focused_evidence: assistantFocusedEvidence || null,
     production_limitations: diagnosis.production_limitations || []
-  });
+  };
+}
+
+function assistantAwardContext(item) {
+  return {
+    name: item?.name || "",
+    result: item?.result || "",
+    evidence_scope: item?.evidence_scope || "",
+    level: item?.level ?? "",
+    impact_factor: item?.impact_factor ?? "",
+    benchmark_scores: Array.isArray(item?.benchmark_scores) ? item.benchmark_scores : [],
+    reason: item?.reason || ""
+  };
+}
+
+function assistantExperienceContext(item) {
+  return {
+    type: item?.type || "",
+    role: item?.role || "",
+    contribution: item?.contribution || "",
+    evidence_scope: item?.evidence_scope || "",
+    level: item?.level ?? "",
+    impact_factor: item?.impact_factor ?? "",
+    benchmark_scores: Array.isArray(item?.benchmark_scores) ? item.benchmark_scores : [],
+    reason: item?.reason || ""
+  };
+}
+
+function assistantHistoryForModel(session, currentPrompt) {
+  const messages = (session?.messages || [])
+    .filter((message) => message.status === "done" && message.streamType !== "agent_team" && ["user", "assistant", "system"].includes(message.role) && message.content)
+    .map((message) => ({ role: message.role, content: message.content }));
+  if (messages.length > 0) {
+    const last = messages[messages.length - 1];
+    if (last.role === "user" && last.content === currentPrompt) {
+      messages.pop();
+    }
+  }
+  return messages.slice(-12);
 }
 
 function assistantContextSummary() {
@@ -2263,10 +3864,10 @@ function assistantContextSummary() {
 
 function assistantErrorMessage(error) {
   if (error?.name === "AbortError") return "模型响应超时，请稍后重试。";
-  if (error?.status === 503) return "Presto 服务未配置或不可用，请检查后端代理。";
+  if (error?.status === 503) return "Legato Chat 或 Presto 服务不可用，请检查后端代理。";
   if (error?.status === 400) return "请求内容无法被模型服务识别，请缩短问题后重试。";
   if (error?.status === 429) return "模型请求过于频繁，请稍后重试。";
-  if (error?.status >= 500) return "模型服务暂时不可用，请稍后重试。";
+  if (error?.status >= 500) return "Legato Chat 服务暂时不可用，请稍后重试。";
   return "无法连接 LLM 服务，请检查网络或后端状态。";
 }
 
@@ -2307,13 +3908,20 @@ function downloadJSON(filename, value) {
 
 function showToast(message) {
   window.clearTimeout(toastTimer);
-  toast.textContent = message;
+  toast.textContent = formatAgentDisplayText(message);
   toast.classList.add("is-visible");
   toastTimer = window.setTimeout(() => toast.classList.remove("is-visible"), 2600);
 }
 
 function cleanDisplayText(value) {
   return String(value ?? "").trim();
+}
+
+function formatAgentDisplayText(value) {
+  return String(value ?? "")
+    .replace(/\bagent team\b/g, "Agent Team")
+    .replace(/\bAgent team\b/g, "Agent Team")
+    .replace(/\bagent\b/g, "Agent");
 }
 
 function safeScore(value) {

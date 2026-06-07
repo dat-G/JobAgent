@@ -1,6 +1,6 @@
 # Backend
 
-Go stdlib 服务，用于托管 `../frontend`、接收上传材料、创建异步诊断任务，并通过 SSE 把 agent 进度推送给前端。
+Go stdlib 服务，用于托管 `../frontend`、接收上传材料、创建异步诊断任务，并通过 SSE 把 Agent 进度推送给前端。
 
 ## 运行
 
@@ -62,4 +62,4 @@ PRESTO_URL=http://127.0.0.1:8080 go run .
 {"job_id":"diag_1","status":"queued","events_url":"/api/diagnosis/diag_1/events"}
 ```
 
-前端通过 `GET /api/diagnosis/{job_id}/events` 监听 SSE 事件。后端会并发调用 `../Agents/legato` 解析简历和已上传成绩单；简历 Legato 解析失败会直接触发 `job.failed`，成绩单解析失败会作为可选材料警告保留并继续生成诊断。`experience_hybrid` 返回后，前端把当前奖项和经历拼成 evidence items，并调用 `POST /api/diagnosis/{job_id}/benchmark` 补充 `impact_factor`、校内/校外分类与六维分布。前端雷达图由这些证据聚合为综合、校内、校外三层画像；岗位推荐、匹配差距和路径规划仍为模拟数据。`/api/diagnosis/mock` 仅作为兼容和调试接口保留，不参与正式诊断流程。
+前端通过 `GET /api/diagnosis/{job_id}/events` 监听 SSE 事件。后端会并发调用 `../Agents/legato` 解析简历和已上传成绩单；简历 Legato 解析失败会直接触发 `job.failed`，成绩单解析失败会作为可选材料警告保留并继续生成诊断。简历经历使用整体 `experience_hybrid` stage，返回后会以 hybrid 结果整体替换经历列表，条目数量和条目内容均以 hybrid 为准。前端随后把当前奖项和经历拼成 evidence items，并调用 `POST /api/diagnosis/{job_id}/benchmark` 补充 `impact_factor`、校内/校外分类与六维分布。Item Benchmark 默认最多并发 5 个批次，超过 5 条证据时会合并为 5 个请求同时发出，数量可通过 `.env` 的 `ITEM_BENCHMARK_MAX_REQUESTS` 调整；任意批次返回即通过 SSE 更新对应证据卡片。Benchmark 完成后，Go 后端会启动 `Legato Job Matching Team`，先由 Adaptive Planner 根据简历复杂度、证据数量、学历门槛和岗位不确定性生成受限 Agent plan，再由后端校验并派生 3 到 6 个多视角 Presto Agent 并发分析，最后由固定 Synthesis Arbiter 综合全部结果并输出结构化岗位匹配。每个 Presto run 的 `/runs/{run_id}/events` 会被后端读取并转发到诊断 SSE，前端 chat 中会以结构化状态卡显示 Planner、多视角 Agent 和综合 Agent 的流式进度；最终结构化结果仍渲染为推荐岗位、目标岗位雷达、匹配差距和简短说明。路径规划仍为模拟数据。`/api/diagnosis/mock` 仅作为兼容和调试接口保留，不参与正式诊断流程。
