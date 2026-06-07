@@ -11,6 +11,9 @@ __pycache__/
 *.pyc
 test/
 
+# Local Codex/agent skills
+.agents/
+
 # Impeccable local design artifacts
 .impeccable/
 DESIGN.md
