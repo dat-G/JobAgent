@@ -1,7 +1,12 @@
 .env
+.venv/
+Agents/*/.venv/
+*.egg-info/
 .vscode/
 .DS_Store
 .run/
+jobagent-gocache/
+go-build*/
 __pycache__/
 *.pyc
 test/

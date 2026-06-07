@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>学生成长诊断与路径规划</title>
     <meta name="description" content="上传简历后生成能力画像、岗位匹配分析和成长路径规划。">
-    <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/styles.css?v=20260606-suggestions-attached">
   </head>
   <body>
     <header class="topbar" aria-label="页面导航">
@@ -301,7 +301,60 @@
       <div class="generation-percent" id="runPercent">0%</div>
     </aside>
 
+    <aside class="llm-assistant is-collapsed" id="llmAssistant" aria-label="LLM AI助手">
+      <button class="assistant-rail" id="assistantToggle" type="button" aria-controls="assistantPanel" aria-expanded="false" aria-label="AI助手" title="AI助手 · 待机" data-tooltip="AI助手 · 待机">
+        <span class="assistant-rail-icon" aria-hidden="true"></span>
+        <strong id="assistantRailStatus" class="sr-only">待机</strong>
+      </button>
+
+      <section class="assistant-panel" id="assistantPanel" aria-labelledby="assistantTitle">
+        <header class="assistant-header">
+          <button type="button" id="assistantHistoryBack" class="assistant-icon-button assistant-back-button" aria-label="返回" title="返回" data-tooltip="返回">
+            <span aria-hidden="true"></span>
+          </button>
+          <div>
+            <span class="dock-label">LLM 对话</span>
+            <h2 id="assistantTitle">AI助手</h2>
+          </div>
+          <div class="assistant-actions">
+            <button type="button" id="assistantNewSession" class="assistant-icon-button assistant-new-button" aria-label="新建" title="新建" data-tooltip="新建">
+              <span aria-hidden="true"></span>
+            </button>
+            <button type="button" id="assistantArchiveSession" class="assistant-icon-button assistant-history-button" aria-label="历史" aria-controls="assistantArchive" aria-expanded="false" title="历史" data-tooltip="历史">
+              <span aria-hidden="true"></span>
+            </button>
+            <button type="button" id="assistantClose" class="assistant-icon-button assistant-close-button" aria-label="收缩" title="收缩" data-tooltip="收缩">
+              <span aria-hidden="true"></span>
+            </button>
+          </div>
+        </header>
+
+        <div class="assistant-context" id="assistantContext" role="status">
+          <span class="status-pill is-warning">等待诊断</span>
+          <p>生成诊断后，助手会把能力画像、岗位匹配和路径规划作为回答上下文。</p>
+        </div>
+
+        <details class="assistant-archive" id="assistantArchive">
+          <summary>全部历史 <span id="assistantArchiveCount">0</span></summary>
+          <div class="assistant-archive-list" id="assistantArchiveList"></div>
+        </details>
+
+        <div class="assistant-messages" id="assistantMessages" role="log" aria-live="polite" aria-relevant="additions"></div>
+
+        <div class="assistant-suggestions" id="assistantSuggestions" aria-label="建议问题"></div>
+
+        <form class="assistant-composer" id="assistantForm">
+          <label class="sr-only" for="assistantInput">输入要询问AI助手的问题</label>
+          <textarea id="assistantInput" rows="3" maxlength="1200" placeholder="要求后续变更" enterkeyhint="send"></textarea>
+          <div class="assistant-composer-footer">
+            <span id="assistantInputMeta">最多 1200 字</span>
+            <button type="submit" id="assistantSend" aria-label="发送问题">↑</button>
+          </div>
+        </form>
+      </section>
+    </aside>
+
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/app.js"></script>
+    <script type="module" src="/app.js?v=20260606-suggestions-attached"></script>
   </body>
 </html>

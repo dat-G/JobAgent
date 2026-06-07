@@ -11,6 +11,30 @@ const lockState = document.querySelector("#lockState");
 const unlockHint = document.querySelector("#unlockHint");
 const toast = document.querySelector("#toast");
 const scrollGradient = document.querySelector("#scrollGradient");
+const assistant = document.querySelector("#llmAssistant");
+const assistantToggle = document.querySelector("#assistantToggle");
+const assistantPanel = document.querySelector("#assistantPanel");
+const assistantTitle = document.querySelector("#assistantTitle");
+const assistantHistoryBack = document.querySelector("#assistantHistoryBack");
+const assistantClose = document.querySelector("#assistantClose");
+const assistantNewSession = document.querySelector("#assistantNewSession");
+const assistantArchiveSession = document.querySelector("#assistantArchiveSession");
+const assistantArchive = document.querySelector("#assistantArchive");
+const assistantArchiveList = document.querySelector("#assistantArchiveList");
+const assistantArchiveCount = document.querySelector("#assistantArchiveCount");
+const assistantMessages = document.querySelector("#assistantMessages");
+const assistantSuggestions = document.querySelector("#assistantSuggestions");
+const assistantContext = document.querySelector("#assistantContext");
+const assistantForm = document.querySelector("#assistantForm");
+const assistantInput = document.querySelector("#assistantInput");
+const assistantInputMeta = document.querySelector("#assistantInputMeta");
+const assistantSend = document.querySelector("#assistantSend");
+const assistantRailStatus = document.querySelector("#assistantRailStatus");
+
+const assistantStorageKey = "jobagent.llmAssistant.v1";
+const assistantMaxMessages = 80;
+const assistantMaxSessions = 24;
+const assistantPromptLimit = 1200;
 
 let diagnosis = null;
 let resumeReady = false;
@@ -38,6 +62,9 @@ const cappedEvidenceBucketRules = {
 };
 const academicPriorWeight = 0.28;
 const academicPriorFloorRatio = 0.85;
+let assistantState = loadAssistantState();
+let assistantBusy = false;
+let assistantAbort = null;
 
 const agentSteps = ["resume_agent", "transcript_agent", "profile", "matching", "path", "outputs"];
 const moduleLocks = {
@@ -91,6 +118,7 @@ async function init() {
   setupUploads();
   setupRunStepRetries();
   setupExports();
+  setupAssistant();
   resetResultModules();
 }
 
@@ -308,6 +336,8 @@ function setRunDone() {
   setRunProgress(100);
   runButton.disabled = false;
   runButton.textContent = "重新生成";
+  updateAssistantContext();
+  renderAssistantSuggestions();
 }
 
 function setRunFailed(message) {
@@ -316,6 +346,7 @@ function setRunFailed(message) {
   document.querySelector(".generation-dock").classList.remove("is-running");
   runButton.disabled = false;
   runButton.textContent = "重新生成";
+  updateAssistantContext();
 }
 
 function setRunWaitingForBenchmark() {
@@ -450,6 +481,8 @@ function handleDiagnosisEvent(event) {
     if (event.step === "path") unlockModule("path");
     if (event.step === "outputs") unlockModule("outputs");
   }
+  updateAssistantContext();
+  renderAssistantSuggestions();
 }
 
 function markAgentStep(step, status) {
@@ -1747,6 +1780,517 @@ function setupExports() {
       downloadJSON("matching-report.json", diagnosis.matching_result);
     }
   });
+}
+
+function setupAssistant() {
+  ensureAssistantSession();
+  renderAssistant();
+
+  assistantToggle.addEventListener("click", () => setAssistantExpanded(assistant.classList.contains("is-collapsed")));
+  assistantClose.addEventListener("click", () => setAssistantExpanded(false));
+  assistantHistoryBack.addEventListener("click", closeAssistantHistory);
+  assistantNewSession.addEventListener("click", () => {
+    assistantArchive.open = false;
+    syncAssistantHistoryView();
+    createAssistantSession();
+    setAssistantExpanded(true);
+    renderAssistant();
+    assistantInput.focus();
+  });
+  assistantArchiveSession.addEventListener("click", toggleAssistantHistory);
+  assistantArchive.addEventListener("toggle", () => {
+    syncAssistantHistoryView();
+  });
+  assistantArchiveList.addEventListener("click", (event) => {
+    const deleteButton = event.target.closest("[data-delete-session]");
+    if (deleteButton) {
+      deleteAssistantSession(deleteButton.dataset.deleteSession);
+      return;
+    }
+    const button = event.target.closest("[data-restore-session]");
+    if (!button) return;
+    restoreAssistantSession(button.dataset.restoreSession);
+  });
+  assistantSuggestions.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-suggestion]");
+    if (!button || assistantBusy) return;
+    assistantInput.value = button.dataset.suggestion;
+    updateAssistantInputMeta();
+    assistantInput.focus();
+  });
+  assistantMessages.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-retry-message]");
+    if (!button || assistantBusy) return;
+    retryAssistantMessage(button.dataset.retryMessage);
+  });
+  setupAssistantScrollbar(assistantMessages);
+  setupAssistantScrollbar(assistantArchiveList);
+  setupAssistantScrollbar(assistantSuggestions);
+  assistantInput.addEventListener("input", updateAssistantInputMeta);
+  assistantInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      assistantForm.requestSubmit();
+    }
+  });
+  assistantForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await sendAssistantMessage();
+  });
+  window.addEventListener("beforeunload", () => {
+    if (assistantAbort) assistantAbort.abort();
+  });
+}
+
+function setupAssistantScrollbar(element) {
+  let timer = 0;
+  element.addEventListener("scroll", () => {
+    element.classList.add("is-scrolling");
+    window.clearTimeout(timer);
+    timer = window.setTimeout(() => element.classList.remove("is-scrolling"), 720);
+  }, { passive: true });
+}
+
+function loadAssistantState() {
+  try {
+    const raw = window.localStorage.getItem(assistantStorageKey);
+    if (!raw) return defaultAssistantState();
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.sessions)) return defaultAssistantState();
+    const sessions = parsed.sessions
+      .filter((session) => session && typeof session.id === "string")
+      .slice(0, assistantMaxSessions)
+      .map((session) => ({
+        id: session.id,
+        title: String(session.title || "新会话").slice(0, 80),
+        prestoSessionId: typeof session.prestoSessionId === "string" ? session.prestoSessionId : "",
+        archived: Boolean(session.archived),
+        createdAt: session.createdAt || new Date().toISOString(),
+        updatedAt: session.updatedAt || new Date().toISOString(),
+        messages: Array.isArray(session.messages)
+          ? session.messages.slice(-assistantMaxMessages).map(normalizeAssistantMessage).filter(Boolean)
+          : []
+      }));
+    return {
+      version: 1,
+      activeId: typeof parsed.activeId === "string" ? parsed.activeId : "",
+      expanded: Boolean(parsed.expanded),
+      sessions
+    };
+  } catch {
+    window.localStorage.removeItem(assistantStorageKey);
+    return defaultAssistantState();
+  }
+}
+
+function normalizeAssistantMessage(message) {
+  if (!message || typeof message.content !== "string") return null;
+  const role = ["user", "assistant", "system"].includes(message.role) ? message.role : "assistant";
+  return {
+    id: typeof message.id === "string" ? message.id : uniqueId("msg"),
+    role,
+    content: message.content.slice(0, 8000),
+    createdAt: message.createdAt || new Date().toISOString(),
+    status: ["loading", "error", "done"].includes(message.status) ? message.status : "done",
+    retryPrompt: typeof message.retryPrompt === "string" ? message.retryPrompt : ""
+  };
+}
+
+function defaultAssistantState() {
+  return { version: 1, activeId: "", expanded: false, sessions: [] };
+}
+
+function saveAssistantState() {
+  assistantState.sessions = assistantState.sessions.slice(0, assistantMaxSessions).map((session) => ({
+    ...session,
+    messages: session.messages.slice(-assistantMaxMessages)
+  }));
+  try {
+    window.localStorage.setItem(assistantStorageKey, JSON.stringify(assistantState));
+  } catch {
+    const active = activeAssistantSession();
+    assistantState.sessions = active ? [active] : [];
+    try {
+      window.localStorage.setItem(assistantStorageKey, JSON.stringify(assistantState));
+      showToast("会话存储空间不足，已仅保留当前会话。");
+    } catch {
+      showToast("浏览器无法保存会话，本次刷新后记录可能丢失。");
+    }
+  }
+}
+
+function ensureAssistantSession() {
+  const active = activeAssistantSession();
+  if (active && !active.archived) return active;
+  return createAssistantSession(false);
+}
+
+function createAssistantSession(announce = true) {
+  const now = new Date().toISOString();
+  const session = {
+    id: uniqueId("chat"),
+    title: "新诊断对话",
+    prestoSessionId: "",
+    archived: false,
+    createdAt: now,
+    updatedAt: now,
+    messages: []
+  };
+  assistantState.sessions.unshift(session);
+  assistantState.activeId = session.id;
+  saveAssistantState();
+  if (announce) showToast("已创建新对话。");
+  return session;
+}
+
+function activeAssistantSession() {
+  return assistantState.sessions.find((session) => session.id === assistantState.activeId) || null;
+}
+
+function toggleAssistantHistory() {
+  assistantArchive.open = !assistantArchive.open;
+  syncAssistantHistoryView();
+}
+
+function closeAssistantHistory() {
+  assistantArchive.open = false;
+  syncAssistantHistoryView();
+}
+
+function restoreAssistantSession(sessionID) {
+  const session = assistantState.sessions.find((item) => item.id === sessionID);
+  if (!session) return;
+  session.archived = false;
+  session.updatedAt = new Date().toISOString();
+  assistantState.activeId = session.id;
+  assistantArchive.open = false;
+  saveAssistantState();
+  renderAssistant();
+  setAssistantExpanded(true);
+  showToast("已打开历史对话。");
+}
+
+function deleteAssistantSession(sessionID) {
+  const before = assistantState.sessions.length;
+  assistantState.sessions = assistantState.sessions.filter((session) => session.id !== sessionID);
+  if (assistantState.sessions.length === before) return;
+  if (assistantState.activeId === sessionID) {
+    assistantState.activeId = "";
+    ensureAssistantSession();
+  }
+  saveAssistantState();
+  renderAssistant();
+  showToast("历史对话已删除。");
+}
+
+function renderAssistant() {
+  ensureAssistantSession();
+  setAssistantExpanded(assistantState.expanded);
+  renderAssistantArchive();
+  renderAssistantMessages();
+  renderAssistantSuggestions();
+  updateAssistantContext();
+  updateAssistantInputMeta();
+  assistantSend.disabled = assistantBusy;
+  assistantNewSession.disabled = assistantBusy;
+  assistantArchiveSession.disabled = assistantBusy;
+  syncAssistantHistoryView();
+}
+
+function syncAssistantHistoryView() {
+  const isHistory = Boolean(assistantArchive.open);
+  assistant.classList.toggle("is-history-view", isHistory);
+  assistantArchiveSession.setAttribute("aria-expanded", String(isHistory));
+  assistantTitle.textContent = isHistory ? "历史对话" : "AI助手";
+}
+
+function renderAssistantArchive() {
+  const history = assistantState.sessions.filter((session) => session.id !== assistantState.activeId);
+  assistantArchiveCount.textContent = String(history.length);
+  assistantArchiveList.innerHTML = history.length
+    ? history.map((session) => `
+      <div class="assistant-archive-item">
+        <span title="${escapeAttribute(session.title)}">${escapeHTML(session.title || "历史对话")}</span>
+        <button type="button" data-restore-session="${escapeAttribute(session.id)}">打开</button>
+        <button type="button" class="assistant-delete-session" data-delete-session="${escapeAttribute(session.id)}" aria-label="删除历史对话">删除</button>
+      </div>
+    `).join("")
+    : `<div class="assistant-archive-empty">暂无历史对话。</div>`;
+}
+
+function renderAssistantMessages() {
+  const session = activeAssistantSession();
+  const messages = session?.messages || [];
+  if (messages.length === 0) {
+    assistantMessages.innerHTML = `<div class="assistant-empty">${diagnosis ? "继续追问诊断结果。" : "生成诊断后可直接追问。"}</div>`;
+    return;
+  }
+  assistantMessages.innerHTML = messages.map((message) => {
+    const label = message.role === "user" ? "你" : message.role === "system" ? "系统" : "AI助手";
+    const stateClass = message.status === "loading" ? " is-loading" : message.status === "error" ? " is-error" : "";
+    return `
+      <article class="assistant-message is-${escapeAttribute(message.role)}${stateClass}">
+        <b>${escapeHTML(label)} · ${formatTime(message.createdAt)}</b>
+        <div class="assistant-bubble">${escapeHTML(message.content)}</div>
+        ${message.status === "error" && message.retryPrompt ? `<button type="button" class="assistant-retry" data-retry-message="${escapeAttribute(message.id)}">重试这条问题</button>` : ""}
+      </article>
+    `;
+  }).join("");
+  assistantMessages.scrollTop = assistantMessages.scrollHeight;
+}
+
+function renderAssistantSuggestions() {
+  const suggestions = diagnosis ? [
+    "我最应该优先补强哪一项能力？",
+    "根据当前结果，推荐岗位为什么排第一？",
+    "把 30 天路径压缩成本周行动清单。"
+  ] : [
+    "我应该上传哪些材料才能得到更准的诊断？",
+    "成绩单是必传的吗？",
+    "诊断完成后我可以追问哪些问题？"
+  ];
+  assistantSuggestions.innerHTML = suggestions.map((text) => `
+    <button type="button" data-suggestion="${escapeAttribute(text)}">${escapeHTML(text)}</button>
+  `).join("");
+}
+
+function updateAssistantContext() {
+  if (!assistantContext) return;
+  const hasDiagnosis = Boolean(diagnosis?.ability_profile || diagnosis?.matching_result || diagnosis?.path_plan);
+  const label = hasDiagnosis ? "已接入诊断" : diagnosisEvents ? "诊断生成中" : "等待诊断";
+  const pillClass = hasDiagnosis ? "is-real" : diagnosisEvents ? "is-warning" : "is-warning";
+  const detail = hasDiagnosis
+    ? assistantContextSummary()
+    : "生成诊断后，助手会把能力画像、岗位匹配和路径规划作为回答上下文。";
+  assistantContext.innerHTML = `
+    <span class="status-pill ${pillClass}">${escapeHTML(label)}</span>
+    <p>${escapeHTML(detail)}</p>
+  `;
+  updateAssistantRailStatus(hasDiagnosis ? "可追问" : assistantBusy ? "生成中" : "待机");
+}
+
+function updateAssistantInputMeta() {
+  const length = assistantInput.value.length;
+  assistantInputMeta.textContent = length ? `${length}/${assistantPromptLimit}` : `最多 ${assistantPromptLimit} 字`;
+  assistantInputMeta.style.color = length > assistantPromptLimit * 0.9 ? "var(--danger)" : "";
+}
+
+function setAssistantExpanded(expanded) {
+  assistantState.expanded = expanded;
+  assistant.classList.toggle("is-collapsed", !expanded);
+  document.body.classList.toggle("assistant-expanded", expanded);
+  assistantToggle.setAttribute("aria-expanded", String(expanded));
+  saveAssistantState();
+}
+
+async function sendAssistantMessage(promptOverride = "") {
+  const session = ensureAssistantSession();
+  const prompt = String(promptOverride || assistantInput.value).trim();
+  if (!prompt) {
+    showToast("请输入要询问的问题。");
+    assistantInput.focus();
+    return;
+  }
+  if (prompt.length > assistantPromptLimit) {
+    showToast("问题超过 1200 字，请先压缩。");
+    return;
+  }
+  if (assistantBusy) return;
+
+  assistantBusy = true;
+  assistantSend.disabled = true;
+  assistantInput.disabled = true;
+  updateAssistantRailStatus("生成中");
+  const now = new Date().toISOString();
+  session.messages.push({ id: uniqueId("msg"), role: "user", content: prompt, createdAt: now, status: "done" });
+  const loadingID = uniqueId("msg");
+  session.messages.push({ id: loadingID, role: "assistant", content: "正在结合当前诊断结果生成回答。", createdAt: now, status: "loading", retryPrompt: prompt });
+  session.title = titleForPrompt(prompt);
+  session.updatedAt = now;
+  assistantInput.value = "";
+  saveAssistantState();
+  renderAssistant();
+
+  try {
+    const answer = await requestAssistantAnswer(session, prompt);
+    const loading = session.messages.find((message) => message.id === loadingID);
+    if (loading) {
+      loading.content = answer || "模型没有返回可用内容。";
+      loading.status = "done";
+      loading.retryPrompt = "";
+    }
+  } catch (error) {
+    const loading = session.messages.find((message) => message.id === loadingID);
+    if (loading) {
+      loading.content = assistantErrorMessage(error);
+      loading.status = "error";
+      loading.retryPrompt = prompt;
+    }
+  } finally {
+    session.updatedAt = new Date().toISOString();
+    assistantBusy = false;
+    assistantSend.disabled = false;
+    assistantInput.disabled = false;
+    saveAssistantState();
+    renderAssistant();
+  }
+}
+
+async function retryAssistantMessage(messageID) {
+  const session = activeAssistantSession();
+  const message = session?.messages.find((item) => item.id === messageID);
+  if (!message?.retryPrompt) return;
+  session.messages = session.messages.filter((item) => item.id !== messageID);
+  saveAssistantState();
+  await sendAssistantMessage(message.retryPrompt);
+}
+
+async function requestAssistantAnswer(session, prompt) {
+  assistantAbort = new AbortController();
+  const timeout = window.setTimeout(() => assistantAbort.abort(), 65000);
+  try {
+    const run = await runAssistantPrompt(session, prompt, true);
+    if (run.status === "failed") throw new Error(run.error || "model_failed");
+    return String(run.output || "").trim();
+  } finally {
+    window.clearTimeout(timeout);
+    assistantAbort = null;
+  }
+}
+
+async function runAssistantPrompt(session, prompt, allowSessionRepair) {
+  if (!session.prestoSessionId) {
+    const created = await fetchJSON("/api/presto/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ metadata: { app: "jobagent", surface: "llm-assistant" } }),
+      signal: assistantAbort.signal
+    });
+    session.prestoSessionId = created.id;
+  }
+  try {
+    return await fetchJSON(`/api/presto/sessions/${encodeURIComponent(session.prestoSessionId)}/runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: assistantPrompt(prompt) }),
+      signal: assistantAbort.signal
+    });
+  } catch (error) {
+    if (allowSessionRepair && error?.status === 404) {
+      session.prestoSessionId = "";
+      return runAssistantPrompt(session, prompt, false);
+    }
+    throw error;
+  }
+}
+
+async function fetchJSON(url, options) {
+  const response = await fetch(url, options);
+  const text = await response.text();
+  let data = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error("invalid_json");
+    }
+  }
+  if (!response.ok) {
+    const error = new Error(data.error || data.message || `http_${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+  return data;
+}
+
+function assistantPrompt(prompt) {
+  return [
+    "你是 Growth Lens 的AI助手。请使用中文回答，语气精确、冷静、可执行。",
+    "只基于页面诊断上下文和用户问题回答；无法确定时说明缺少哪些证据。",
+    "回答结构要求：先给结论，再给 2 到 4 条行动建议。不要编造未出现在上下文中的学校、成绩、证书或岗位事实。",
+    "",
+    "当前诊断上下文：",
+    assistantContextForModel(),
+    "",
+    "用户问题：",
+    prompt
+  ].join("\n");
+}
+
+function assistantContextForModel() {
+  if (!diagnosis) return "尚未生成诊断。用户可能仍在材料上传阶段。";
+  const profile = diagnosis.ability_profile || {};
+  const info = profile.basic_info || {};
+  const match = diagnosis.matching_result || {};
+  const topJobs = Array.isArray(profile.top5_matching_jobs) ? profile.top5_matching_jobs.slice(0, 5) : [];
+  const scores = Array.isArray(profile.four_dim_scores) ? profile.four_dim_scores : [];
+  const gaps = Array.isArray(match.gap_details) ? match.gap_details.slice(0, 5) : [];
+  const stages = Array.isArray(diagnosis.path_plan?.stages) ? diagnosis.path_plan.stages.slice(0, 3) : [];
+  return JSON.stringify({
+    basic_info: {
+      name: info.name || "",
+      school: info.school || "",
+      major: info.major || "",
+      degree: info.degree || "",
+      target_role: info.target_role || match.target_role || ""
+    },
+    scores,
+    top_jobs: topJobs,
+    matching: {
+      target_role: match.target_role || "",
+      overall_match: match.overall_match || "",
+      match_level: match.match_level || "",
+      gaps
+    },
+    path_stages: stages.map((stage) => ({
+      stage: stage.stage,
+      goal: stage.goal,
+      deliverable: stage.deliverable
+    })),
+    production_limitations: diagnosis.production_limitations || []
+  });
+}
+
+function assistantContextSummary() {
+  const profile = diagnosis?.ability_profile || {};
+  const info = profile.basic_info || {};
+  const match = diagnosis?.matching_result || {};
+  const role = match.target_role || info.target_role || profile.top5_matching_jobs?.[0]?.title || "推荐岗位";
+  const score = match.overall_match ? `${match.overall_match}%` : "待评分";
+  const name = info.name ? `${info.name}，` : "";
+  return `${name}${role}匹配度 ${score}。可追问能力短板、岗位理由和阶段任务。`;
+}
+
+function assistantErrorMessage(error) {
+  if (error?.name === "AbortError") return "模型响应超时，请稍后重试。";
+  if (error?.status === 503) return "Presto 服务未配置或不可用，请检查后端代理。";
+  if (error?.status === 400) return "请求内容无法被模型服务识别，请缩短问题后重试。";
+  if (error?.status === 429) return "模型请求过于频繁，请稍后重试。";
+  if (error?.status >= 500) return "模型服务暂时不可用，请稍后重试。";
+  return "无法连接 LLM 服务，请检查网络或后端状态。";
+}
+
+function titleForPrompt(prompt) {
+  const compact = prompt.replace(/\s+/g, " ").trim();
+  return compact.length > 24 ? `${compact.slice(0, 24)}...` : compact || "新诊断对话";
+}
+
+function formatTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "刚刚";
+  return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(date);
+}
+
+function uniqueId(prefix) {
+  if (window.crypto?.randomUUID) return `${prefix}_${window.crypto.randomUUID()}`;
+  return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+function updateAssistantRailStatus(status) {
+  assistantRailStatus.textContent = status;
+  const tooltip = `AI助手 · ${status}`;
+  assistantToggle.dataset.tooltip = tooltip;
+  assistantToggle.title = tooltip;
 }
 
 function downloadJSON(filename, value) {
