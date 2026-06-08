@@ -2643,23 +2643,31 @@ td {
 
 .toast {
   position: fixed;
-  right: 22px;
-  bottom: calc(var(--dock-h) + 22px);
+  right: 18px;
+  bottom: calc(var(--dock-h) + 16px);
   z-index: 40;
-  max-width: min(360px, calc(100vw - 44px));
-  border-radius: var(--radius-md);
-  background: var(--ink);
-  color: var(--bg);
-  padding: 12px 14px;
+  max-width: min(260px, calc(100vw - 36px));
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid color-mix(in oklch, var(--line) 72%, var(--primary-soft));
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--bg) 90%, var(--surface));
+  color: var(--ink);
+  padding: 6px 10px;
   opacity: 0;
   pointer-events: none;
-  transform: translateY(8px);
-  transition: opacity 180ms var(--ease), transform 180ms var(--ease);
+  font-size: 0.76rem;
+  font-weight: 750;
+  line-height: 1.25;
+  box-shadow: 0 6px 14px oklch(0.24 0.04 255.9 / 0.08);
+  transform: translateY(6px) scale(0.98);
+  transition: opacity 150ms var(--ease), transform 150ms var(--ease);
 }
 
 .toast.is-visible {
   opacity: 1;
-  transform: translateY(0);
+  transform: translateY(0) scale(1);
 }
 
 .llm-assistant {
@@ -3761,6 +3769,104 @@ td {
 .assistant-composer:has(textarea:disabled) {
   border-color: var(--line);
   background: color-mix(in oklch, var(--surface) 70%, var(--bg));
+}
+
+.assistant-evidence-tray {
+  min-width: 0;
+  padding: 0 2px 3px;
+}
+
+.assistant-evidence-tray[hidden] {
+  display: none;
+}
+
+.assistant-evidence-chip {
+  min-width: 0;
+  max-width: 100%;
+  min-height: 34px;
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid color-mix(in oklch, var(--primary) 18%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in oklch, var(--surface) 82%, var(--primary-soft));
+  color: var(--ink);
+  padding: 4px 5px 4px 4px;
+}
+
+.assistant-evidence-icon {
+  width: 26px;
+  height: 26px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--primary-strong);
+  font-size: 0.78rem;
+  font-weight: 850;
+  line-height: 1;
+}
+
+.assistant-evidence-copy {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.assistant-evidence-copy span,
+.assistant-evidence-score {
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-weight: 750;
+  line-height: 1.1;
+}
+
+.assistant-evidence-copy strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 0.78rem;
+  font-weight: 800;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assistant-evidence-score {
+  min-height: 22px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--bg) 78%, var(--surface));
+  padding: 0 7px;
+  white-space: nowrap;
+}
+
+.assistant-composer .assistant-evidence-chip button {
+  width: 24px;
+  min-width: 24px;
+  min-height: 24px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  padding: 0;
+  font-size: 1rem;
+  font-weight: 800;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.assistant-composer .assistant-evidence-chip button:hover,
+.assistant-composer .assistant-evidence-chip button:focus-visible {
+  background: var(--bg);
+  color: var(--danger);
+}
+
+.assistant-composer .assistant-evidence-chip button:focus-visible {
+  outline: 2px solid var(--accent-soft);
+  outline-offset: 2px;
 }
 
 .assistant-composer textarea {

@@ -20,6 +20,7 @@ import (
 )
 
 const defaultDiagnosisTimeout = 120 * time.Second
+const defaultJobMatchingTimeout = 180 * time.Second
 const defaultDiagnosisTempRetention = 2 * time.Hour
 
 type JobStore struct {
@@ -263,6 +264,14 @@ func (s Server) handleDiagnosisJob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleDiagnosisBenchmark(w, r, job)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "matching" {
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, http.MethodPost)
+			return
+		}
+		s.handleDiagnosisMatching(w, job)
 		return
 	}
 	if len(parts) == 1 && r.Method == http.MethodGet {
@@ -581,9 +590,32 @@ func (s Server) handleDiagnosisBenchmark(w http.ResponseWriter, r *http.Request,
 		Message: "Benchmark 已返回，证据卡片已补充 impact_factor，雷达图已补充专业六维基线",
 		Data:    map[string]any{"ability_profile": diagnosis.AbilityProfile},
 	})
-	diagnosis, matchingErr := s.runJobMatchingStage(ctx, job, diagnosis)
+	s.runJobMatchingStageAndWrite(w, job, diagnosis)
+}
+
+func (s Server) handleDiagnosisMatching(w http.ResponseWriter, job *DiagnosisJob) {
+	diagnosis := job.CurrentDiagnosis()
+	if diagnosis.AbilityProfile.BenchmarkStatus == "benchmarking" || diagnosis.AbilityProfile.MajorBaselineStatus == "benchmarking" {
+		writeError(w, http.StatusConflict, "Benchmark 仍在运行，暂不能重跑岗位匹配")
+		return
+	}
+	if strings.TrimSpace(diagnosis.AbilityProfile.BasicInfo.ResumeStatus) == "" && strings.TrimSpace(diagnosis.AbilityProfile.BasicInfo.Name) == "" {
+		writeError(w, http.StatusConflict, "能力画像尚未生成，暂不能启动岗位匹配")
+		return
+	}
+	s.runJobMatchingStageAndWrite(w, job, diagnosis)
+}
+
+func (s Server) runJobMatchingStageAndWrite(w http.ResponseWriter, job *DiagnosisJob, diagnosis Diagnosis) {
+	matchingCtx, cancel := context.WithTimeout(context.Background(), jobMatchingTimeout())
+	defer cancel()
+	diagnosis, matchingErr := s.runJobMatchingStage(matchingCtx, job, diagnosis)
 	if matchingErr != nil {
-		diagnosis.ProductionLimitations = append(diagnosis.ProductionLimitations, "Job Matching 失败，岗位推荐和匹配雷达未生成，可重新生成或稍后重试。")
+		log.Printf("diagnosis %s job matching failed: %v", job.ID, matchingErr)
+		diagnosis.ProductionLimitations = addProductionLimitationOnce(
+			diagnosis.ProductionLimitations,
+			"Job Matching 失败，岗位推荐和匹配雷达未生成，可点击匹配阶段继续或稍后重试。",
+		)
 		job.SetDiagnosis(diagnosis)
 		job.Emit(DiagnosisEvent{
 			Type:    "step.update",
@@ -593,6 +625,7 @@ func (s Server) handleDiagnosisBenchmark(w http.ResponseWriter, r *http.Request,
 			Data: map[string]any{
 				"ability_profile":        diagnosis.AbilityProfile,
 				"production_limitations": diagnosis.ProductionLimitations,
+				"matching_error":         matchingErr.Error(),
 				"error":                  matchingErr.Error(),
 			},
 		})
@@ -603,14 +636,17 @@ func (s Server) handleDiagnosisBenchmark(w http.ResponseWriter, r *http.Request,
 		})
 		return
 	}
+	diagnosis.ProductionLimitations = withoutJobMatchingFailureLimitations(diagnosis.ProductionLimitations)
+	job.SetDiagnosis(diagnosis)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ability_profile":  diagnosis.AbilityProfile,
-		"matching_result":  diagnosis.MatchingResult,
-		"top_jobs":         diagnosis.AbilityProfile.TopJobs,
-		"generated_at":     diagnosis.GeneratedAt,
-		"match_generated":  true,
-		"matching_source":  diagnosis.MatchingResult.Source,
-		"job_matching_run": "Legato Job Matching Team via Presto",
+		"ability_profile":        diagnosis.AbilityProfile,
+		"matching_result":        diagnosis.MatchingResult,
+		"top_jobs":               diagnosis.AbilityProfile.TopJobs,
+		"production_limitations": diagnosis.ProductionLimitations,
+		"generated_at":           diagnosis.GeneratedAt,
+		"match_generated":        true,
+		"matching_source":        diagnosis.MatchingResult.Source,
+		"job_matching_run":       "Legato Job Matching Team via Presto",
 	})
 }
 
@@ -1343,6 +1379,19 @@ func itemBenchmarkMaxRequests() int {
 	return 5
 }
 
+func jobMatchingTimeout() time.Duration {
+	value := strings.TrimSpace(os.Getenv("JOB_MATCHING_TIMEOUT_SECONDS"))
+	if value == "" {
+		return defaultJobMatchingTimeout
+	}
+	seconds, err := strconv.Atoi(value)
+	if err != nil || seconds <= 0 {
+		log.Printf("invalid JOB_MATCHING_TIMEOUT_SECONDS=%q, using %s", value, defaultJobMatchingTimeout)
+		return defaultJobMatchingTimeout
+	}
+	return time.Duration(seconds) * time.Second
+}
+
 func diagnosisTimeout() time.Duration {
 	value := strings.TrimSpace(os.Getenv("DIAGNOSIS_TIMEOUT_SECONDS"))
 	if value == "" {
@@ -1354,6 +1403,26 @@ func diagnosisTimeout() time.Duration {
 		return defaultDiagnosisTimeout
 	}
 	return time.Duration(seconds) * time.Second
+}
+
+func addProductionLimitationOnce(limitations []string, message string) []string {
+	for _, item := range limitations {
+		if item == message {
+			return limitations
+		}
+	}
+	return append(limitations, message)
+}
+
+func withoutJobMatchingFailureLimitations(limitations []string) []string {
+	out := make([]string, 0, len(limitations))
+	for _, item := range limitations {
+		if strings.Contains(item, "Job Matching 失败") {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 func pythonPath(root string) string {

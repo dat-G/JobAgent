@@ -48,6 +48,28 @@ func TestItemBenchmarkMaxRequestsUsesEnv(t *testing.T) {
 	}
 }
 
+func TestJobMatchingTimeoutUsesDedicatedEnv(t *testing.T) {
+	t.Setenv("JOB_MATCHING_TIMEOUT_SECONDS", "240")
+
+	if got := jobMatchingTimeout(); got.Seconds() != 240 {
+		t.Fatalf("expected job matching timeout 240s, got %s", got)
+	}
+}
+
+func TestJobMatchingFailureLimitationsAreDeduplicatedAndCleared(t *testing.T) {
+	message := "Job Matching 失败，岗位推荐和匹配雷达未生成，可点击匹配阶段继续或稍后重试。"
+	limitations := addProductionLimitationOnce([]string{"其他限制"}, message)
+	limitations = addProductionLimitationOnce(limitations, message)
+
+	if got := len(limitations); got != 2 {
+		t.Fatalf("expected deduplicated limitations length 2, got %d", got)
+	}
+	cleared := withoutJobMatchingFailureLimitations(limitations)
+	if got := len(cleared); got != 1 || cleared[0] != "其他限制" {
+		t.Fatalf("expected only unrelated limitation to remain, got %#v", cleared)
+	}
+}
+
 func TestRunLegatoJobMatchingTeamStreamsPrestoAgents(t *testing.T) {
 	var mu sync.Mutex
 	sessionAgents := map[string]string{}

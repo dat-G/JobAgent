@@ -26,6 +26,7 @@ const assistantMessages = document.querySelector("#assistantMessages");
 const assistantSuggestions = document.querySelector("#assistantSuggestions");
 const assistantContext = document.querySelector("#assistantContext");
 const assistantForm = document.querySelector("#assistantForm");
+const assistantEvidenceTray = document.querySelector("#assistantEvidenceTray");
 const assistantInput = document.querySelector("#assistantInput");
 const assistantInputMeta = document.querySelector("#assistantInputMeta");
 const assistantSend = document.querySelector("#assistantSend");
@@ -39,9 +40,13 @@ const assistantPromptLimit = 1200;
 let diagnosis = null;
 let resumeReady = false;
 let toastTimer = 0;
+let runDetailTimer = 0;
+let runDetailLastUpdate = 0;
+let runDetailPendingText = "";
 let diagnosisEvents = null;
 let currentJobId = "";
 let benchmarkRequestInFlight = false;
+let matchingRequestInFlight = false;
 let baseJobDone = false;
 let failedRunStep = "";
 let firstResultRevealed = false;
@@ -105,6 +110,62 @@ const runStepDetails = {
   path: "路径规划 Agent 正在生成阶段目标和周任务。",
   outputs: "导出 Agent 正在整理结构化输出。"
 };
+
+function setRunDetail(message, options = {}) {
+  const detail = document.querySelector("#runDetail");
+  if (!detail) return;
+  const text = formatAgentDisplayText(message || "正在生成诊断结果。");
+  const immediate = Boolean(options.immediate);
+  const minInterval = Number(options.minInterval || 900);
+  if (immediate) {
+    window.clearTimeout(runDetailTimer);
+    runDetailTimer = 0;
+    runDetailPendingText = "";
+    runDetailLastUpdate = Date.now();
+    if (detail.textContent !== text) detail.textContent = text;
+    return;
+  }
+  if (detail.textContent === text || runDetailPendingText === text) return;
+  window.clearTimeout(runDetailTimer);
+  runDetailTimer = 0;
+  const wait = Math.max(0, minInterval - (Date.now() - runDetailLastUpdate));
+  runDetailPendingText = text;
+  runDetailTimer = window.setTimeout(() => {
+    runDetailLastUpdate = Date.now();
+    if (runDetailPendingText && detail.textContent !== runDetailPendingText) {
+      detail.textContent = runDetailPendingText;
+    }
+    runDetailPendingText = "";
+    runDetailTimer = 0;
+  }, wait);
+}
+
+function runDetailForDiagnosisEvent(event, data = {}) {
+  if (data.agent_team_event) return agentTeamDockSummary(data.agent_team_event);
+  return event.message || runStepDetails[event.step] || "正在生成诊断结果。";
+}
+
+function agentTeamDockSummary(rawEvent) {
+  const event = normalizeAgentTeamEvent(rawEvent);
+  const group = agentStreamGroupForEvent(event);
+  const config = agentStreamPhaseConfig(group);
+  if (event.status === "failed") {
+    const agent = event.agent && event.agent !== "Agent" ? event.agent : config.label;
+    return `${agent} 分析失败，详细事件已收纳到 AI 助手。`;
+  }
+  if (group === "planning") {
+    if (event.status === "done") return "Adaptive Planner 已完成任务拆解，正在启动多视角 Agent Team。";
+    return "Adaptive Planner 正在拆解简历复杂度，详细事件已收纳到 AI 助手。";
+  }
+  if (group === "synthesis") {
+    if (event.status === "done") return "Synthesis Arbiter 已完成综合裁决，正在整理岗位匹配结果。";
+    return "Synthesis Arbiter 正在综合多视角结论，详细事件已收纳到 AI 助手。";
+  }
+  const total = event.agentTotal || event.agentCount || 0;
+  const index = event.agentIndex && total ? `（${event.agentIndex}/${total}）` : "";
+  if (event.status === "done") return `${event.agent || "Agent"}${index} 已完成，Agent Team 仍在并行分析。`;
+  return `Agent Team 正在并行分析${total ? ` ${total} 个视角` : ""}，详细日志已收纳到 AI 助手。`;
+}
 
 function createDiagnosisShell() {
   return {
@@ -265,7 +326,7 @@ function unlockDeck() {
   lockState.textContent = "简历已就绪";
   runButton.disabled = false;
   uploadMessage.textContent = "简历已上传，可以生成诊断。";
-  document.querySelector("#runDetail").textContent = "材料已就绪，点击生成诊断后会显示实时进度。";
+  setRunDetail("材料已就绪，点击生成诊断后会显示实时进度。", { immediate: true });
   updateScrollGradient();
 }
 
@@ -368,7 +429,7 @@ function resetRunSteps() {
     setRunStepRetryable(item.dataset.runStep, false);
   });
   document.querySelector("#runStatus").textContent = "生成中";
-  document.querySelector("#runDetail").textContent = "正在创建诊断任务并启动 Agent。";
+  setRunDetail("正在创建诊断任务并启动 Agent。", { immediate: true });
   setRunProgress(0);
   syncAssistantAvailability();
 }
@@ -426,8 +487,10 @@ function markAssistantAgentTeamFailed(messageText) {
 }
 
 function setRunDone() {
+  failedRunStep = "";
+  matchingRequestInFlight = false;
   document.querySelector("#runStatus").textContent = "诊断已生成";
-  document.querySelector("#runDetail").textContent = "诊断完成，可以查看和导出结果。";
+  setRunDetail("诊断完成，可以查看和导出结果。", { immediate: true });
   document.querySelector(".generation-dock").classList.remove("is-running");
   setRunProgress(100);
   runButton.disabled = false;
@@ -439,7 +502,7 @@ function setRunDone() {
 
 function setRunFailed(message) {
   document.querySelector("#runStatus").textContent = "诊断失败";
-  document.querySelector("#runDetail").textContent = formatAgentDisplayText(message || "Legato 必需解析失败，请检查材料或后端服务。");
+  setRunDetail(message || "Legato 必需解析失败，请检查材料或后端服务。", { immediate: true });
   document.querySelector(".generation-dock").classList.remove("is-running");
   runButton.disabled = false;
   runButton.textContent = "重新生成";
@@ -449,9 +512,9 @@ function setRunFailed(message) {
 
 function setRunWaitingForBenchmark() {
   document.querySelector("#runStatus").textContent = "生成中";
-  document.querySelector("#runDetail").textContent = baseJobDone
+  setRunDetail(baseJobDone
     ? "基础流程已完成，等待 Item Benchmark 返回六维分布。"
-    : "Item Benchmark 正在评估 Impact 和六维分布。";
+    : "Item Benchmark 正在评估 Impact 和六维分布。", { immediate: true });
   document.querySelector(".generation-dock").classList.add("is-running");
   runButton.disabled = true;
   runButton.textContent = "生成中";
@@ -472,7 +535,7 @@ function connectDiagnosisEvents(eventsUrl) {
   diagnosisEvents.addEventListener("job.started", (event) => {
     const payload = JSON.parse(event.data);
     document.querySelector("#runStatus").textContent = "生成中";
-    document.querySelector("#runDetail").textContent = formatAgentDisplayText(payload.message || "异步诊断已开始。");
+    setRunDetail(payload.message || "异步诊断已开始。", { immediate: true });
   });
   diagnosisEvents.addEventListener("job.done", (event) => {
     const payload = JSON.parse(event.data);
@@ -518,15 +581,19 @@ function connectDiagnosisEvents(eventsUrl) {
 
 function handleDiagnosisEvent(event) {
   markAgentStep(event.step, event.status);
+  const data = event.data || {};
+  const hasAgentTeamEvent = Boolean(data.agent_team_event);
   const statusText = event.status === "running"
     ? "生成中"
     : event.status === "failed"
       ? `失败：${stepLabel(event.step)}`
       : `已完成：${stepLabel(event.step)}`;
   document.querySelector("#runStatus").textContent = statusText;
-  document.querySelector("#runDetail").textContent = formatAgentDisplayText(event.message || runStepDetails[event.step] || "正在生成诊断结果。");
+  setRunDetail(runDetailForDiagnosisEvent(event, data), {
+    immediate: event.status !== "running" || !hasAgentTeamEvent,
+    minInterval: hasAgentTeamEvent ? 1200 : 900
+  });
 
-  const data = event.data || {};
   if (data.agent_team_event) {
     handleAgentTeamChatEvent(data.agent_team_event);
   }
@@ -541,6 +608,13 @@ function handleDiagnosisEvent(event) {
       setBenchmarkRunFailed(formatAgentDisplayText(data.error || event.message));
     }
     unlockModule("profile");
+  }
+  if (data.production_limitations && diagnosis) {
+    diagnosis.production_limitations = data.production_limitations;
+    renderLimitations(data.production_limitations);
+  }
+  if (event.step === "matching" && event.status === "failed") {
+    setMatchingRunFailed(formatAgentDisplayText(data.matching_error || data.error || event.message));
   }
   if (data.matching_result) {
     diagnosis = diagnosis || createDiagnosisShell();
@@ -566,11 +640,6 @@ function handleDiagnosisEvent(event) {
     diagnosis.backend_requirements = data.backend_requirements;
     renderRequirements(data.backend_requirements);
   }
-  if (data.production_limitations && diagnosis) {
-    diagnosis.production_limitations = data.production_limitations;
-    renderLimitations(data.production_limitations);
-  }
-
   if (event.status === "done") {
     if (event.step === "profile") unlockModule("profile");
     if (event.step === "matching") unlockModule("matching");
@@ -954,6 +1023,10 @@ function retryFromFailedStep(step) {
     retryItemBenchmark();
     return;
   }
+  if (step === "matching") {
+    retryJobMatching();
+    return;
+  }
   showToast("该失败阶段暂不支持局部继续，请重新生成诊断。");
 }
 
@@ -961,6 +1034,7 @@ function resetResultModules() {
   diagnosis = null;
   currentJobId = "";
   benchmarkRequestInFlight = false;
+  matchingRequestInFlight = false;
   firstResultRevealed = false;
   Object.keys(moduleLocks).forEach((module) => {
     moduleLocks[module] = false;
@@ -1911,11 +1985,23 @@ function maybeRequestItemBenchmark(profile, options = {}) {
         diagnosis.ability_profile.top5_matching_jobs = payload.top_jobs;
         renderTopJobs(payload.top_jobs);
       }
+      if (payload.production_limitations) {
+        diagnosis.production_limitations = payload.production_limitations;
+        renderLimitations(payload.production_limitations);
+      }
       if (payload.ability_profile.benchmark_status === "failed" || payload.error) {
         setBenchmarkRunFailed(payload.error);
         return;
       }
       markAgentStep("profile", "done");
+      if (payload.matching_error) {
+        setMatchingRunFailed(payload.matching_error);
+        return;
+      }
+      if (payload.matching_result || payload.match_generated) {
+        markAgentStep("matching", "done");
+        unlockModule("matching");
+      }
       if (baseJobDone) setRunDone();
     })
     .catch((error) => {
@@ -1965,13 +2051,29 @@ function setBenchmarkRunFailed(errorMessage = "") {
   markAgentStep("profile", "failed");
   setRunStepRetryable("profile", true);
   document.querySelector("#runStatus").textContent = "失败：能力画像";
-  document.querySelector("#runDetail").textContent = errorMessage
+  setRunDetail(errorMessage
     ? `Item Benchmark 失败：${errorMessage}。点击下方红色“画像”继续。`
-    : "Item Benchmark 失败，点击下方红色“画像”从失败处继续。";
+    : "Item Benchmark 失败，点击下方红色“画像”从失败处继续。", { immediate: true });
   document.querySelector(".generation-dock").classList.remove("is-running");
   runButton.disabled = false;
   runButton.textContent = "重新生成";
   setAssistantExpanded(false, { silent: true });
+  syncAssistantAvailability();
+}
+
+function setMatchingRunFailed(errorMessage = "") {
+  failedRunStep = "matching";
+  matchingRequestInFlight = false;
+  assistantAgentStreamActive = false;
+  markAgentStep("matching", "failed");
+  setRunStepRetryable("matching", true);
+  document.querySelector("#runStatus").textContent = "失败：岗位匹配";
+  setRunDetail(errorMessage
+    ? `Job Matching 失败：${errorMessage}。点击下方红色“匹配”继续。`
+    : "Job Matching 失败，点击下方红色“匹配”从失败处继续。", { immediate: true });
+  document.querySelector(".generation-dock").classList.remove("is-running");
+  runButton.disabled = false;
+  runButton.textContent = "重新生成";
   syncAssistantAvailability();
 }
 
@@ -1984,6 +2086,74 @@ function retryItemBenchmark() {
   setRunStepRetryable("profile", false);
   showToast("正在从 Item Benchmark 继续。");
   maybeRequestItemBenchmark(diagnosis.ability_profile, { force: true });
+}
+
+function retryJobMatching() {
+  if (!currentJobId || !diagnosis?.ability_profile) {
+    showToast("没有可继续的诊断任务，请重新生成。");
+    return;
+  }
+  if (matchingRequestInFlight) return;
+  matchingRequestInFlight = true;
+  failedRunStep = "";
+  assistantAgentStreamActive = false;
+  setRunStepRetryable("matching", false);
+  document.querySelector(`[data-run-step="matching"]`)?.classList.remove("is-done", "is-failed");
+  markAgentStep("matching", "running");
+  document.querySelector("#runStatus").textContent = "生成中";
+  setRunDetail("正在从岗位匹配继续，Legato Job Matching Team 正在重新生成推荐。", { immediate: true });
+  document.querySelector(".generation-dock").classList.add("is-running");
+  runButton.disabled = true;
+  runButton.textContent = "生成中";
+
+  fetch(`/api/diagnosis/${encodeURIComponent(currentJobId)}/matching`, {
+    method: "POST"
+  })
+    .then((response) => {
+      if (!response.ok) {
+        const error = new Error("Job Matching request failed");
+        error.status = response.status;
+        throw error;
+      }
+      return response.json();
+    })
+    .then((payload) => {
+      diagnosis = diagnosis || createDiagnosisShell();
+      if (payload.ability_profile) {
+        diagnosis.ability_profile = payload.ability_profile;
+        renderBasicInfo(diagnosis);
+        renderAbilityRadar(payload.ability_profile);
+        renderResumeEvidence(payload.ability_profile);
+      }
+      if (payload.production_limitations) {
+        diagnosis.production_limitations = payload.production_limitations;
+        renderLimitations(payload.production_limitations);
+      }
+      if (payload.matching_error || payload.error) {
+        setMatchingRunFailed(payload.matching_error || payload.error);
+        return;
+      }
+      if (payload.matching_result) {
+        diagnosis.matching_result = payload.matching_result;
+        renderMatching(payload.matching_result);
+        finalizeAgentTeamStreamFromMatchingPayload(payload);
+      }
+      if (payload.top_jobs) {
+        diagnosis.ability_profile.top5_matching_jobs = payload.top_jobs;
+        renderTopJobs(payload.top_jobs);
+      }
+      markAgentStep("matching", "done");
+      unlockModule("matching");
+      if (baseJobDone) setRunDone();
+    })
+    .catch((error) => {
+      setMatchingRunFailed(error?.status === 409 ? "Benchmark 仍在运行，暂不能重跑岗位匹配" : "");
+    })
+    .finally(() => {
+      matchingRequestInFlight = false;
+      updateAssistantContext();
+      renderAssistantSuggestions();
+    });
 }
 
 function isHybridBenchmarkGateOpen(status) {
@@ -2759,6 +2929,11 @@ function setupAssistant() {
     if (!button || assistantBusy || !isAssistantReady()) return;
     retryAssistantMessage(button.dataset.retryMessage);
   });
+  assistantEvidenceTray.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-clear-evidence-context]");
+    if (!button || assistantBusy) return;
+    clearAssistantFocusedEvidence();
+  });
   setupAssistantScrollbar(assistantMessages);
   setupAssistantScrollbar(assistantArchiveList);
   setupAssistantScrollbar(assistantSuggestions);
@@ -2803,6 +2978,7 @@ function loadAssistantState() {
         prestoSessionId: typeof session.prestoSessionId === "string" ? session.prestoSessionId : "",
         diagnosisJobId: typeof session.diagnosisJobId === "string" ? session.diagnosisJobId : "",
         diagnosisFileName: typeof session.diagnosisFileName === "string" ? session.diagnosisFileName : "",
+        focusedEvidence: normalizeFocusedEvidence(session.focusedEvidence),
         archived: Boolean(session.archived),
         createdAt: session.createdAt || new Date().toISOString(),
         updatedAt: session.updatedAt || new Date().toISOString(),
@@ -3036,12 +3212,14 @@ function ensureAssistantSession() {
 
 function createAssistantSession(announce = true, options = {}) {
   const now = new Date().toISOString();
+  assistantFocusedEvidence = null;
   const session = {
     id: uniqueId("chat"),
     title: String(options.title || "新诊断对话").slice(0, 80),
     prestoSessionId: "",
     diagnosisJobId: String(options.diagnosisJobId || ""),
     diagnosisFileName: String(options.diagnosisFileName || ""),
+    focusedEvidence: null,
     archived: false,
     createdAt: now,
     updatedAt: now,
@@ -3059,6 +3237,7 @@ function isEmptyAssistantSession(session) {
     session &&
     !session.diagnosisJobId &&
     !session.diagnosisFileName &&
+    !session.focusedEvidence &&
     (!Array.isArray(session.messages) || session.messages.length === 0)
   );
 }
@@ -3090,6 +3269,7 @@ function restoreAssistantSession(sessionID) {
   session.archived = false;
   session.updatedAt = new Date().toISOString();
   assistantState.activeId = session.id;
+  assistantFocusedEvidence = normalizeFocusedEvidence(session.focusedEvidence);
   assistantArchive.open = false;
   saveAssistantState();
   renderAssistant();
@@ -3123,28 +3303,26 @@ function addEvidenceToAssistant(kind, index) {
   assistantFocusedEvidence = evidence;
   const session = ensureAssistantSession();
   const now = new Date().toISOString();
-  const previous = session.messages[session.messages.length - 1];
-  if (previous?.streamType !== "evidence_context" || previous.focusEvidenceKey !== evidence.key) {
-    session.messages.push({
-      id: uniqueId("msg"),
-      role: "assistant",
-      content: assistantEvidenceContextMessage(evidence),
-      createdAt: now,
-      updatedAt: now,
-      status: "done",
-      retryPrompt: "",
-      streamType: "evidence_context",
-      focusEvidenceKey: evidence.key
-    });
-  }
+  session.focusedEvidence = evidence;
   session.updatedAt = now;
-  assistantInput.value = assistantEvidencePrompt(evidence);
   updateAssistantInputMeta();
   saveAssistantState();
   setAssistantExpanded(true);
   renderAssistant();
   assistantInput.focus();
   showToast("已加入聊天上下文。");
+}
+
+function clearAssistantFocusedEvidence() {
+  assistantFocusedEvidence = null;
+  const session = activeAssistantSession();
+  if (session) {
+    session.focusedEvidence = null;
+    session.updatedAt = new Date().toISOString();
+  }
+  saveAssistantState();
+  renderAssistant();
+  showToast("已移除重点证据。");
 }
 
 function evidenceContextByKey(kind, index) {
@@ -3191,6 +3369,77 @@ function evidenceDimensionSummary(item) {
   }));
 }
 
+function normalizeFocusedEvidence(evidence) {
+  if (!evidence || typeof evidence !== "object") return null;
+  const key = typeof evidence.key === "string" ? evidence.key.slice(0, 80) : "";
+  if (!key) return null;
+  const kind = evidence.kind === "award" || evidence.kind === "experience" ? evidence.kind : "experience";
+  return {
+    ...evidence,
+    key,
+    kind,
+    title: cleanDisplayText(evidence.title || (kind === "award" ? evidence.name || evidence.result : evidence.role || evidence.contribution)).slice(0, 120) || (kind === "award" ? "奖项与证书" : "经历证据"),
+    score_summary: evidence.score_summary && typeof evidence.score_summary === "object" ? evidence.score_summary : {},
+    dimension_summary: Array.isArray(evidence.dimension_summary) ? evidence.dimension_summary.slice(0, 8) : []
+  };
+}
+
+function focusedEvidenceForAssistant() {
+  const session = activeAssistantSession();
+  const focused = normalizeFocusedEvidence(session?.focusedEvidence) || normalizeFocusedEvidence(assistantFocusedEvidence);
+  assistantFocusedEvidence = focused;
+  if (session && focused && session.focusedEvidence !== focused) session.focusedEvidence = focused;
+  return focused;
+}
+
+function renderAssistantEvidenceTray() {
+  if (!assistantEvidenceTray) return;
+  const evidence = focusedEvidenceForAssistant();
+  assistantEvidenceTray.hidden = !evidence;
+  if (!evidence) {
+    assistantEvidenceTray.innerHTML = "";
+    return;
+  }
+  const typeLabel = assistantEvidenceTypeLabel(evidence);
+  const icon = assistantEvidenceIconLabel(evidence);
+  const score = assistantEvidenceCompactScore(evidence);
+  assistantEvidenceTray.innerHTML = `
+    <div class="assistant-evidence-chip" title="${escapeAttribute(evidence.title)}">
+      <span class="assistant-evidence-icon" aria-hidden="true">${escapeHTML(icon)}</span>
+      <span class="assistant-evidence-copy">
+        <span>${escapeHTML(typeLabel)}</span>
+        <strong>${escapeHTML(evidence.title)}</strong>
+      </span>
+      ${score ? `<span class="assistant-evidence-score">${escapeHTML(score)}</span>` : ""}
+      <button type="button" data-clear-evidence-context aria-label="移除重点证据" title="移除重点证据">×</button>
+    </div>
+  `;
+}
+
+function assistantEvidenceIconLabel(evidence) {
+  const title = cleanDisplayText(evidence?.title || "");
+  const first = [...title].find((char) => /\S/.test(char));
+  if (first) return first;
+  return evidence?.kind === "award" ? "证" : "项";
+}
+
+function assistantEvidenceTypeLabel(evidence) {
+  if (evidence?.kind === "award") return "证书/奖项";
+  const text = cleanDisplayText(`${evidence?.type || ""} ${evidence?.role || ""} ${evidence?.title || ""}`);
+  if (/实习|intern/i.test(text)) return "实习";
+  if (/项目|课题|project/i.test(text)) return "项目";
+  return "经历";
+}
+
+function assistantEvidenceCompactScore(evidence) {
+  const score = evidence?.score_summary || {};
+  const parts = [
+    score.level ? `L${score.level}` : "",
+    score.impact_factor ? `I${score.impact_factor}` : ""
+  ].filter(Boolean);
+  return parts.join(" · ");
+}
+
 function assistantEvidenceContextMessage(evidence) {
   const typeLabel = evidence.kind === "award" ? "奖项与证书" : "经历证据";
   const scoreParts = [
@@ -3209,13 +3458,6 @@ function assistantEvidenceContextMessage(evidence) {
   ].filter(Boolean).join("\n");
 }
 
-function assistantEvidencePrompt(evidence) {
-  const score = evidence.score_summary.level || evidence.score_summary.impact_factor
-    ? `Level ${evidence.score_summary.level || "未返回"}、Impact ${evidence.score_summary.impact_factor || "未返回"}`
-    : "当前评分";
-  return `请重点解释「${evidence.title}」为什么给出 ${score}，它对岗位匹配和后续补强有什么影响？`;
-}
-
 function isAssistantReady() {
   const allModulesReady = moduleLocks.profile && moduleLocks.matching && moduleLocks.path && moduleLocks.outputs;
   const benchmarkStatus = diagnosis?.ability_profile?.benchmark_status || "";
@@ -3224,6 +3466,7 @@ function isAssistantReady() {
     allModulesReady &&
     !diagnosisEvents &&
     !benchmarkRequestInFlight &&
+    !matchingRequestInFlight &&
     !failedRunStep &&
     benchmarkStatus !== "benchmarking" &&
     benchmarkStatus !== "failed"
@@ -3231,7 +3474,7 @@ function isAssistantReady() {
 }
 
 function isAssistantInspectable() {
-  return isAssistantReady() || assistantAgentStreamActive || Boolean(diagnosisEvents) || benchmarkRequestInFlight || Boolean(diagnosis);
+  return isAssistantReady() || assistantAgentStreamActive || Boolean(diagnosisEvents) || benchmarkRequestInFlight || matchingRequestInFlight || Boolean(diagnosis);
 }
 
 function syncAssistantAvailability() {
@@ -3266,7 +3509,7 @@ function syncAssistantAvailability() {
   } else if (inspectOnly) {
     updateAssistantRailStatus("生成中可查看");
   } else {
-    updateAssistantRailStatus(diagnosisEvents || benchmarkRequestInFlight ? "结果生成中" : "结果完成后可追问");
+    updateAssistantRailStatus(diagnosisEvents || benchmarkRequestInFlight || matchingRequestInFlight ? "结果生成中" : "结果完成后可追问");
   }
 }
 
@@ -3275,6 +3518,7 @@ function renderAssistant() {
   applyAssistantExpandedState(assistantState.expanded);
   renderAssistantArchive();
   renderAssistantMessages();
+  renderAssistantEvidenceTray();
   renderAssistantSuggestions();
   updateAssistantContext();
   updateAssistantInputMeta();
@@ -3623,7 +3867,7 @@ function renderAssistantSuggestions() {
 function updateAssistantContext() {
   if (!assistantContext) return;
   const ready = isAssistantReady();
-  const label = ready ? "可追问" : assistantAgentStreamActive ? "Agent Team 流式生成" : diagnosisEvents || benchmarkRequestInFlight || diagnosis ? "诊断生成中" : "等待诊断";
+  const label = ready ? "可追问" : assistantAgentStreamActive ? "Agent Team 流式生成" : diagnosisEvents || benchmarkRequestInFlight || matchingRequestInFlight || diagnosis ? "诊断生成中" : "等待诊断";
   const pillClass = ready ? "is-real" : "is-warning";
   assistantContext.setAttribute("aria-label", label);
   assistantContext.innerHTML = `<span class="status-pill ${pillClass}">${escapeHTML(label)}</span>`;
@@ -3809,7 +4053,7 @@ function assistantContextForModel() {
       goal: stage.goal,
       deliverable: stage.deliverable
     })),
-    focused_evidence: assistantFocusedEvidence || null,
+    focused_evidence: focusedEvidenceForAssistant(),
     production_limitations: diagnosis.production_limitations || []
   };
 }
@@ -3841,7 +4085,7 @@ function assistantExperienceContext(item) {
 
 function assistantHistoryForModel(session, currentPrompt) {
   const messages = (session?.messages || [])
-    .filter((message) => message.status === "done" && message.streamType !== "agent_team" && ["user", "assistant", "system"].includes(message.role) && message.content)
+    .filter((message) => message.status === "done" && !["agent_team", "evidence_context"].includes(message.streamType) && ["user", "assistant", "system"].includes(message.role) && message.content)
     .map((message) => ({ role: message.role, content: message.content }));
   if (messages.length > 0) {
     const last = messages[messages.length - 1];

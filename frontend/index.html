@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>学生成长诊断与路径规划</title>
     <meta name="description" content="上传简历后生成能力画像、岗位匹配分析和成长路径规划。">
-    <link rel="stylesheet" href="/styles.css?v=20260607-synthesis-terminal-input-rect-grid">
+    <link rel="stylesheet" href="/styles.css?v=20260608-evidence-context-chip">
   </head>
   <body>
     <header class="topbar" aria-label="页面导航">
@@ -361,6 +361,7 @@
 
           <form class="assistant-composer" id="assistantForm">
             <label class="sr-only" for="assistantInput">输入要询问AI助手的问题</label>
+            <div class="assistant-evidence-tray" id="assistantEvidenceTray" hidden></div>
             <textarea id="assistantInput" rows="3" maxlength="1200" placeholder="要求后续变更" enterkeyhint="send"></textarea>
             <div class="assistant-composer-footer">
               <span id="assistantInputMeta">最多 1200 字</span>
@@ -372,6 +373,6 @@
     </aside>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/app.js?v=20260607-synthesis-terminal-input-rect-grid"></script>
+    <script type="module" src="/app.js?v=20260608-evidence-context-chip"></script>
   </body>
 </html>

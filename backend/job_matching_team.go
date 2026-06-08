@@ -204,14 +204,27 @@ func runLegatoJobMatchingTeamWithClient(ctx context.Context, job *DiagnosisJob, 
 	}
 	reportWriter, err := runJobMatchingAgent(ctx, job, client, teamCtx, synthesisSpec)
 	if err != nil {
-		return nil, err
+		reportWriter, err = retrySynthesisArbiter(ctx, job, client, teamCtx, synthesisSpec, err)
+		if err != nil {
+			return nil, err
+		}
 	}
 	finalRaw := objectValue(reportWriter.Data["job_matching"])
 	if len(finalRaw) == 0 {
 		finalRaw = reportWriter.Data
 	}
 	if err := validateJobMatchingTeamOutput(finalRaw); err != nil {
-		return nil, err
+		reportWriter, err = retrySynthesisArbiter(ctx, job, client, teamCtx, synthesisSpec, err)
+		if err != nil {
+			return nil, err
+		}
+		finalRaw = objectValue(reportWriter.Data["job_matching"])
+		if len(finalRaw) == 0 {
+			finalRaw = reportWriter.Data
+		}
+		if err := validateJobMatchingTeamOutput(finalRaw); err != nil {
+			return nil, err
+		}
 	}
 
 	emitJobMatchingTeamEvent(job, "running", jobMatchingTeamEvent{
@@ -237,6 +250,33 @@ func runLegatoJobMatchingTeamWithClient(ctx context.Context, job *DiagnosisJob, 
 		Debug:      map[string]any{"agent_team": teamCtx, "agent_plan": plan},
 		SourcePath: "legato://resume/job_matching_team",
 	}, nil
+}
+
+func retrySynthesisArbiter(ctx context.Context, job *DiagnosisJob, client *prestoClient, teamCtx map[string]any, spec jobMatchingAgentSpec, cause error) (jobMatchingAgentResult, error) {
+	retryCtx := copyJobMatchingContext(teamCtx)
+	retryCtx["synthesis_retry_reason"] = cause.Error()
+	retryCtx["synthesis_retry_instruction"] = "Previous Synthesis Arbiter output failed backend parsing or validation. Return strict JSON only and exactly satisfy target_role, non-empty top_jobs, six student_radar dimensions, and six target_radar dimensions."
+	retrySpec := spec
+	retrySpec.Focus = spec.Focus + "；上一次输出未通过后端校验，本次必须只返回严格 JSON。"
+	emitJobMatchingTeamEvent(job, "running", jobMatchingTeamEvent{
+		AgentKey:        retrySpec.Key,
+		Agent:           retrySpec.Name,
+		AgentIndex:      retrySpec.AgentIndex,
+		AgentTotal:      retrySpec.AgentTotal,
+		Phase:           retrySpec.Phase,
+		Perspective:     retrySpec.Perspective,
+		ReasoningEffort: retrySpec.ReasoningEffort,
+		Focus:           retrySpec.Focus,
+		Status:          "running",
+		Message:         "Synthesis Arbiter 输出未通过校验，正在自动重试严格 JSON。",
+		Sequence:        retrySpec.Sequence,
+		Error:           cause.Error(),
+	})
+	result, err := runJobMatchingAgent(ctx, job, client, retryCtx, retrySpec)
+	if err != nil {
+		return result, fmt.Errorf("Synthesis Arbiter retry failed after initial error %q: %w", cause.Error(), err)
+	}
+	return result, nil
 }
 
 func (s Server) newPrestoClient() (*prestoClient, error) {
@@ -993,6 +1033,14 @@ func compactJSON(value any) string {
 		return "{}"
 	}
 	return string(raw)
+}
+
+func copyJobMatchingContext(ctx map[string]any) map[string]any {
+	out := make(map[string]any, len(ctx)+2)
+	for key, value := range ctx {
+		out[key] = value
+	}
+	return out
 }
 
 func marshalNoEscape(value any) ([]byte, error) {
