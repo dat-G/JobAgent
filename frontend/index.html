@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>学生成长诊断与路径规划</title>
     <meta name="description" content="上传简历后生成能力画像、岗位匹配分析和成长路径规划。">
-    <link rel="stylesheet" href="/styles.css?v=20260608-evidence-context-chip">
+    <link rel="stylesheet" href="/styles.css?v=20260608-matching-top-intro">
   </head>
   <body>
     <header class="topbar" aria-label="页面导航">
@@ -61,7 +61,7 @@
               <label class="file-drop" for="transcriptInput" id="transcriptDrop">
                 <span class="file-drop-main">
                   <strong>成绩单</strong>
-                  <span>用于课程与 GPA 证据补充</span>
+                  <span>可增强课程与 GPA 佐证</span>
                 </span>
                 <span class="file-state" id="transcriptState">可选</span>
                 <input id="transcriptInput" name="transcript" type="file" accept=".pdf,.png,.jpg,.jpeg,.doc,.docx,.xlsx,.xls">
@@ -90,7 +90,7 @@
           <div class="section-copy reveal">
             <p class="section-label">能力画像</p>
             <h2 id="profileTitle">基础信息与六维能力画像</h2>
-            <p>基础信息来自 Legato 解析；六维雷达由奖项、证书和经历的 Level、Impact 与六维分布聚合生成。</p>
+            <p>基础信息来自 Legato 解析；六维雷达只读取后端统一生成的 Legato Benchmark 能力画像。</p>
           </div>
 
           <div class="profile-grid">
@@ -165,9 +165,29 @@
             <div class="match-narrative">
               <span id="selectedJobLabel">首选岗位</span>
               <h3 id="selectedJobTitle">等待推荐</h3>
+              <div id="matchDecisionBadges" class="match-decision-badges" aria-label="岗位决策状态"></div>
               <p id="matchNarrative">Benchmark 完成后，Legato 会返回首选岗位、推荐理由和需要补齐的证据。</p>
               <div id="matchAgentNotes" class="agent-note-list"></div>
             </div>
+            <div class="match-focus-grid" aria-label="岗位匹配重点">
+              <article class="match-focus-item">
+                <span>核心依据</span>
+                <div id="matchPrimaryReason" class="match-focus-body">等待证据</div>
+              </article>
+              <article class="match-focus-item">
+                <span>主要短板</span>
+                <div id="matchMainGap" class="match-focus-body">等待差距分析</div>
+              </article>
+              <article class="match-focus-item">
+                <span>下一步证据</span>
+                <div id="matchNextProof" class="match-focus-body">等待补证据建议</div>
+              </article>
+              <article class="match-focus-item">
+                <span>门槛状态</span>
+                <div id="matchEducationGate" class="match-focus-body">等待门槛判断</div>
+              </article>
+            </div>
+            <div id="matchActionList" class="match-action-list" aria-label="可提升点"></div>
           </section>
 
           <section class="data-panel reveal matching-radar-panel" aria-labelledby="matchingRadarTitle">
@@ -179,6 +199,7 @@
               <div class="matching-radar-copy">
                 <div id="matchingRadarLegend" class="radar-legend"></div>
                 <p id="matchingRadarText">等待首选岗位目标能力雷达。</p>
+                <div id="matchingRadarInsights" class="matching-radar-insights" aria-label="六维短板与优势"></div>
               </div>
             </div>
           </section>
@@ -201,20 +222,7 @@
             <div class="panel-heading">
               <h3 id="gapTitle">差距明细</h3>
             </div>
-            <div class="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>能力项</th>
-                    <th>当前证据</th>
-                    <th>岗位要求</th>
-                    <th>建议动作</th>
-                    <th>级别</th>
-                  </tr>
-                </thead>
-                <tbody id="gapTable"></tbody>
-              </table>
-            </div>
+            <div id="gapCards" class="gap-card-list"></div>
           </section>
         </div>
       </section>
@@ -373,6 +381,6 @@
     </aside>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/app.js?v=20260608-evidence-context-chip"></script>
+    <script type="module" src="/app.js?v=20260608-matching-top-intro"></script>
   </body>
 </html>

@@ -56,34 +56,8 @@ let radarAnimationFrame = 0;
 let radarRenderState = null;
 
 const benchmarkDimensions = ["逻辑", "语言", "专业", "领导", "抗压", "成长"];
-const radarEvidenceGain = 1.0;
-const radarEvidenceDiminishThreshold = 0.65;
-const radarEvidenceTailThreshold = 0.7;
-const radarEvidenceTailGain = 0.04;
-const radarEvidenceSoftCap = 0.88;
 const radarVisualGamma = 0.86;
 const radarGridScores = [25, 50, 75, 100];
-const cappedEvidenceBucketRules = {
-  lowImpactAwardCertificate: { singleCap: 0.035, totalCap: 0.08 },
-  campusAward: { singleCap: 0.045, totalCap: 0.1 },
-  genericCampusRole: { singleCap: 0.045, totalCap: 0.1 },
-  untitledProject: { singleCap: 0.06, totalCap: 0.15 },
-  impactLow: { singleCap: 0.06, totalCap: 0.14 },
-  impactMedium: { singleCap: 0.1, totalCap: 0.24 },
-  impactHigh: { singleCap: 0.16, totalCap: 0.38 },
-  impactExceptional: { singleCap: 0.24, totalCap: 0.52 }
-};
-const schoolTierConfigs = {
-  T0: { label: "985/Top50", base: 68, noHighCap: 78, highCap: 92, exceptionalCap: 94, liftScale: 0.25 },
-  T1: { label: "211/双一流/Top150", base: 62, noHighCap: 72, highCap: 86, exceptionalCap: 88, liftScale: 0.28 },
-  T2: { label: "非双一流Top151-250", base: 52, noHighCap: 62, highCap: 76, exceptionalCap: 78, liftScale: 0.3 },
-  T3: { label: "普通本科", base: 46, noHighCap: 56, highCap: 68, exceptionalCap: 72, liftScale: 0.28 },
-  T4A: { label: "独立学院历史+较高学历", base: 45, noHighCap: 54, highCap: 66, exceptionalCap: 70, liftScale: 0.24 },
-  T4: { label: "独立学院/原三本", base: 38, noHighCap: 52, highCap: 60, exceptionalCap: 62, liftScale: 0.22 },
-  T5: { label: "专科", base: 34, noHighCap: 48, highCap: 56, exceptionalCap: 60, liftScale: 0.2 }
-};
-const academicPriorWeight = 0.28;
-const academicPriorFloorRatio = 0.85;
 let assistantState = loadAssistantState();
 let assistantBusy = false;
 let assistantAbort = null;
@@ -193,6 +167,7 @@ function createDiagnosisShell() {
       target_radar: [],
       report_sections: [],
       gap_details: [],
+      development_actions: [],
       recommendations: [],
       recommended_reasons: []
     },
@@ -603,7 +578,9 @@ function handleDiagnosisEvent(event) {
     renderBasicInfo(diagnosis);
     renderAbilityRadar(data.ability_profile);
     renderResumeEvidence(data.ability_profile);
-    maybeRequestItemBenchmark(data.ability_profile);
+    if (shouldAutoRequestItemBenchmark(data.ability_profile, event)) {
+      maybeRequestItemBenchmark(data.ability_profile);
+    }
     if (event.step === "profile" && event.status === "failed" && data.ability_profile.benchmark_status === "failed") {
       setBenchmarkRunFailed(formatAgentDisplayText(data.error || event.message));
     }
@@ -620,6 +597,9 @@ function handleDiagnosisEvent(event) {
     diagnosis = diagnosis || createDiagnosisShell();
     diagnosis.matching_result = data.matching_result;
     renderMatching(data.matching_result);
+    if (event.step === "matching" && event.status === "done") {
+      finalizeAgentTeamStreamFromMatchingPayload(data);
+    }
   }
   if (data.top_jobs) {
     diagnosis = diagnosis || createDiagnosisShell();
@@ -652,9 +632,11 @@ function handleDiagnosisEvent(event) {
 
 function handleAgentTeamChatEvent(event) {
   const normalized = normalizeAgentTeamEvent(event);
-  const teamTerminal = normalized.agentKey === "team" && (normalized.status === "done" || normalized.status === "failed");
+  const terminalStatus = normalized.status === "done" || normalized.status === "failed";
+  const streamTerminal = terminalStatus
+    && (normalized.agentKey === "team" || normalized.agentKey === "synthesis_arbiter" || normalized.phase === "final_synthesis");
   const isTokenDelta = normalized.tokenChannel === "content" && Boolean(normalized.tokenDelta);
-  assistantAgentStreamActive = !teamTerminal;
+  assistantAgentStreamActive = !streamTerminal;
   const session = ensureAssistantSession();
   const now = new Date().toISOString();
   const { message, created } = ensureAgentTeamStreamMessage(session, normalized);
@@ -683,7 +665,7 @@ function handleAgentTeamChatEvent(event) {
   }
   if (isTokenDelta && !isAgentStreamExpanded(message.agentStream, normalized.agentKey)) return;
   renderAssistant();
-  if (teamTerminal && baseJobDone && !benchmarkRequestInFlight) {
+  if (streamTerminal && baseJobDone && !benchmarkRequestInFlight) {
     if (normalized.status === "done" && !failedRunStep) setRunDone();
     closeDiagnosisEvents();
   }
@@ -1055,9 +1037,14 @@ function resetResultModules() {
   document.querySelector("#selectedJobTitle").textContent = "等待推荐";
   document.querySelector("#matchNarrative").textContent = "Benchmark 完成后，Legato 会返回首选岗位、推荐理由和需要补齐的证据。";
   document.querySelector("#matchAgentNotes").innerHTML = "";
+  document.querySelector("#matchPrimaryReason").textContent = "等待证据";
+  document.querySelector("#matchMainGap").textContent = "等待差距分析";
+  document.querySelector("#matchNextProof").textContent = "等待补证据建议";
+  document.querySelector("#matchEducationGate").textContent = "等待门槛判断";
+  document.querySelector("#matchActionList").innerHTML = "";
   renderMatchingRadar({});
   document.querySelector("#reportRows").innerHTML = "";
-  document.querySelector("#gapTable").innerHTML = "";
+  document.querySelector("#gapCards").innerHTML = "";
   document.querySelector("#pathStages").innerHTML = "";
   document.querySelector("#topJobs").innerHTML = "";
   document.querySelector("#matchingJobs").innerHTML = "";
@@ -1102,7 +1089,9 @@ function renderDiagnosis(data) {
   renderBasicInfo(data);
   renderAbilityRadar(data.ability_profile);
   renderResumeEvidence(data.ability_profile);
-  maybeRequestItemBenchmark(data.ability_profile);
+  if (shouldAutoRequestItemBenchmark(data.ability_profile)) {
+    maybeRequestItemBenchmark(data.ability_profile);
+  }
   renderMatching(data.matching_result);
   renderPath(data.path_plan);
   renderTopJobs(data.ability_profile.top5_matching_jobs);
@@ -1233,23 +1222,24 @@ function renderAbilityRadar(profile) {
   const text = document.querySelector("#radarText");
   const status = document.querySelector("#radarDataState");
   const wrap = document.querySelector(".radar-wrap");
-  const evidenceItems = benchmarkedEvidenceItems(profile);
+  const series = normalizedBackendRadarSeries(profile);
+  const hasRadarData = series.length > 0;
   const benchmarkStatus = profile.benchmark_status || "waiting";
   const isFailed = benchmarkStatus === "failed";
-  const isLoading = isBenchmarkLoadingStatus(benchmarkStatus) && evidenceItems.length === 0;
+  const isLoading = isBenchmarkLoadingStatus(benchmarkStatus) && !hasRadarData;
   wrap.classList.toggle("is-loading", isLoading);
   wrap.classList.toggle("is-failed", isFailed);
   if (status) {
-    status.textContent = isFailed ? "Benchmark 失败" : isLoading ? "等待 Benchmark" : evidenceItems.length ? "Legato Benchmark" : "等待证据";
-    status.className = `status-pill ${isFailed ? "is-danger" : evidenceItems.length ? "is-real" : "is-warning"}`;
+    status.textContent = isFailed ? "Benchmark 失败" : isLoading ? "等待 Benchmark" : hasRadarData ? "Legato Benchmark" : "等待证据";
+    status.className = `status-pill ${isFailed ? "is-danger" : hasRadarData ? "is-real" : "is-warning"}`;
   }
-  if (isFailed && evidenceItems.length === 0) {
+  if (isFailed && !hasRadarData) {
     clearRadarAnimationState();
     renderRadarFailed(svg);
     if (text) text.textContent = "";
     return;
   }
-  if (isLoading || evidenceItems.length === 0) {
+  if (isLoading || !hasRadarData) {
     clearRadarAnimationState();
     renderRadarLoading(svg);
     if (text) text.textContent = "";
@@ -1258,7 +1248,6 @@ function renderAbilityRadar(profile) {
   const items = benchmarkDimensions.map((name) => ({ name }));
   const center = { x: 180, y: 158 };
   const radius = 104;
-  const series = buildRadarSeries(profile, evidenceItems);
   const startSeries = radarStartSeries(series);
   const maxPolygon = (score) => items.map((_, index) => {
     const point = pointFor(index, items.length, radius * radarVisualRatio(score), center);
@@ -1301,6 +1290,38 @@ function renderAbilityRadar(profile) {
     center,
     radius
   });
+}
+
+function normalizedProfileRadarData(profile) {
+  return scoreDimensionArrayToScores(profile?.radar_data);
+}
+
+function normalizedBackendRadarSeries(profile) {
+  const rawSeries = Array.isArray(profile?.radar_series) ? profile.radar_series : [];
+  const series = rawSeries.map((entry) => {
+    const scores = scoreDimensionArrayToScores(entry?.scores);
+    if (scores.length !== benchmarkDimensions.length) return null;
+    return {
+      key: cleanDisplayText(entry?.key) || "overall",
+      label: cleanDisplayText(entry?.label) || "综合",
+      count: Number.isFinite(Number(entry?.count)) ? Number(entry.count) : "",
+      scores
+    };
+  }).filter(Boolean);
+  if (series.length) return series;
+  const profileRadar = normalizedProfileRadarData(profile);
+  if (profileRadar.length !== benchmarkDimensions.length) return [];
+  return [{ key: "overall", label: "综合", count: "", scores: profileRadar }];
+}
+
+function scoreDimensionArrayToScores(items) {
+  const raw = Array.isArray(items) ? items : [];
+  const byName = new Map(raw.map((item) => [cleanDisplayText(item?.name), Number(item?.score)]));
+  const scores = benchmarkDimensions.map((name) => {
+    const value = byName.has(name) ? byName.get(name) : NaN;
+    return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : NaN;
+  });
+  return scores.every(Number.isFinite) ? scores : [];
 }
 
 function radarValueHoverLayer(items, series, center, radius) {
@@ -1515,432 +1536,37 @@ function benchmarkedEvidenceItems(profile) {
   ].filter((item) => normalizedBenchmarkScores(item).length === 6 && hasImpactFactor(item));
 }
 
-function buildRadarSeries(profile, items) {
-  const academicBaseline = academicBaselineVector(profile);
-  const campusItems = items.filter((item) => normalizedEvidenceScope(item) === "校内");
-  const externalItems = items.filter((item) => normalizedEvidenceScope(item) === "校外");
-  const schoolTier = schoolTierProfile(profile);
+function benchmarkableEvidenceItems(profile) {
   return [
-    buildRadarSeriesEntry("overall", "综合", items, academicBaseline, schoolTier, { includeAcademicPrior: true }),
-    buildRadarSeriesEntry("campus", "校内", campusItems, academicBaseline, schoolTier, { includeAcademicPrior: true }),
-    buildRadarSeriesEntry("external", "校外", externalItems, academicBaseline, schoolTier, { includeAcademicPrior: false })
-  ];
-}
-
-function buildRadarSeriesEntry(key, label, items, academicBaseline, schoolTier, options = {}) {
-  const dimensionContributions = Array.from({ length: 6 }, emptyDimensionContributionBucket);
-  const quality = evidenceQualitySummary(items);
-  items.forEach((item) => {
-    const distribution = normalizedBenchmarkScores(item);
-    if (distribution.length !== 6) return;
-    const strength = evidenceStrength(item);
-    const bucketKey = cappedEvidenceBucketKey(item);
-    distribution.forEach((share, index) => {
-      const contribution = Math.max(0, Math.min(0.96, share * strength * radarEvidenceGain));
-      const rule = bucketKey ? cappedEvidenceBucketRules[bucketKey] : null;
-      if (rule) {
-        dimensionContributions[index].capped[bucketKey].push(Math.min(contribution, rule.singleCap));
-      } else {
-        dimensionContributions[index].regular.push(contribution);
-      }
-    });
+    ...(Array.isArray(profile?.awards) ? profile.awards : []),
+    ...(Array.isArray(profile?.experiences) ? profile.experiences : [])
+  ].filter((item) => {
+    const text = cleanDisplayText([item?.name, item?.result, item?.role, item?.contribution].filter(Boolean).join(" "));
+    return Boolean(text);
   });
-  const scores = dimensionContributions.map(({ regular, capped }) => {
-    const cappedContributions = Object.entries(capped)
-      .map(([bucketKey, contributions]) => {
-        const rule = cappedEvidenceBucketRules[bucketKey];
-        return rule ? cappedEvidenceBucket(contributions, rule.totalCap) : 0;
-      })
-      .filter((contribution) => contribution > 0);
-    return diminishingEvidenceScore([
-      ...regular,
-      ...cappedContributions
-    ]);
-  });
-  const scaledScores = scores.map((score, index) => {
-    const evidenceScore = Math.round(score * 100);
-    return combineEvidenceWithSchoolTier(
-      evidenceScore,
-      academicBaseline,
-      schoolTier,
-      quality,
-      items.length,
-      index,
-      options
-    );
-  });
-  return {
-    key,
-    label,
-    count: items.length,
-    scores: scaledScores
-  };
 }
 
-function emptyDimensionContributionBucket() {
-  return {
-    regular: [],
-    capped: Object.fromEntries(Object.keys(cappedEvidenceBucketRules).map((bucketKey) => [bucketKey, []]))
-  };
-}
-
-function cappedEvidenceBucket(contributions, cap) {
-  if (!Array.isArray(contributions) || contributions.length === 0) return 0;
-  return Math.min(diminishingEvidenceScore(contributions), cap);
-}
-
-function cappedEvidenceBucketKey(item) {
-  if (isLowImpactAwardOrCertificateEvidence(item)) return "lowImpactAwardCertificate";
-  if (isCampusAwardEvidence(item)) return "campusAward";
-  if (isGenericCampusRoleEvidence(item)) return "genericCampusRole";
-  if (isUntitledProfessionalProjectEvidence(item)) return "untitledProject";
-  return impactEvidenceBucketKey(item);
-}
-
-function impactEvidenceBucketKey(item) {
-  const impact = numericMetric(item?.impact_factor);
-  const level = numericMetric(item?.level);
-  const signal = Number.isFinite(impact) ? impact : level;
-  if (!Number.isFinite(signal)) return "impactLow";
-  if (signal >= 8.5) return "impactExceptional";
-  if (signal >= 7) return "impactHigh";
-  if (signal >= 5.5) return "impactMedium";
-  return "impactLow";
-}
-
-function evidenceQualitySummary(items) {
-  const summary = {
-    highImpactCount: 0,
-    exceptionalImpactCount: 0,
-    cappedLowCount: 0
-  };
-  items.forEach((item) => {
-    const bucketKey = cappedEvidenceBucketKey(item);
-    const impact = numericMetric(item?.impact_factor);
-    if (["lowImpactAwardCertificate", "campusAward", "genericCampusRole", "untitledProject", "impactLow"].includes(bucketKey)) {
-      summary.cappedLowCount += 1;
-    }
-    if (Number.isFinite(impact) && impact >= 8.5 && bucketKey === "impactExceptional") {
-      summary.exceptionalImpactCount += 1;
-    } else if (Number.isFinite(impact) && impact >= 7 && (bucketKey === "impactHigh" || bucketKey === "impactExceptional")) {
-      summary.highImpactCount += 1;
-    }
-  });
-  return summary;
-}
-
-function isLowImpactAwardOrCertificateEvidence(item) {
-  if (evidenceKind(item) !== "award") return false;
-  const text = evidenceText(item);
-  const level = numericMetric(item?.level);
-  const impact = numericMetric(item?.impact_factor);
-  return (
-    (Number.isFinite(impact) && impact <= 3.5) ||
-    (Number.isFinite(level) && level <= 3) ||
-    containsAnyText(text, [
-      "证书",
-      "CET",
-      "英语四级",
-      "英语六级",
-      "计算机二级",
-      "NISP一级",
-      "奖学金",
-      "优秀学生",
-      "优秀学生干部",
-      "三好学生",
-      "标兵"
-    ])
-  );
-}
-
-function isCampusAwardEvidence(item) {
-  return evidenceKind(item) === "award" && normalizedEvidenceScope(item) === "校内";
-}
-
-function isGenericCampusRoleEvidence(item) {
-  if (evidenceKind(item) !== "experience") return false;
-  const text = evidenceText(item);
-  return normalizedEvidenceScope(item) === "校内" && containsAnyText(text, [
-    "学生会",
-    "社团",
-    "班长",
-    "团支书",
-    "部长",
-    "主席",
-    "干部",
-    "优秀学生",
-    "组织活动"
-  ]);
-}
-
-function isUntitledProfessionalProjectEvidence(item) {
-  const type = cleanDisplayText(item?.type || item?.experience_type);
-  const role = cleanDisplayText(item?.role);
-  const contribution = cleanDisplayText(item?.contribution);
-  const text = `${type}${role}${contribution}`;
-  if (!text) return false;
-  if (containsAnyText(text, ["实习", "比赛", "竞赛", "任职", "社团", "学生会", "班长", "部长", "主席"])) return false;
-  const isProfessionalProject = containsAnyText(text, [
-    "项目",
-    "科研",
-    "研究",
-    "课题",
-    "实验",
-    "系统",
-    "平台",
-    "模型",
-    "算法",
-    "开发",
-    "漏洞",
-    "测试",
-    "数据"
-  ]);
-  return isProfessionalProject && !hasConcreteProjectTitle(role);
-}
-
-function hasConcreteProjectTitle(role) {
-  const normalized = cleanDisplayText(role).replace(/\s+/g, "");
-  if (!normalized || normalized.length < 4) return false;
-  const genericTitles = [
-    "项目",
-    "科研项目",
-    "研究项目",
-    "项目经历",
-    "科研经历",
-    "参与者",
-    "参与人",
-    "成员",
-    "队员",
-    "负责人",
-    "核心成员",
-    "角色未解析",
-    "未解析"
-  ];
-  return !genericTitles.includes(normalized);
-}
-
-function evidenceKind(item) {
-  if (cleanDisplayText(item?.type || item?.role || item?.contribution || item?.experience_type)) {
-    return "experience";
-  }
-  return "award";
-}
-
-function evidenceText(item) {
-  return [
-    item?.name,
-    item?.result,
-    item?.type,
-    item?.experience_type,
-    item?.role,
-    item?.contribution,
-    item?.evidence_scope
-  ].map((value) => cleanDisplayText(value)).join("");
-}
-
-function diminishingEvidenceScore(contributions) {
-  return contributions
-    .filter((contribution) => Number.isFinite(contribution) && contribution > 0)
-    .sort((left, right) => right - left)
-    .reduce((score, contribution) => addDiminishingEvidence(score, contribution), 0);
-}
-
-function addDiminishingEvidence(score, contribution) {
-  const rawDelta = (1 - score) * contribution;
-  if (rawDelta <= 0) return score;
-  if (score < radarEvidenceDiminishThreshold) {
-    const roomBeforeThreshold = radarEvidenceDiminishThreshold - score;
-    if (rawDelta <= roomBeforeThreshold) return Math.min(radarEvidenceSoftCap, score + rawDelta);
-    const overflow = rawDelta - roomBeforeThreshold;
-    const nextScore = radarEvidenceDiminishThreshold + overflow * evidenceTailGainAt(radarEvidenceDiminishThreshold);
-    return Math.min(radarEvidenceSoftCap, nextScore);
-  }
-  const nextScore = score + rawDelta * evidenceTailGainAt(score);
-  return Math.min(radarEvidenceSoftCap, nextScore);
-}
-
-function evidenceTailGainAt(score) {
-  if (score <= radarEvidenceDiminishThreshold) return 0.15;
-  if (score >= radarEvidenceTailThreshold) return radarEvidenceTailGain;
-  const progress = (score - radarEvidenceDiminishThreshold) / (radarEvidenceTailThreshold - radarEvidenceDiminishThreshold);
-  return radarEvidenceTailGain + (0.15 - radarEvidenceTailGain) * Math.pow(1 - progress, 2);
-}
-
-function combineEvidenceWithSchoolTier(evidenceScore, academicBaseline, schoolTier, quality, itemCount, dimensionIndex, options = {}) {
-  const includeAcademicPrior = options.includeAcademicPrior !== false;
-  const config = schoolTier?.config || schoolTierConfigs.T3;
-  const cap = schoolTierScoreCap(config, quality);
-  if (!includeAcademicPrior) {
-    if (itemCount === 0) return 0;
-    return Math.round(Math.min(cap, evidenceScore));
-  }
-  const prior = academicPriorForDimension(academicBaseline, schoolTier, dimensionIndex);
-  if (itemCount === 0) return Math.round(Math.min(cap, prior));
-  const lift = evidenceScore * config.liftScale;
-  return Math.round(Math.min(cap, prior + lift));
-}
-
-function schoolTierScoreCap(config, quality) {
-  if ((quality?.exceptionalImpactCount || 0) > 0) return config.exceptionalCap;
-  if ((quality?.highImpactCount || 0) > 0) return config.highCap;
-  return config.noHighCap;
-}
-
-function academicPriorForDimension(academicBaseline, schoolTier, dimensionIndex) {
-  const config = schoolTier?.config || schoolTierConfigs.T3;
-  const scores = Array.isArray(academicBaseline?.scores) && academicBaseline.scores.length === 6
-    ? academicBaseline.scores.map(Number)
-    : Array(6).fill(50);
-  const validScores = scores.filter(Number.isFinite);
-  const baselineMean = validScores.length
-    ? validScores.reduce((sum, value) => sum + value, 0) / validScores.length
-    : 50;
-  const dimensionOffset = Number.isFinite(scores[dimensionIndex]) ? scores[dimensionIndex] - baselineMean : 0;
-  const transcriptBase = Number(academicBaseline?.transcript_base);
-  const transcriptOffset = Number.isFinite(transcriptBase) ? Math.max(-8, Math.min(12, transcriptBase - 50)) * 0.45 : 0;
-  return Math.max(25, Math.min(85, config.base + transcriptOffset + dimensionOffset * 0.55));
-}
-
-function schoolTierProfile(profile) {
-  const education = normalizedEducation(profile);
-  const tiers = education.map(educationTierKey).filter(Boolean);
-  const hasIndependent = education.some(isIndependentCollegeEducation);
-  const bestNonIndependent = tiers
-    .filter((tier) => tier !== "T4")
-    .sort((left, right) => schoolTierRank(left) - schoolTierRank(right))[0] || "";
-  let tierKey = tiers.sort((left, right) => schoolTierRank(left) - schoolTierRank(right))[0] || "T3";
-  if (hasIndependent) {
-    if (bestNonIndependent === "T0" || bestNonIndependent === "T1" || bestNonIndependent === "T2") {
-      tierKey = "T4A";
-    } else {
-      tierKey = "T4";
-    }
-  }
-  return {
-    key: tierKey,
-    config: schoolTierConfigs[tierKey] || schoolTierConfigs.T3,
-    hasIndependent
-  };
-}
-
-function schoolTierRank(tierKey) {
-  return { T0: 0, T1: 1, T2: 2, T3: 3, T4A: 4, T4: 5, T5: 6 }[tierKey] ?? 3;
-}
-
-function educationTierKey(item) {
-  if (isIndependentCollegeEducation(item)) return "T4";
-  const degree = cleanDisplayText(item?.degree || item?.degree_level);
-  if (degree.includes("专科")) return "T5";
-  const rank = Number(item?.ruanke_rank);
-  if (item?.is_985 || (Number.isFinite(rank) && rank > 0 && rank <= 50)) return "T0";
-  if (item?.is_211 || item?.is_double_first_class || (Number.isFinite(rank) && rank > 0 && rank <= 150)) return "T1";
-  if (Number.isFinite(rank) && rank > 0 && rank <= 250) return "T2";
-  return "T3";
-}
-
-function isIndependentCollegeEducation(item) {
-  const school = cleanDisplayText(item?.school);
-  const kind = cleanDisplayText(item?.school_kind);
-  return kind === "independent_college" || (/大学.+学院$/.test(school) && !school.includes("大学院"));
-}
-
-function combineEvidenceWithAcademicPrior(evidenceScore, baseline, itemCount) {
-  if (!Number.isFinite(baseline)) return evidenceScore;
-  const academicPrior = Math.round(Math.max(25, Math.min(85, baseline)));
-  if (itemCount === 0) return academicPrior;
-  const blended = evidenceScore * (1 - academicPriorWeight) + academicPrior * academicPriorWeight;
-  const priorFloor = academicPrior * academicPriorFloorRatio;
-  return Math.round(Math.max(priorFloor, blended));
-}
-
-function academicBaselineVector(profile) {
-  const workflowBaseline = workflowAcademicBaseline(profile);
-  if (workflowBaseline) return workflowBaseline;
-  const base = academicBaseScore(profile);
-  const majorText = [
-    profile?.basic_info?.major,
-    ...normalizedEducation(profile).map((item) => item.major)
-  ].join("");
-  const isStem = containsAnyText(majorText, ["计算机", "软件", "数据", "网络", "信息", "数学", "统计", "电子", "电气", "自动化", "工程", "物理", "化学", "生物"]);
-  const hasMajor = majorText.trim().length > 0;
-  const scores = [
-    base + (isStem ? 3 : 0),
-    base + (isStem ? -2 : 3),
-    base + (hasMajor ? 5 : 0),
-    base - 10,
-    base - 4,
-    base
-  ].map((score) => Math.round(Math.max(25, Math.min(85, score))));
-  return { base, transcript_base: base, scores, major_family: isStem ? "工科类" : "未知", source: "frontend_fallback" };
-}
-
-function workflowAcademicBaseline(profile) {
-  const baseline = profile?.major_baseline;
-  if (!baseline || !Array.isArray(baseline.scores) || baseline.scores.length !== 6) return null;
-  const scores = baseline.scores.map((score) => {
-    const value = Number(score);
-    if (!Number.isFinite(value)) return 0;
-    return Math.round(Math.max(25, Math.min(85, value)));
-  });
-  if (scores.some((score) => score <= 0)) return null;
-  const base = Number(baseline.base_score);
-  return {
-    base: Number.isFinite(base) ? Math.round(Math.max(30, Math.min(85, base))) : 50,
-    transcript_base: academicBaseScore(profile),
-    scores,
-    major_name: String(baseline.major_name || ""),
-    major_family: String(baseline.major_family || ""),
-    rationale: String(baseline.rationale || ""),
-    source: String(baseline.source || "major_baseline")
-  };
-}
-
-function academicBaseScore(profile) {
-  const transcriptUse = String(profile?.basic_info?.transcript_use || "");
-  const gpaMatch = transcriptUse.match(/GPA[:：]?\s*([0-9]+(?:\.[0-9]+)?)/i);
-  if (!gpaMatch) {
-    const averageMatch = transcriptUse.match(/(?:均分|平均分|平均成绩)[:：]?\s*([0-9]+(?:\.[0-9]+)?)/);
-    return averageMatch ? academicAverageToPrior(Number(averageMatch[1])) : 50;
-  }
-  const raw = Number(gpaMatch[1]);
-  if (!Number.isFinite(raw) || raw <= 0) return 50;
-  if (raw <= 4.3) {
-    return academicAverageToPrior(80 + (raw - 3) * 15);
-  }
-  if (raw <= 5) {
-    return academicAverageToPrior(80 + (raw - 3.5) * 10);
-  }
-  return academicAverageToPrior(raw);
-}
-
-function academicAverageToPrior(average) {
-  if (!Number.isFinite(average) || average <= 0) return 50;
-  return Math.round(Math.max(35, Math.min(78, 50 + (average - 80) * 1.6)));
-}
-
-function evidenceStrength(item) {
-  const rawLevel = numericMetric(item.level);
-  const rawImpact = numericMetric(item.impact_factor);
-  const hasLevel = Number.isFinite(rawLevel);
-  const hasImpact = Number.isFinite(rawImpact);
-  if (!hasLevel && !hasImpact) return 0;
-  const level = hasLevel ? Math.max(0, Math.min(10, rawLevel)) / 10 : 0;
-  const impact = hasImpact ? Math.max(0, Math.min(10, rawImpact)) / 10 : 0;
-  if (!hasImpact) return level;
-  if (!hasLevel) return impact;
-  return Math.max(0, Math.min(1, level * 0.4 + impact * 0.6));
+function unbenchmarkedEvidenceItems(profile) {
+  return benchmarkableEvidenceItems(profile).filter((item) => !hasItemBenchmarkResult(item));
 }
 
 function maybeRequestItemBenchmark(profile, options = {}) {
   if (!currentJobId || benchmarkRequestInFlight) return;
   if (!profile) return;
-  const blockedStatuses = options.force
-    ? ["ready", "mock", "benchmarking", "unavailable"]
-    : ["ready", "mock", "benchmarking", "failed", "unavailable"];
-  if (blockedStatuses.includes(profile.benchmark_status)) return;
-  if (!isHybridBenchmarkGateOpen(profile.experiences_status)) return;
+  if (!options.force && diagnosis?.matching_result?.source) return;
+  if (!options.force && profile.benchmark_status === "ready") return;
+  if (!isBenchmarkGateOpen(profile)) return;
 
-  const items = buildBenchmarkItems(profile);
+  const missingItems = buildBenchmarkItems(profile, { missingOnly: true });
+  const hasMissingItems = missingItems.length > 0;
+  if (profile.benchmark_status === "ready" && !hasMissingItems) return;
+
+  const blockedStatuses = options.force
+    ? ["mock", "benchmarking", "unavailable"]
+    : ["mock", "benchmarking", "failed", "unavailable"];
+  if (blockedStatuses.includes(profile.benchmark_status)) return;
+
+  const items = profile.benchmark_status === "ready" ? missingItems : buildBenchmarkItems(profile);
   if (items.length === 0) {
     showToast("没有可用于 Item Benchmark 的证据条目。");
     return;
@@ -2018,6 +1644,16 @@ function maybeRequestItemBenchmark(profile, options = {}) {
     });
 }
 
+function shouldAutoRequestItemBenchmark(profile, event = {}) {
+  if (!profile || benchmarkRequestInFlight) return false;
+  if (!isBenchmarkGateOpen(profile)) return false;
+  const status = profile.benchmark_status || "";
+  if (isBenchmarkActiveStatus(status)) return false;
+  if (["ready", "failed", "mock", "unavailable"].includes(status)) return false;
+  if (event.step === "profile" && event.status === "running" && profile.major_baseline_status === "benchmarking") return false;
+  return buildBenchmarkItems(profile).length > 0;
+}
+
 function finalizeAgentTeamStreamFromMatchingPayload(payload = {}) {
   if (!payload.matching_result && !payload.match_generated) return;
   const session = activeAssistantSession();
@@ -2027,11 +1663,11 @@ function finalizeAgentTeamStreamFromMatchingPayload(payload = {}) {
   const selected = payload.matching_result?.selected_job || {};
   const preview = payload.matching_result?.fit_summary || selected.fit_summary || selected.title || "";
   const event = normalizeAgentTeamEvent({
-    agent_key: "team",
-    agent: "Legato Job Matching Team",
+    agent_key: "synthesis_arbiter",
+    agent: "Synthesis Arbiter",
     status: "done",
-    phase: "orchestration",
-    message: "动态 Presto Agent Team 已完成岗位推荐和匹配报告。",
+    phase: "final_synthesis",
+    message: "Synthesis Arbiter 已返回结构化岗位匹配结果。",
     output_preview: preview
   });
   const { message } = ensureAgentTeamStreamMessage(session, event);
@@ -2039,10 +1675,35 @@ function finalizeAgentTeamStreamFromMatchingPayload(payload = {}) {
   message.content = agentTeamStreamFallback(message.agentStream);
   message.status = "done";
   message.updatedAt = event.time;
+  finalizeLegacySynthesisStreams(session, event);
   session.updatedAt = event.time;
   assistantAgentStreamActive = false;
   saveAssistantState();
   renderAssistant();
+}
+
+function finalizeLegacySynthesisStreams(session, event) {
+  session.messages.forEach((message) => {
+    const stream = message.agentStream;
+    if (message.streamType !== "agent_team" || !stream || !stream.agents) return;
+    const hasSynthesisAgent = Boolean(stream.agents.synthesis_arbiter);
+    if (!hasSynthesisAgent && stream.phaseGroup !== "synthesis") return;
+    upsertAgentStreamAgent(stream, event);
+    const item = stream.agents.synthesis_arbiter;
+    if (!item) return;
+    item.status = "done";
+    item.message = event.message || "Synthesis Arbiter 已返回结构化岗位匹配结果。";
+    item.typingDone = true;
+    if (event.outputPreview) item.outputPreview = event.outputPreview;
+    if (item.outputPreview && !item.typedOutput) item.typedOutput = item.outputPreview;
+    if (stream.phaseGroup === "synthesis") {
+      stream.status = "done";
+      stream.summary = item.message;
+      message.status = "done";
+      message.content = agentTeamStreamFallback(stream);
+    }
+    message.updatedAt = event.time;
+  });
 }
 
 function setBenchmarkRunFailed(errorMessage = "") {
@@ -2065,16 +1726,77 @@ function setMatchingRunFailed(errorMessage = "") {
   failedRunStep = "matching";
   matchingRequestInFlight = false;
   assistantAgentStreamActive = false;
+  const assistantFailure = errorMessage
+    ? `Job Matching 失败：${errorMessage}`
+    : "Job Matching 失败，岗位匹配模块未生成。";
   markAgentStep("matching", "failed");
   setRunStepRetryable("matching", true);
   document.querySelector("#runStatus").textContent = "失败：岗位匹配";
   setRunDetail(errorMessage
     ? `Job Matching 失败：${errorMessage}。点击下方红色“匹配”继续。`
     : "Job Matching 失败，点击下方红色“匹配”从失败处继续。", { immediate: true });
+  markAssistantMatchingStreamsFailed(assistantFailure);
   document.querySelector(".generation-dock").classList.remove("is-running");
   runButton.disabled = false;
   runButton.textContent = "重新生成";
   syncAssistantAvailability();
+}
+
+function markAssistantMatchingStreamsFailed(messageText = "") {
+  const session = activeAssistantSession();
+  if (!session) return;
+  const now = new Date().toISOString();
+  const summary = formatAgentDisplayText(messageText || "Job Matching 失败，岗位匹配模块未生成。");
+  const failureEvent = normalizeAgentTeamEvent({
+    agent_key: "synthesis_arbiter",
+    agent: "Synthesis Arbiter",
+    status: "failed",
+    phase: "final_synthesis",
+    message: summary
+  });
+  failureEvent.time = now;
+  let changed = false;
+  let sawAgentStream = false;
+  let sawSynthesisStream = false;
+  stopAgentTypewriters();
+  session.messages.forEach((sessionMessage) => {
+    const stream = sessionMessage.agentStream;
+    if (sessionMessage.streamType !== "agent_team" || !stream?.agents) return;
+    sawAgentStream = true;
+    if (stream.phaseGroup === "synthesis" || stream.agents.synthesis_arbiter) sawSynthesisStream = true;
+    if (stream.status === "done" && stream.phaseGroup !== "synthesis") return;
+    if (stream.phaseGroup === "synthesis" || stream.agents.synthesis_arbiter) {
+      upsertAgentStreamAgent(stream, failureEvent);
+    }
+    Object.keys(stream.agents).forEach((key) => {
+      const agent = stream.agents[key];
+      if (!agent || agent.status === "done") return;
+      agent.status = "failed";
+      agent.message = summary;
+      agent.typingDone = true;
+      agent.updatedAt = now;
+    });
+    stream.status = "failed";
+    stream.summary = summary;
+    stream.updatedAt = now;
+    sessionMessage.status = "error";
+    sessionMessage.content = agentTeamStreamFallback(stream);
+    sessionMessage.updatedAt = now;
+    changed = true;
+  });
+  if (sawAgentStream && !sawSynthesisStream) {
+    const { message } = ensureAgentTeamStreamMessage(session, failureEvent);
+    message.agentStream = updateAgentTeamStreamState(message.agentStream, failureEvent);
+    message.content = agentTeamStreamFallback(message.agentStream);
+    message.status = "error";
+    message.updatedAt = now;
+    changed = true;
+  }
+  if (!changed) return;
+  session.updatedAt = now;
+  assistantAgentStreamActive = false;
+  saveAssistantState();
+  renderAssistant();
 }
 
 function retryItemBenchmark() {
@@ -2091,6 +1813,10 @@ function retryItemBenchmark() {
 function retryJobMatching() {
   if (!currentJobId || !diagnosis?.ability_profile) {
     showToast("没有可继续的诊断任务，请重新生成。");
+    return;
+  }
+  if (!isMatchingGateOpen(diagnosis.ability_profile)) {
+    showToast("能力画像尚未完成 Benchmark，暂不能启动岗位匹配。");
     return;
   }
   if (matchingRequestInFlight) return;
@@ -2156,23 +1882,52 @@ function retryJobMatching() {
     });
 }
 
-function isHybridBenchmarkGateOpen(status) {
-  return ["ready", "empty", "failed", "mock"].includes(status || "");
+function isBenchmarkGateOpen(profile) {
+  if (!profile) return false;
+  const awardStatus = profile.awards_status || (Array.isArray(profile.awards) && profile.awards.length ? "ready" : "waiting");
+  const experienceStatus = profile.experiences_status || (Array.isArray(profile.experiences) && profile.experiences.length ? "ready" : "waiting");
+  return isResumeProfileReady(profile) && isBenchmarkEvidenceTerminal(awardStatus) && isBenchmarkEvidenceTerminal(experienceStatus);
 }
 
-function buildBenchmarkItems(profile) {
+function isMatchingGateOpen(profile) {
+  return isBenchmarkGateOpen(profile)
+    && profile?.benchmark_status === "ready"
+    && profile?.major_baseline_status === "ready";
+}
+
+function isResumeProfileReady(profile) {
+  const info = profile?.basic_info || {};
+  const status = cleanDisplayText(info.resume_status || "");
+  if (!status || status.includes("等待")) return false;
+  return Boolean(
+    cleanDisplayText(info.name || "") ||
+    cleanDisplayText(info.school || "") ||
+    cleanDisplayText(info.major || "") ||
+    (Array.isArray(profile?.education) && profile.education.length > 0)
+  );
+}
+
+function isBenchmarkEvidenceTerminal(status) {
+  return ["ready", "empty"].includes(status || "");
+}
+
+function buildBenchmarkItems(profile, options = {}) {
   const awards = Array.isArray(profile.awards) ? profile.awards : [];
   const experiences = Array.isArray(profile.experiences) ? profile.experiences : [];
-  return [
-    ...awards.map((item, index) => ({
+  const awardItems = awards.map((item, index) => ({
+    source: item,
+    payload: {
       kind: "award",
       key: `award:${index}`,
       name: item.name || "",
       result: item.result || "",
       evidence_scope: normalizedEvidenceScope(item),
       level: numericMetric(item.level)
-    })),
-    ...experiences.map((item, index) => ({
+    }
+  }));
+  const experienceItems = experiences.map((item, index) => ({
+    source: item,
+    payload: {
       kind: "experience",
       key: `experience:${index}`,
       name: item.role || item.contribution || item.type || "",
@@ -2182,8 +1937,12 @@ function buildBenchmarkItems(profile) {
       contribution: item.contribution || "",
       evidence_scope: normalizedEvidenceScope(item),
       level: numericMetric(item.level)
-    }))
-  ].filter((item) => item.name || item.result || item.role || item.contribution);
+    }
+  }));
+  return [...awardItems, ...experienceItems]
+    .filter((entry) => !options.missingOnly || !hasItemBenchmarkResult(entry.source))
+    .map((entry) => entry.payload)
+    .filter((item) => item.name || item.result || item.role || item.contribution);
 }
 
 function renderResumeEvidence(profile) {
@@ -2195,7 +1954,12 @@ function renderResumeEvidence(profile) {
   const benchmarkStatus = profile.benchmark_status || "waiting";
   const isAwardLoading = isEvidenceLoadingStatus(awardStatus);
   const isExperienceRefining = experienceStatus === "refining";
-  const isBenchmarkLoading = isBenchmarkLoadingStatus(benchmarkStatus) && (awards.length > 0 || experiences.length > 0);
+  const hasBenchmarkableEvidence = benchmarkableEvidenceItems(profile).length > 0;
+  const hasUnbenchmarkedEvidence = unbenchmarkedEvidenceItems(profile).length > 0;
+  const isBenchmarkQueued = hasBenchmarkableEvidence
+    && hasUnbenchmarkedEvidence
+    && !["failed", "mock", "unavailable"].includes(benchmarkStatus);
+  const isBenchmarkLoading = (isBenchmarkActiveStatus(benchmarkStatus) || isBenchmarkQueued) && hasBenchmarkableEvidence;
   const isBenchmarkFailed = benchmarkStatus === "failed";
 
   setEvidencePill("#awardDataState", awardStatus, {
@@ -2347,8 +2111,8 @@ function renderEvidenceScorePair(item, benchmarkLoading, levelLoading = false, b
   const impact = numericMetric(item.impact_factor);
   return `
     <div class="evidence-score-pair" aria-label="证据双评分">
-      ${renderMetricChip("Level", level, levelLoading || !hasMetricValue(level))}
-      ${renderMetricChip("Impact", impact, benchmarkLoading || (!benchmarkFailed && !hasMetricValue(impact)), benchmarkFailed && !hasMetricValue(impact))}
+      ${renderMetricChip("Level", level, levelLoading)}
+      ${renderMetricChip("Impact", impact, benchmarkLoading, benchmarkFailed && !hasMetricValue(impact))}
     </div>
   `;
 }
@@ -2372,9 +2136,9 @@ function renderMetricChip(label, value, loading, failed = false) {
   }
   if (!hasMetricValue(value)) {
     return `
-      <div class="metric-chip is-loading" aria-label="${escapeAttribute(label)} 正在评分">
+      <div class="metric-chip is-empty" aria-label="${escapeAttribute(label)} 未返回评分">
         <span>${escapeHTML(label)}</span>
-        <b></b>
+        <b>未返回</b>
       </div>
     `;
   }
@@ -2394,6 +2158,13 @@ function renderDimensionMeter(item, benchmarkLoading, benchmarkFailed = false) {
       return `
         <div class="dimension-meter is-failed" aria-label="六维 Benchmark 评分失败">
           <span class="dimension-failed"></span>
+        </div>
+      `;
+    }
+    if (!benchmarkLoading) {
+      return `
+        <div class="dimension-meter is-empty" aria-label="六维 Benchmark 未返回评分">
+          <span class="dimension-empty"></span>
         </div>
       `;
     }
@@ -2454,6 +2225,14 @@ function hasImpactFactor(item) {
   return hasMetricValue(numericMetric(item?.impact_factor));
 }
 
+function hasBenchmarkScores(item) {
+  return normalizedBenchmarkScores(item).length === 6;
+}
+
+function hasItemBenchmarkResult(item) {
+  return hasImpactFactor(item) && hasBenchmarkScores(item);
+}
+
 function hasMetricValue(value) {
   return Number.isFinite(value) && value >= 0;
 }
@@ -2509,6 +2288,10 @@ function isEvidenceLoadingStatus(status) {
 
 function isBenchmarkLoadingStatus(status) {
   return ["waiting", "loading", "running", "benchmarking"].includes(status || "waiting");
+}
+
+function isBenchmarkActiveStatus(status) {
+  return ["loading", "running", "benchmarking"].includes(status || "");
 }
 
 function evidenceOverallStatus(awardStatus, experienceStatus, awardCount, experienceCount) {
@@ -2582,47 +2365,481 @@ function renderMatching(match) {
   match = match || {};
   const selected = match.selected_job || {};
   const overall = Number.isFinite(Number(match.overall_match)) ? safeScore(match.overall_match) : 0;
+  const reasons = matchingReasonList(match, selected);
+  const reportRows = normalizedMatchingReportRows(match);
+  const mainGap = primaryMatchingGap(match, reportRows);
+  const radarSummary = matchingRadarSummary(reportRows);
+  const nextProof = selected.next_proof || mainGap?.action || firstProofGap(selected) || "补充更贴近目标岗位的项目证据";
   document.querySelector("#overallMatch").textContent = overall ? `${Math.round(overall)}%` : "--";
   document.querySelector("#matchLevel").textContent = match.match_level || "等待 Job Matching";
   document.querySelector("#overallMeter").style.width = `${overall}%`;
   document.querySelector("#selectedJobTitle").textContent = selected.title || match.target_role || "等待推荐";
-  document.querySelector("#matchNarrative").textContent = formatAgentDisplayText(match.fit_summary || selected.fit_summary || "Benchmark 完成后，Legato 会返回首选岗位、推荐理由和需要补齐的证据。");
-  document.querySelector("#matchAgentNotes").innerHTML = (match.agent_notes || []).map((note) => `<span>${escapeHTML(formatAgentDisplayText(note))}</span>`).join("");
-  renderMatchingRadar(match);
+  document.querySelector("#matchDecisionBadges").innerHTML = renderMatchDecisionBadges(match, selected, radarSummary);
+  document.querySelector("#matchNarrative").textContent = compactMatchingText(match.fit_summary || selected.fit_summary || "Benchmark 完成后，Legato 会返回首选岗位、推荐理由和需要补齐的证据。", 190);
+  document.querySelector("#matchAgentNotes").innerHTML = (match.agent_notes || [])
+    .slice(0, 4)
+    .map((note) => `<span>${escapeHTML(compactMatchingText(note, 22))}</span>`)
+    .join("");
+  document.querySelector("#matchPrimaryReason").innerHTML = renderFocusReasonList(reasons, selected);
+  document.querySelector("#matchMainGap").innerHTML = renderFocusGap(mainGap, radarSummary);
+  document.querySelector("#matchNextProof").innerHTML = renderFocusText(nextProof, 104);
+  document.querySelector("#matchEducationGate").innerHTML = renderEducationGateChip(selected.education_gate || match.education_gate || "未返回门槛限制", selected.education_gate_status || match.education_gate_status);
+  document.querySelector("#matchActionList").innerHTML = renderMatchActionList(match, selected, mainGap, radarSummary);
+  renderMatchingRadar(match, reportRows);
 
-  document.querySelector("#reportRows").innerHTML = (match.report_sections || []).map((row) => `
-    <div class="report-row">
+  document.querySelector("#reportRows").innerHTML = reportRows.length ? reportRows.map((row, index) => `
+    <div class="report-row is-${escapeAttribute(matchingRowStatus(row))}" style="--match-stagger:${index * 32}ms">
       <strong>${escapeHTML(row.name)}</strong>
-      <div class="report-bar" aria-label="学生分值 ${row.student}"><span style="width:${safeScore(row.student)}%"></span></div>
-      <div class="need-bar" aria-label="岗位要求 ${row.role_need}"><span style="width:${safeScore(row.role_need)}%"></span></div>
+      <div class="report-bars">
+        <div class="report-bar" aria-label="学生分值 ${row.student}"><span style="width:${safeScore(row.student)}%"></span></div>
+        <div class="need-bar" aria-label="岗位要求 ${row.role_need}"><span style="width:${safeScore(row.role_need)}%"></span></div>
+      </div>
+      <span class="report-status ${escapeAttribute(matchingRowStatus(row))}">${escapeHTML(matchingStatusLabel(matchingRowStatus(row)))}</span>
       <span class="delta">${row.difference > 0 ? "+" : ""}${row.difference}</span>
+      <small>${escapeHTML(compactMatchingText(row.note || matchingRowNote(row), 46))}</small>
     </div>
-  `).join("");
+  `).join("") : `<div class="matching-empty">等待六维差距报表。</div>`;
 
-  document.querySelector("#gapTable").innerHTML = (match.gap_details || []).map((gap) => `
-    <tr>
-      <td>${escapeHTML(gap.capability)}</td>
-      <td>${escapeHTML(gap.current)}</td>
-      <td>${escapeHTML(gap.expected)}</td>
-      <td>${escapeHTML(gap.action)}</td>
-      <td><span class="severity ${gap.severity === "高" ? "high" : ""}">${escapeHTML(gap.severity)}</span></td>
-    </tr>
-  `).join("");
+  const gaps = Array.isArray(match.gap_details) ? match.gap_details : [];
+  document.querySelector("#gapCards").innerHTML = gaps.length
+    ? gaps.map((gap, index) => renderGapCard(gap, index)).join("")
+    : `<div class="matching-empty">等待差距明细。</div>`;
 }
 
-function renderMatchingRadar(match) {
+function matchingReasonList(match, selected) {
+  const sources = [
+    selected?.reasons,
+    match?.reasons,
+    match?.agent_notes,
+    selected?.fit_summary,
+    match?.fit_summary
+  ];
+  const values = sources.flatMap((source) => {
+    if (Array.isArray(source)) return source;
+    return source ? String(source).split(/[；;。]/) : [];
+  });
+  const seen = new Set();
+  return values
+    .map((item) => compactMatchingText(item, 54))
+    .filter((item) => {
+      const key = item.toLowerCase();
+      if (!item || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 5);
+}
+
+function primaryMatchingGap(match, reportRows = []) {
+  const gaps = Array.isArray(match?.gap_details) ? match.gap_details : [];
+  if (gaps.length) {
+    return [...gaps].sort((left, right) => severityWeight(right.severity) - severityWeight(left.severity))[0];
+  }
+  const weakest = matchingRadarSummary(reportRows).weakest;
+  if (!weakest) return null;
+  return {
+    capability: weakest.name,
+    current: `${weakest.student} / ${weakest.role_need}`,
+    expected: `岗位要求 ${weakest.role_need}`,
+    action: weakest.note || matchingRowNote(weakest),
+    severity: weakest.status === "gap" ? "高" : weakest.status === "limited" ? "中" : "低"
+  };
+}
+
+function normalizedMatchingReportRows(match) {
+  const explicitRows = Array.isArray(match?.report_sections) ? match.report_sections : [];
+  const profileStudent = currentProfileStudentRadar();
+  const target = matchingTargetRadar(match);
+  if (profileStudent.length === benchmarkDimensions.length && target.length === benchmarkDimensions.length) {
+    const explicitByName = new Map(explicitRows.map((row) => [row?.name || row?.capability, row]));
+    return benchmarkDimensions.map((name, index) => {
+      const explicit = explicitByName.get(name) || {};
+      const student = profileStudent[index].score;
+      const roleNeed = target[index].score;
+      const difference = student - roleNeed;
+      const status = matchingRowStatus({ ...explicit, difference });
+      return {
+        name,
+        student,
+        role_need: roleNeed,
+        difference,
+        status,
+        note: explicit.note || matchingRowNote({ ...explicit, name, student, role_need: roleNeed, difference, status })
+      };
+    });
+  }
+  const rows = explicitRows.length ? explicitRows : reportRowsFromMatchingRadar(match);
+  return rows.map((row) => {
+    const student = Math.round(safeScore(row?.student));
+    const roleNeed = Math.round(safeScore(row?.role_need ?? row?.target));
+    const difference = Number.isFinite(Number(row?.difference)) ? Math.round(Number(row.difference)) : student - roleNeed;
+    const status = matchingRowStatus({ ...row, difference });
+    return {
+      name: row?.name || row?.capability || "能力项",
+      student,
+      role_need: roleNeed,
+      difference,
+      status,
+      note: row?.note || matchingRowNote({ ...row, status, difference, name: row?.name || row?.capability || "能力项", student, role_need: roleNeed })
+    };
+  }).filter((row) => row.name);
+}
+
+function reportRowsFromMatchingRadar(match) {
+  const student = matchingStudentRadar(match);
+  const target = matchingTargetRadar(match);
+  if (student.length !== benchmarkDimensions.length || target.length !== benchmarkDimensions.length) return [];
+  return benchmarkDimensions.map((name, index) => ({
+    name,
+    student: student[index].score,
+    role_need: target[index].score,
+    difference: student[index].score - target[index].score
+  }));
+}
+
+function currentProfileStudentRadar() {
+  const profileRadar = normalizedProfileRadarData(diagnosis?.ability_profile);
+  return profileRadar.length === benchmarkDimensions.length ? radarScoresToMatchingDimensions(profileRadar) : [];
+}
+
+function radarScoresToMatchingDimensions(scores) {
+  return benchmarkDimensions.map((name, index) => ({
+    name,
+    score: Math.round(safeScore(scores[index])),
+    max_score: 100
+  }));
+}
+
+function matchingStudentRadar(match) {
+  const profileStudent = currentProfileStudentRadar();
+  if (profileStudent.length === benchmarkDimensions.length) return profileStudent;
+  return normalizeMatchingRadar(match?.student_radar);
+}
+
+function matchingTargetRadar(match) {
+  return normalizeMatchingRadar(match?.target_radar || match?.selected_job?.requirement_radar);
+}
+
+function matchingRadarSummary(rows = []) {
+  const normalized = rows.map((row) => ({ ...row, status: matchingRowStatus(row) }));
+  const weakRows = normalized.filter((row) => row.status === "gap" || row.status === "limited");
+  const advantageRows = normalized.filter((row) => row.status === "advantage");
+  const weakest = [...normalized].sort((left, right) => Number(left.difference || 0) - Number(right.difference || 0))[0] || null;
+  const strongest = [...normalized].sort((left, right) => Number(right.difference || 0) - Number(left.difference || 0))[0] || null;
+  return { rows: normalized, weakRows, advantageRows, weakest, strongest };
+}
+
+function matchingRowStatus(row) {
+  const value = String(row?.status || "").toLowerCase();
+  if (["advantage", "fit", "limited", "gap"].includes(value)) return value;
+  const text = `${row?.status || ""}${row?.note || ""}`;
+  if (text.includes("优势")) return "advantage";
+  if (text.includes("有限")) return "limited";
+  if (text.includes("短板") || text.includes("缺口")) return "gap";
+  const difference = Number(row?.difference || 0);
+  if (difference >= 6) return "advantage";
+  if (difference >= -3) return "fit";
+  if (difference >= -12) return "limited";
+  return "gap";
+}
+
+function matchingStatusLabel(status) {
+  return {
+    advantage: "优势",
+    fit: "达标",
+    limited: "有限",
+    gap: "短板"
+  }[status] || "待判";
+}
+
+function matchingRowNote(row) {
+  const name = row?.name || "能力项";
+  const difference = Number(row?.difference || 0);
+  const status = matchingRowStatus(row);
+  if (status === "advantage") return `${name}高于岗位要求${difference}分，可作为面试支撑点。`;
+  if (status === "fit") return `${name}基本达到岗位要求。`;
+  if (status === "limited") return `${name}低于岗位要求${Math.abs(difference)}分，需要补证据。`;
+  if (status === "gap") return `${name}是当前主要短板，差距${Math.abs(difference)}分。`;
+  return "";
+}
+
+function renderMatchDecisionBadges(match, selected, radarSummary) {
+  const badges = [
+    renderEducationGateChip(selected?.education_gate || match?.education_gate || "门槛待判", selected?.education_gate_status || match?.education_gate_status),
+    renderEvidenceStrengthChip(selected?.evidence_strength, selected),
+  ];
+  if (radarSummary?.weakest) {
+    badges.push(`<span class="decision-chip is-${escapeAttribute(matchingRowStatus(radarSummary.weakest))}">${escapeHTML(radarSummary.weakest.name)} ${escapeHTML(matchingStatusLabel(matchingRowStatus(radarSummary.weakest)))}</span>`);
+  }
+  return badges.filter(Boolean).join("");
+}
+
+function renderEducationGateChip(label, status) {
+  const meta = educationGateMeta(label, status);
+  return `<span class="decision-chip gate-chip is-${escapeAttribute(meta.status)}"><b>${escapeHTML(meta.label)}</b>${escapeHTML(meta.text)}</span>`;
+}
+
+function educationGateMeta(label, status) {
+  const text = compactMatchingText(label || "门槛待判", 28);
+  const combined = `${status || ""} ${label || ""}`.toLowerCase();
+  if (combined.includes("blocked") || combined.includes("不建议") || combined.includes("不通过")) return { status: "blocked", label: "门槛", text };
+  if (combined.includes("stretch") || combined.includes("突破") || combined.includes("高impact")) return { status: "stretch", label: "门槛", text };
+  if (combined.includes("risk") || combined.includes("风险")) return { status: "risk", label: "门槛", text };
+  if (combined.includes("pass") || combined.includes("通过") || combined.includes("达标")) return { status: "pass", label: "门槛", text };
+  return { status: "unknown", label: "门槛", text };
+}
+
+function renderEvidenceStrengthChip(value, selected) {
+  const strength = evidenceStrengthMeta(value, selected);
+  return `<span class="decision-chip evidence-chip is-${escapeAttribute(strength.status)}"><b>证据</b>${escapeHTML(strength.label)}</span>`;
+}
+
+function evidenceStrengthMeta(value, selected = {}) {
+  const normalized = String(value || "").toLowerCase();
+  if (normalized.includes("strong") || normalized.includes("强")) return { status: "strong", label: "强支撑" };
+  if (normalized.includes("weak") || normalized.includes("弱") || normalized.includes("有限")) return { status: "weak", label: "需补强" };
+  const score = Number(selected.experience_match || selected.match || 0);
+  if (score >= 78) return { status: "strong", label: "强支撑" };
+  if (score >= 64) return { status: "medium", label: "中等支撑" };
+  return { status: "weak", label: "需补强" };
+}
+
+function renderFocusReasonList(reasons, selected) {
+  const items = (reasons.length ? reasons : [selected?.fit_summary || "等待证据"]).slice(0, 3);
+  return `<ul class="focus-evidence-list">${items.map((item) => `<li>${escapeHTML(compactMatchingText(item, 82))}</li>`).join("")}</ul>`;
+}
+
+function renderFocusGap(mainGap, radarSummary) {
+  const status = mainGap ? severityClass(mainGap.severity) : matchingRowStatus(radarSummary?.weakest);
+  const capability = mainGap?.capability || radarSummary?.weakest?.name || "等待差距分析";
+  const text = mainGap ? (mainGap.current || mainGap.expected || mainGap.action || "") : (radarSummary?.weakest?.note || "");
+  return `
+    <span class="focus-status is-${escapeAttribute(status || "pending")}">${escapeHTML(status === "high" ? "高风险" : status === "medium" ? "需关注" : status === "gap" ? "短板" : status === "limited" ? "有限" : "跟踪")}</span>
+    <strong>${escapeHTML(capability)}</strong>
+    ${text ? `<small>${escapeHTML(compactMatchingText(text, 88))}</small>` : ""}
+  `;
+}
+
+function renderFocusText(text, limit = 96) {
+  return `<strong>${escapeHTML(compactMatchingText(text, limit))}</strong>`;
+}
+
+function renderMatchActionList(match, selected, mainGap, radarSummary = {}) {
+  const actions = normalizedDevelopmentActions(match, selected, mainGap, radarSummary);
+  if (!actions.length) return "";
+  return `
+    <table class="match-action-table" aria-label="可提升点">
+      <colgroup>
+        <col class="col-rank">
+        <col class="col-priority">
+        <col class="col-scope">
+        <col class="col-description">
+      </colgroup>
+      <thead>
+        <tr>
+          <th scope="col">序号</th>
+          <th scope="col">优先级</th>
+          <th scope="col">校内/校外</th>
+          <th scope="col">描述</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${actions.map((item, index) => `
+          <tr style="--match-stagger:${index * 34}ms">
+            <td class="action-rank">${index + 1}</td>
+            <td><span class="match-action-priority ${escapeAttribute(developmentPriorityClass(item.priority))}">${escapeHTML(item.priority)}</span></td>
+            <td class="action-scope">${escapeHTML(item.scope)}</td>
+            <td class="action-description">${escapeHTML(item.description)}</td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+function normalizedDevelopmentActions(match, selected, mainGap, radarSummary = {}) {
+  const lowest = radarSummary.weakest;
+  const structured = structuredDevelopmentActions(match);
+  const recommendationActions = normalizedMatchRecommendations(match).map((value) => developmentActionFromRecommendation(value));
+  const fallbackActions = [
+    {
+      priority: "高",
+      scope: developmentScope(selected?.next_proof || mainGap?.action || firstProofGap(selected) || ""),
+      description: selected?.next_proof || mainGap?.action || firstProofGap(selected) || "补充目标岗位相关项目、代码或作品集"
+    },
+    {
+      priority: lowest?.difference < -12 ? "高" : "中",
+      scope: "校内",
+      description: lowest?.name ? `${lowest.name}${lowest.difference > 0 ? "保持优势，沉淀可验证案例。" : "优先补齐，选择课程项目、实验室任务或作品集任务补证据。"}` : "等待六维差距返回后补充提升动作。"
+    },
+    {
+      priority: "低",
+      scope: "校外",
+      description: selected?.category || match?.match_level || "基于六维画像和证据强度筛选投递方向。"
+    }
+  ];
+  return uniqueDevelopmentActions([...structured, ...recommendationActions, ...fallbackActions]);
+}
+
+function structuredDevelopmentActions(match) {
+  if (!Array.isArray(match?.development_actions)) return [];
+  return match.development_actions.map((item) => {
+    const description = cleanDisplayText(item?.description || item?.action || item?.task);
+    if (!description) return null;
+    return {
+      priority: normalizeDevelopmentPriority(item?.priority),
+      scope: developmentScope(description, item?.scope),
+      description: compactMatchingText(description, 180)
+    };
+  }).filter(Boolean);
+}
+
+function developmentActionFromRecommendation(value) {
+  const parsed = parseRecommendationActionMeta(value);
+  return {
+    priority: normalizeDevelopmentPriority(parsed.priority),
+    scope: developmentScope(parsed.text, parsed.scope),
+    description: compactMatchingText(parsed.text, 180)
+  };
+}
+
+function parseRecommendationActionMeta(value) {
+  const raw = compactMatchingText(value, 160);
+  const match = raw.match(/^【([^】]+)】\s*/);
+  if (!match) return { text: raw, scope: "", priority: "" };
+  const tokens = match[1].split(/[·/｜|,，\s]+/).map((item) => item.trim()).filter(Boolean);
+  const scope = tokens.find((item) => item.includes("校内") || item.includes("校外") || item.includes("证据")) || "";
+  const priority = tokens.find((item) => item.includes("优先级") || item.includes("优先") || item.includes("关注")) || "";
+  return {
+    text: raw.slice(match[0].length).trim() || raw,
+    scope,
+    priority
+  };
+}
+
+function uniqueDevelopmentActions(actions) {
+  const seen = new Set();
+  return actions
+    .map((item) => ({
+      priority: normalizeDevelopmentPriority(item?.priority),
+      scope: developmentScope(item?.description, item?.scope),
+      description: compactMatchingText(item?.description, 180)
+    }))
+    .filter((item) => {
+      if (!item.description) return false;
+      const key = `${item.priority}|${item.scope}|${item.description}`.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((left, right) => developmentPriorityWeight(right.priority) - developmentPriorityWeight(left.priority))
+    .slice(0, 12);
+}
+
+function normalizedMatchRecommendations(match) {
+  if (!Array.isArray(match?.recommendations)) return [];
+  const seen = new Set();
+  return match.recommendations
+    .map((item) => compactMatchingText(item, 160))
+    .filter((item) => {
+      const key = item.toLowerCase();
+      if (!item || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 3);
+}
+
+function normalizeDevelopmentPriority(value) {
+  const text = String(value || "");
+  if (text.includes("高") || text.toLowerCase().includes("high")) return "高";
+  if (text.includes("低") || text.toLowerCase().includes("low")) return "低";
+  return "中";
+}
+
+function developmentPriorityWeight(priority) {
+  return { 高: 3, 中: 2, 低: 1 }[normalizeDevelopmentPriority(priority)] || 2;
+}
+
+function developmentPriorityClass(priority) {
+  return {
+    高: "is-high",
+    中: "is-medium",
+    低: "is-low"
+  }[normalizeDevelopmentPriority(priority)] || "is-medium";
+}
+
+function developmentScope(description, explicit = "") {
+  const scope = String(explicit || "");
+  if (scope.includes("校内")) return "校内";
+  if (scope.includes("校外")) return "校外";
+  const text = String(description || "");
+  if (text.includes("校内") || text.includes("课程") || text.includes("实验室") || text.includes("社团") || text.includes("导师") || text.includes("大创")) return "校内";
+  return "校外";
+}
+
+function firstProofGap(job) {
+  return Array.isArray(job?.proof_gaps) ? job.proof_gaps.find(Boolean) : "";
+}
+
+function renderGapCard(gap, index) {
+  const severity = gap?.severity || "待判断";
+  const current = formatAgentDisplayText(gap?.current || "暂无明确证据");
+  const expected = formatAgentDisplayText(gap?.expected || "等待岗位要求");
+  const action = formatAgentDisplayText(gap?.action || "补充可验证成果");
+  return `
+    <article class="gap-card is-${escapeAttribute(severityClass(severity))}" style="--match-stagger:${index * 36}ms">
+      <header>
+        <strong>${escapeHTML(gap?.capability || "能力项")}</strong>
+        <span class="severity ${severityClass(severity)}">${escapeHTML(severity)}</span>
+      </header>
+      <div class="gap-card-body">
+        <p><span>当前</span>${escapeHTML(current)}</p>
+        <p><span>目标</span>${escapeHTML(expected)}</p>
+      </div>
+      <div class="gap-action">
+        <span>建议</span>
+        <strong>${escapeHTML(action)}</strong>
+      </div>
+    </article>
+  `;
+}
+
+function severityClass(severity) {
+  const text = String(severity || "");
+  if (text.includes("高")) return "high";
+  if (text.includes("中")) return "medium";
+  if (text.includes("低")) return "low";
+  return "pending";
+}
+
+function severityWeight(severity) {
+  return { high: 3, medium: 2, low: 1, pending: 0 }[severityClass(severity)] || 0;
+}
+
+function compactMatchingText(text, maxLength = 72) {
+  const value = formatAgentDisplayText(text || "").replace(/\s+/g, " ").trim();
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength - 1).trim()}…`;
+}
+
+function renderMatchingRadar(match, reportRows = []) {
   const svg = document.querySelector("#matchingRadarChart");
   const text = document.querySelector("#matchingRadarText");
   const legend = document.querySelector("#matchingRadarLegend");
+  const insights = document.querySelector("#matchingRadarInsights");
   if (!svg) return;
-  const student = normalizeMatchingRadar(match?.student_radar);
-  const target = normalizeMatchingRadar(match?.target_radar || match?.selected_job?.requirement_radar);
+  const student = matchingStudentRadar(match);
+  const target = matchingTargetRadar(match);
   if (student.length !== benchmarkDimensions.length || target.length !== benchmarkDimensions.length) {
     renderMatchingRadarWaiting(svg);
     if (legend) legend.innerHTML = "";
     if (text) text.textContent = "等待首选岗位目标能力雷达。";
+    if (insights) insights.innerHTML = "";
     return;
   }
+  const rows = reportRows.length ? reportRows : normalizedMatchingReportRows(match);
+  const rowByName = new Map(rows.map((row) => [row.name, row]));
   const center = { x: 180, y: 158 };
   const radius = 104;
   const ring = (score) => benchmarkDimensions.map((_, index) => {
@@ -2638,16 +2855,23 @@ function renderMatchingRadar(match) {
     ${benchmarkDimensions.map((name, index) => {
       const outer = pointFor(index, benchmarkDimensions.length, radius, center);
       const label = pointFor(index, benchmarkDimensions.length, radius + 28, center);
+      const status = matchingRowStatus(rowByName.get(name));
+      const statusPoint = pointFor(index, benchmarkDimensions.length, radius + 50, center);
       return `
-        <line class="radar-axis" x1="${center.x}" y1="${center.y}" x2="${outer.x.toFixed(2)}" y2="${outer.y.toFixed(2)}"></line>
+        <line class="radar-axis matching-radar-axis is-${escapeAttribute(status)}" x1="${center.x}" y1="${center.y}" x2="${outer.x.toFixed(2)}" y2="${outer.y.toFixed(2)}"></line>
         <text class="radar-label" x="${label.x.toFixed(2)}" y="${label.y.toFixed(2)}" text-anchor="middle">${escapeHTML(name)}</text>
+        ${status !== "fit" ? `<text class="matching-radar-axis-status is-${escapeAttribute(status)}" x="${statusPoint.x.toFixed(2)}" y="${statusPoint.y.toFixed(2)}" text-anchor="middle">${escapeHTML(matchingStatusLabel(status))}</text>` : ""}
       `;
     }).join("")}
     <polygon class="matching-radar-area is-target" points="${targetPoints}"></polygon>
     <polygon class="matching-radar-area is-student" points="${studentPoints}"></polygon>
     ${student.map((item, index) => {
       const point = pointFor(index, benchmarkDimensions.length, radius * radarVisualRatio(item.score), center);
-      return `<circle class="matching-radar-dot is-student" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="3.5"></circle>`;
+      const status = matchingRowStatus(rowByName.get(item.name));
+      return `
+        ${status === "gap" || status === "limited" ? `<circle class="matching-radar-highlight is-${escapeAttribute(status)}" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="9"></circle>` : ""}
+        <circle class="matching-radar-dot is-student" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="3.5"></circle>
+      `;
     }).join("")}
     ${target.map((item, index) => {
       const point = pointFor(index, benchmarkDimensions.length, radius * radarVisualRatio(item.score), center);
@@ -2661,14 +2885,34 @@ function renderMatchingRadar(match) {
     `;
   }
   if (text) {
-    const gaps = benchmarkDimensions.map((name, index) => ({
-      name,
-      gap: student[index].score - target[index].score
-    }));
-    const weakest = gaps.reduce((current, item) => item.gap < current.gap ? item : current, gaps[0]);
-    const strongest = gaps.reduce((current, item) => item.gap > current.gap ? item : current, gaps[0]);
-    text.textContent = `${match?.target_role || match?.selected_job?.title || "首选岗位"}要求下，最大短板为${weakest.name}${weakest.gap}分，当前相对优势为${strongest.name}${strongest.gap >= 0 ? "+" : ""}${strongest.gap}分。`;
+    const summary = matchingRadarSummary(rows);
+    const weakest = summary.weakest;
+    const strongest = summary.strongest;
+    text.textContent = `${match?.target_role || match?.selected_job?.title || "首选岗位"}要求下，${weakest ? `最大短板为${weakest.name}${weakest.difference}分` : "短板待判断"}，${strongest ? `当前相对优势为${strongest.name}${strongest.difference >= 0 ? "+" : ""}${strongest.difference}分` : "优势待判断"}。`;
   }
+  if (insights) {
+    insights.innerHTML = renderMatchingRadarInsights(rows);
+  }
+}
+
+function renderMatchingRadarInsights(rows = []) {
+  const summary = matchingRadarSummary(rows);
+  const priorityRows = [
+    ...summary.weakRows.sort((left, right) => Number(left.difference || 0) - Number(right.difference || 0)),
+    ...summary.advantageRows.sort((left, right) => Number(right.difference || 0) - Number(left.difference || 0)),
+  ].slice(0, 4);
+  if (!priorityRows.length) {
+    return `<span class="radar-insight is-fit"><b>达标</b>六维差距暂无明显短板</span>`;
+  }
+  return priorityRows.map((row) => {
+    const status = matchingRowStatus(row);
+    return `
+      <span class="radar-insight is-${escapeAttribute(status)}">
+        <b>${escapeHTML(row.name)} · ${escapeHTML(matchingStatusLabel(status))}</b>
+        ${escapeHTML(compactMatchingText(row.note || matchingRowNote(row), 52))}
+      </span>
+    `;
+  }).join("");
 }
 
 function renderMatchingRadarWaiting(svg) {
@@ -2735,38 +2979,46 @@ function renderTopJobs(jobs) {
   const matchingList = document.querySelector("#matchingJobs");
   const outputList = document.querySelector("#topJobs");
   if (matchingList) {
-    matchingList.innerHTML = jobs.map((job) => renderMatchingJobCard(job)).join("");
+    matchingList.innerHTML = jobs.length
+      ? jobs.map((job, index) => renderMatchingJobCard(job, index)).join("")
+      : `<div class="matching-empty">等待 Job Matching 返回岗位队列。</div>`;
   }
   if (outputList) {
     outputList.innerHTML = jobs.map((job) => renderOutputJobCard(job)).join("");
   }
 }
 
-function renderMatchingJobCard(job) {
+function renderMatchingJobCard(job, index = 0) {
   const reasons = Array.isArray(job.reasons) ? job.reasons : [];
+  const proofGaps = Array.isArray(job.proof_gaps) ? job.proof_gaps : [];
   const category = job.category || "推荐岗位";
   const educationGate = job.education_gate || "";
+  const rank = Number(job.rank || index + 1);
+  const isTop = rank === 1;
+  const sizeClass = isTop ? " is-top is-large" : " is-small";
   return `
-    <article class="matching-job-card">
+    <article class="matching-job-card${sizeClass}" data-job-card-size="${isTop ? "large" : "small"}" style="--match-stagger:${index * 42}ms">
       <header>
         <div>
-          <span class="job-rank">${job.rank || ""}</span>
+          <span class="job-rank">${rank ? `#${rank}` : ""}</span>
           <h3>${escapeHTML(job.title || "")}</h3>
         </div>
         <strong>${safeScore(job.match)}%</strong>
       </header>
       <div class="job-tags">
         <span>${escapeHTML(category)}</span>
-        ${educationGate ? `<span>${escapeHTML(educationGate)}</span>` : ""}
+        ${educationGate ? renderEducationGateChip(educationGate, job.education_gate_status) : ""}
+        ${renderEvidenceStrengthChip(job.evidence_strength, job)}
       </div>
       <div class="job-progress-group">
         ${renderJobProgress("综合", job.match)}
         ${renderJobProgress("六维", job.ability_match || job.match)}
         ${renderJobProgress("经历", job.experience_match)}
       </div>
-      ${job.fit_summary ? `<p>${escapeHTML(formatAgentDisplayText(job.fit_summary))}</p>` : ""}
-      ${reasons.length ? `<p>${escapeHTML(formatAgentDisplayText(reasons.join("；")))}</p>` : ""}
-      ${job.next_proof ? `<small>${escapeHTML(formatAgentDisplayText(job.next_proof))}</small>` : ""}
+      ${job.fit_summary ? `<p class="job-fit-summary">${escapeHTML(compactMatchingText(job.fit_summary, isTop ? 190 : 118))}</p>` : ""}
+      ${reasons.length ? `<ul class="job-reason-list">${reasons.slice(0, isTop ? 4 : 2).map((item) => `<li>${escapeHTML(compactMatchingText(item, isTop ? 82 : 58))}</li>`).join("")}</ul>` : ""}
+      ${proofGaps.length ? `<div class="job-proof-gaps"><span>缺口</span>${proofGaps.slice(0, 3).map((item) => `<b>${escapeHTML(compactMatchingText(item, 46))}</b>`).join("")}</div>` : ""}
+      ${job.next_proof ? `<small class="job-next-proof"><span>下一步</span>${escapeHTML(compactMatchingText(job.next_proof, isTop ? 120 : 74))}</small>` : ""}
     </article>
   `;
 }
@@ -3160,11 +3412,11 @@ function repairStaleSynthesisStream(stream) {
   if (!item || item.status === "done" || item.status === "failed") return stream;
   const updatedAt = Date.parse(item.updatedAt || stream.updatedAt || "");
   if (!Number.isFinite(updatedAt) || Date.now() - updatedAt < 2 * 60 * 1000) return stream;
-  item.status = "done";
-  item.message = "Synthesis Arbiter 已返回结构化岗位匹配结果。";
+  item.status = "failed";
+  item.message = "Synthesis Arbiter 未收到结束事件，请查看匹配阶段状态或重试。";
   item.typingDone = true;
   if (item.outputPreview && !item.typedOutput) item.typedOutput = item.outputPreview;
-  stream.status = "done";
+  stream.status = "failed";
   stream.summary = item.message;
   return stream;
 }
@@ -3706,12 +3958,340 @@ function renderAgentQueueItem(agent, expanded = false, messageID = "") {
 
 function renderAgentStreamDetail(agent, messageID = "") {
   const hasOutput = Boolean(agent.outputPreview);
-  const text = hasOutput ? agent.typedOutput || agent.outputPreview || "" : agent.message || agent.focus || "等待 Agent 输出。";
-  const cursor = hasOutput && !agent.typingDone ? `<span class="agent-stream-cursor" aria-hidden="true"></span>` : "";
+  const isComplete = agent.status === "done" || agent.status === "failed" || agent.typingDone;
+  const text = hasOutput
+    ? isComplete
+      ? agent.outputPreview || agent.typedOutput || ""
+      : agent.typedOutput || agent.outputPreview || ""
+    : agent.message || agent.focus || "等待 Agent 输出。";
+  const cursor = hasOutput && !isComplete ? `<span class="agent-stream-cursor" aria-hidden="true"></span>` : "";
+  const liveState = agentStreamLiveState(agent, hasOutput);
   const typeoutKey = `${messageID}:${agent.key}`;
   return `
-    <span class="agent-stream-detail"><span class="agent-stream-typeout" data-agent-typeout="${escapeAttribute(typeoutKey)}" data-agent-message="${escapeAttribute(messageID)}" data-agent-key="${escapeAttribute(agent.key)}"><span data-agent-typeout-text="${escapeAttribute(typeoutKey)}" data-agent-message="${escapeAttribute(messageID)}" data-agent-key="${escapeAttribute(agent.key)}">${escapeHTML(formatAgentDisplayText(text))}</span>${cursor}</span></span>
+    <span class="agent-stream-detail">
+      <span class="agent-output-board" data-agent-structured-output="${escapeAttribute(typeoutKey)}" data-agent-message="${escapeAttribute(messageID)}" data-agent-key="${escapeAttribute(agent.key)}">${renderAgentStructuredOutputContent(text, agent)}</span>
+      <span class="agent-output-live">
+        <span class="agent-output-live-head"><span>实时流</span><b>${liveState}</b></span>
+        <span class="agent-stream-typeout" data-agent-typeout="${escapeAttribute(typeoutKey)}" data-agent-message="${escapeAttribute(messageID)}" data-agent-key="${escapeAttribute(agent.key)}"><span data-agent-typeout-text="${escapeAttribute(typeoutKey)}" data-agent-message="${escapeAttribute(messageID)}" data-agent-key="${escapeAttribute(agent.key)}">${escapeHTML(formatAgentDisplayText(text))}</span>${cursor}</span>
+      </span>
+    </span>
   `;
+}
+
+function renderAgentStructuredOutputContent(text, agent = {}) {
+  const model = buildAgentOutputViewModel(text, agent);
+  if (model.isEmpty) {
+    return `
+      <span class="agent-output-kicker"><i aria-hidden="true"></i><span>重点视图</span><b>等待</b></span>
+      <span class="agent-output-skeleton">
+        <span></span><span></span><span></span>
+      </span>
+    `;
+  }
+  const metricItems = layoutAgentOutputItems(model.metrics);
+  const sectionItems = layoutAgentOutputItems(model.sections);
+  return `
+    <span class="agent-output-kicker"><i aria-hidden="true"></i><span>重点视图</span><b>${escapeHTML(model.sourceLabel)}</b></span>
+    ${model.summary ? `<span class="agent-output-summary">${escapeHTML(model.summary)}</span>` : ""}
+    ${metricItems.length ? `<span class="agent-output-metrics">${metricItems.map(({ item, index, span }) => `<span style="--agent-output-span:${span}; --agent-section-index:${index}"><b>${escapeHTML(item.label)}</b>${escapeHTML(item.value)}</span>`).join("")}</span>` : ""}
+    ${sectionItems.length ? `<span class="agent-output-sections">
+      ${sectionItems.map(({ item: section, index, span }) => `
+        <span class="agent-output-section" style="--agent-output-span:${span}; --agent-section-index:${index}">
+          <span class="agent-output-section-title">${escapeHTML(section.label)}</span>
+          ${section.items.map((item) => `<span class="agent-output-point">${escapeHTML(item)}</span>`).join("")}
+        </span>
+      `).join("")}
+    </span>` : ""}
+  `;
+}
+
+function layoutAgentOutputItems(items, maxPerRow = 3) {
+  const list = Array.isArray(items) ? items.filter(Boolean) : [];
+  const rows = [];
+  for (let index = 0; index < list.length; index += maxPerRow) {
+    rows.push(list.slice(index, index + maxPerRow));
+  }
+  return rows.flatMap((row, rowIndex) => {
+    const span = agentOutputSpanForRowCount(row.length);
+    return row.map((item, rowItemIndex) => ({
+      item,
+      span,
+      index: rowIndex * maxPerRow + rowItemIndex
+    }));
+  });
+}
+
+function agentOutputSpanForRowCount(count) {
+  if (count <= 1) return 6;
+  if (count === 2) return 3;
+  return 2;
+}
+
+function agentStreamLiveState(agent, hasOutput = Boolean(agent?.outputPreview)) {
+  if (agent?.status === "failed") return "已失败";
+  if (agent?.status === "done" || agent?.typingDone) return "已完成";
+  return hasOutput ? "正在组织" : "等待输出";
+}
+
+function buildAgentOutputViewModel(text, agent = {}) {
+  const cleaned = stripAgentOutputText(text);
+  const payload = parseAgentOutputPayload(cleaned);
+  if (payload) {
+    return buildStructuredAgentOutputView(payload, agent, cleaned);
+  }
+  const fallbackItems = extractReadablePoints(cleaned, 5);
+  const summary = compactAgentText(fallbackItems[0] || agent.message || agent.focus || "", 120);
+  const sections = fallbackItems.length
+    ? [{ label: "关键内容", items: fallbackItems.slice(0, 4).map((item) => compactAgentText(item, 86)) }]
+    : [];
+  return {
+    isEmpty: !summary && sections.length === 0,
+    sourceLabel: "文本",
+    summary,
+    metrics: agent.reasoningEffort ? [{ label: "思考", value: agent.reasoningEffort }] : [],
+    sections
+  };
+}
+
+function buildStructuredAgentOutputView(payload, agent, rawText) {
+  const summary = compactAgentText(firstAgentOutputValue(payload, [
+    "summary",
+    "conclusion",
+    "rationale",
+    "recommendation",
+    "recommended_jobs_scope",
+    "target_role",
+    "fit_summary",
+    "final_recommendation",
+    "decision"
+  ]) || agent.message || agent.focus || "", 132);
+  const sectionDefs = [
+    { label: "推荐方向", keys: ["recommended_jobs", "recommended_jobs_scope", "job_families", "target_roles", "target_role", "best_fit_roles", "role_recommendations", "recommended_roles"] },
+    { label: "判断依据", keys: ["rationale", "evidence", "supporting_evidence", "strengths", "signals", "fit_reasoning", "fit_summary", "method_summary", "positive_signals"] },
+    { label: "风险盲点", keys: ["risks", "counterfactual_risks", "gaps", "gap_summary", "weaknesses", "concerns", "risk_summary"] },
+    { label: "下一步", keys: ["actions", "next_steps", "recommendations", "learning_path", "development_plan", "roadmap", "mitigations"] }
+  ];
+  const sections = sectionDefs
+    .map((section) => ({
+      label: section.label,
+      items: collectAgentOutputItems(payload, section.keys).slice(0, 3).map((item) => compactAgentText(item, 88))
+    }))
+    .filter((section) => section.items.length);
+  if (sections.length === 0) {
+    const readable = extractReadablePoints(rawText, 4);
+    if (readable.length) sections.push({ label: "关键内容", items: readable.map((item) => compactAgentText(item, 88)) });
+  }
+  return {
+    isEmpty: !summary && sections.length === 0,
+    sourceLabel: "结构化",
+    summary,
+    metrics: collectAgentOutputMetrics(payload, agent).slice(0, 3),
+    sections
+  };
+}
+
+function stripAgentOutputText(text) {
+  return formatAgentDisplayText(text)
+    .replace(/```(?:json)?/gi, "")
+    .replace(/```/g, "")
+    .trim();
+}
+
+function parseAgentOutputPayload(text) {
+  const jsonText = extractBalancedJSON(text);
+  if (jsonText) {
+    try {
+      return JSON.parse(jsonText);
+    } catch {
+      // Truncated streaming previews still contain useful JSON key-value pairs.
+    }
+  }
+  return parseLooseAgentOutputPayload(text);
+}
+
+function extractBalancedJSON(text) {
+  const source = String(text || "");
+  const start = source.search(/[\[{]/);
+  if (start < 0) return "";
+  const opener = source[start];
+  const closer = opener === "{" ? "}" : "]";
+  let depth = 0;
+  let inString = false;
+  let quote = "";
+  let escaped = false;
+  for (let index = start; index < source.length; index += 1) {
+    const char = source[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === quote) {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === "\"" || char === "'") {
+      inString = true;
+      quote = char;
+      continue;
+    }
+    if (char === opener) depth += 1;
+    if (char === closer) depth -= 1;
+    if (depth === 0) return source.slice(start, index + 1);
+  }
+  return "";
+}
+
+function parseLooseAgentOutputPayload(text) {
+  const source = String(text || "");
+  const values = {};
+  const stringPair = /"([^"]+)"\s*:\s*"((?:\\.|[^"\\])*)"/g;
+  let match = stringPair.exec(source);
+  while (match) {
+    values[match[1]] = decodeLooseJSONString(match[2]);
+    match = stringPair.exec(source);
+  }
+  const numberPair = /"([^"]+)"\s*:\s*(-?\d+(?:\.\d+)?)/g;
+  match = numberPair.exec(source);
+  while (match) {
+    if (values[match[1]] == null) values[match[1]] = match[2];
+    match = numberPair.exec(source);
+  }
+  return Object.keys(values).length ? values : null;
+}
+
+function decodeLooseJSONString(value) {
+  try {
+    return JSON.parse(`"${value}"`);
+  } catch {
+    return String(value || "").replace(/\\"/g, "\"").replace(/\\n/g, " ");
+  }
+}
+
+function firstAgentOutputValue(payload, keys) {
+  const values = collectAgentOutputItems(payload, keys);
+  return values[0] || "";
+}
+
+function collectAgentOutputItems(payload, keys) {
+  const normalized = new Set(keys.map((key) => key.toLowerCase()));
+  const values = [];
+  walkAgentOutput(payload, (key, value) => {
+    if (normalized.has(String(key || "").toLowerCase())) {
+      values.push(...flattenAgentOutputValue(value));
+    }
+  });
+  return dedupeAgentOutputItems(values);
+}
+
+function walkAgentOutput(value, visit, key = "") {
+  if (!value || typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    value.forEach((item) => walkAgentOutput(item, visit, key));
+    return;
+  }
+  Object.entries(value).forEach(([entryKey, entryValue]) => {
+    visit(entryKey, entryValue);
+    if (entryValue && typeof entryValue === "object") walkAgentOutput(entryValue, visit, entryKey);
+  });
+}
+
+function flattenAgentOutputValue(value) {
+  if (value == null) return [];
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return extractReadablePoints(String(value), 4);
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => flattenAgentOutputValue(item)).slice(0, 8);
+  }
+  if (typeof value === "object") {
+    const preferred = ["title", "name", "role", "job", "direction", "reason", "description", "evidence", "action"];
+    const headline = preferred.map((key) => value[key]).find((item) => item != null && String(item).trim());
+    if (headline) {
+      const detail = ["reason", "description", "evidence", "action"]
+        .map((key) => value[key])
+        .find((item) => item != null && String(item).trim() && String(item).trim() !== String(headline).trim());
+      return [detail ? `${headline}：${detail}` : String(headline)];
+    }
+    return Object.entries(value)
+      .filter(([, item]) => item == null || typeof item !== "object")
+      .slice(0, 3)
+      .map(([entryKey, item]) => `${agentOutputKeyLabel(entryKey)}：${item}`);
+  }
+  return [];
+}
+
+function collectAgentOutputMetrics(payload, agent = {}) {
+  const metrics = [];
+  if (agent.reasoningEffort) metrics.push({ label: "思考", value: agent.reasoningEffort });
+  const metricKeys = ["complexity", "confidence", "match_score", "overall_match", "match_level", "reasoning_effort", "synthesis_effort"];
+  walkAgentOutput(payload, (key, value) => {
+    if (metrics.length >= 4) return;
+    const normalized = String(key || "").toLowerCase();
+    if (!metricKeys.includes(normalized)) return;
+    if (value == null || typeof value === "object") return;
+    const text = compactAgentText(String(value), 18);
+    if (text) metrics.push({ label: agentOutputKeyLabel(key), value: text });
+  });
+  return dedupeAgentOutputMetrics(metrics);
+}
+
+function extractReadablePoints(text, limit = 4) {
+  const source = String(text || "")
+    .replace(/[{}[\]"]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!source) return [];
+  return source
+    .split(/(?:\n+|[。；;]|(?<!\d),(?!\d)|，)/)
+    .map((item) => item.replace(/^[\s:：、,\-.]+/, "").trim())
+    .filter((item) => item.length >= 4)
+    .slice(0, limit);
+}
+
+function compactAgentText(text, maxLength = 96) {
+  const value = String(text || "").replace(/\s+/g, " ").trim();
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength - 1).trim()}…`;
+}
+
+function dedupeAgentOutputItems(items) {
+  const seen = new Set();
+  return items
+    .map((item) => compactAgentText(item, 120))
+    .filter((item) => {
+      const key = item.toLowerCase();
+      if (!item || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function dedupeAgentOutputMetrics(metrics) {
+  const seen = new Set();
+  return metrics.filter((item) => {
+    const key = `${item.label}:${item.value}`.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function agentOutputKeyLabel(key) {
+  const labels = {
+    complexity: "复杂度",
+    confidence: "置信",
+    match_score: "匹配",
+    overall_match: "匹配",
+    match_level: "评级",
+    reasoning_effort: "思考",
+    synthesis_effort: "综合",
+    rationale: "依据",
+    recommendation: "建议",
+    risk_summary: "风险"
+  };
+  return labels[String(key || "").toLowerCase()] || String(key || "").replaceAll("_", " ");
 }
 
 function toggleAgentStreamDetail(agentKey, messageID = "") {
@@ -3751,20 +4331,79 @@ function patchAgentStreamText(messageID, agentKey) {
   textNode.textContent = formatAgentDisplayText(agent.typedOutput || agent.outputPreview || "");
   if (typeout) {
     let cursor = typeout.querySelector(".agent-stream-cursor");
-    if (!agent.typingDone && !cursor) {
+    const showCursor = !agent.typingDone && agent.status !== "done" && agent.status !== "failed";
+    if (showCursor && !cursor) {
       cursor = document.createElement("span");
       cursor.className = "agent-stream-cursor";
       cursor.setAttribute("aria-hidden", "true");
       typeout.append(cursor);
     }
-    if (cursor) cursor.hidden = Boolean(agent.typingDone);
+    if (cursor) cursor.hidden = !showCursor;
+    const liveState = typeout.closest(".agent-output-live")?.querySelector(".agent-output-live-head b");
+    if (liveState) liveState.textContent = agentStreamLiveState(agent);
     if (stickToBottom) {
       window.requestAnimationFrame(() => {
         typeout.scrollTop = typeout.scrollHeight;
       });
     }
   }
+  const structured = assistantMessages.querySelector(`[data-agent-structured-output="${CSS.escape(typeoutKey)}"]`)
+    || [...assistantMessages.querySelectorAll("[data-agent-structured-output]")]
+      .find((node) => node.dataset.agentKey === key);
+  if (structured) {
+    const structuredText = stableAgentStructuredOutputText(agent);
+    const signature = agentStructuredOutputSignature(structuredText, agent);
+    if (structured.dataset.agentStructuredSignature !== signature) {
+      structured.innerHTML = renderAgentStructuredOutputContent(structuredText, agent);
+      structured.dataset.agentStructuredSignature = signature;
+    }
+  }
   return true;
+}
+
+function stableAgentStructuredOutputText(agent) {
+  const text = agent?.status === "done" || agent?.status === "failed" || agent?.typingDone
+    ? agent.outputPreview || agent.typedOutput || ""
+    : agent?.typedOutput || agent?.outputPreview || "";
+  if (!agent || !text) return text || "";
+  if (agent.status === "done" || agent.status === "failed" || agent.typingDone) {
+    agent.structuredOutputText = text;
+    agent.structuredOutputUpdatedAt = Date.now();
+    return text;
+  }
+  const previous = agent.structuredOutputText || "";
+  const now = Date.now();
+  const lastUpdate = Number(agent.structuredOutputUpdatedAt || 0);
+  const hasBoundary = /[。；;.!?]\s*$/.test(text) || /[}\]]\s*$/.test(text);
+  const shouldRefresh = !previous
+    || text.length < previous.length
+    || text.length - previous.length >= 140
+    || (hasBoundary && now - lastUpdate >= 220)
+    || now - lastUpdate >= 900;
+  if (shouldRefresh) {
+    agent.structuredOutputText = text;
+    agent.structuredOutputUpdatedAt = now;
+    return text;
+  }
+  return previous;
+}
+
+function agentStructuredOutputSignature(text, agent = {}) {
+  return [
+    agent.status || "",
+    agent.reasoningEffort || "",
+    agent.message || "",
+    hashAgentOutputString(text)
+  ].join(":");
+}
+
+function hashAgentOutputString(value) {
+  const text = String(value || "");
+  let hash = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = ((hash << 5) - hash + text.charCodeAt(index)) | 0;
+  }
+  return String(hash);
 }
 
 function syncAgentTypewriterForEvent(messageID, agentKey) {
@@ -3847,7 +4486,11 @@ function renderAgentStreamLog(logs, key = "agent-stream-log") {
     <details class="agent-stream-log" data-agent-stream-log="${escapeAttribute(key)}">
       <summary>事件日志</summary>
       ${recent.map((item) => `
-        <span>${escapeHTML(formatTime(item.time))} · ${escapeHTML(formatAgentDisplayText(item.agent || item.agentKey || "Agent"))} · ${escapeHTML(formatAgentDisplayText(item.message || item.status))}</span>
+        <span class="agent-stream-log-item">
+          <b>${escapeHTML(formatTime(item.time))}</b>
+          <em>${escapeHTML(formatAgentDisplayText(item.agent || item.agentKey || "Agent"))}</em>
+          <i>${escapeHTML(formatAgentDisplayText(item.message || item.status))}</i>
+        </span>
       `).join("")}
     </details>
   `;
@@ -4014,12 +4657,13 @@ function assistantContextForModel() {
   const info = profile.basic_info || {};
   const match = diagnosis.matching_result || {};
   const topJobs = Array.isArray(profile.top5_matching_jobs) ? profile.top5_matching_jobs.slice(0, 5) : [];
-  const sixDimScores = Array.isArray(match.student_radar) && match.student_radar.length
-    ? match.student_radar
-    : Array.isArray(profile.radar_data) ? profile.radar_data : [];
-  const radarItems = benchmarkedEvidenceItems(profile);
-  const radarSeries = radarItems.length ? buildRadarSeries(profile, radarItems) : [];
+  const profileRadar = normalizedProfileRadarData(profile);
+  const sixDimScores = profileRadar.length
+    ? radarScoresToMatchingDimensions(profileRadar)
+    : Array.isArray(match.student_radar) ? match.student_radar : [];
+  const radarSeries = normalizedBackendRadarSeries(profile);
   const gaps = Array.isArray(match.gap_details) ? match.gap_details.slice(0, 5) : [];
+  const developmentActions = Array.isArray(match.development_actions) ? match.development_actions.slice(0, 12) : [];
   const stages = Array.isArray(diagnosis.path_plan?.stages) ? diagnosis.path_plan.stages.slice(0, 3) : [];
   return {
     status: "ready",
@@ -4046,6 +4690,7 @@ function assistantContextForModel() {
       target_role: match.target_role || "",
       overall_match: match.overall_match || "",
       match_level: match.match_level || "",
+      development_actions: developmentActions,
       gaps
     },
     path_stages: stages.map((stage) => ({

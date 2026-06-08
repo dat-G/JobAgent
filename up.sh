@@ -40,7 +40,7 @@ usage: $0 [up|down|restart|status|logs] [options]
 
 Options:
   --cache, --presto-cache               enable Presto persistent response cache
-  --no-cache, --no-presto-cache         disable Presto persistent response cache
+  --no-cache, --no-presto-cache         disable Presto persistent response cache (default)
   --clear-cache, --presto-clear-cache   clear Presto cache before starting
   --cache-dir DIR, --presto-cache-dir DIR
                                        set Presto persistent cache directory
@@ -113,7 +113,9 @@ LEGATO_USE_PRESTO="${LEGATO_USE_PRESTO:-1}"
 LEGATO_PRESTO_URL="${LEGATO_PRESTO_URL:-$PRESTO_URL}"
 LEGATO_TIMEOUT_MS="${LEGATO_TIMEOUT_MS:-60000}"
 DIAGNOSIS_TIMEOUT_SECONDS="${DIAGNOSIS_TIMEOUT_SECONDS:-120}"
+JOB_MATCHING_TIMEOUT_SECONDS="${JOB_MATCHING_TIMEOUT_SECONDS:-600}"
 ITEM_BENCHMARK_MAX_REQUESTS="${ITEM_BENCHMARK_MAX_REQUESTS:-5}"
+ITEM_BENCHMARK_BATCH_WORKERS="${ITEM_BENCHMARK_BATCH_WORKERS:-2}"
 
 BACKEND_DIR="$(absolute_path "${BACKEND_DIR:-backend}")"
 PRESTO_DIR="$(absolute_path "${PRESTO_DIR:-Agents/presto}")"
@@ -127,11 +129,14 @@ PID_DIR="$(absolute_path "${PID_DIR:-$RUN_DIR/pids}")"
 BIN_DIR="$(absolute_path "${BIN_DIR:-$RUN_DIR/bin}")"
 GOCACHE="${GOCACHE:-/private/tmp/jobagent-gocache}"
 WAIT_TIMEOUT_SECONDS="${WAIT_TIMEOUT_SECONDS:-20}"
-PRESTO_CACHE="${PRESTO_CACHE:-1}"
+PRESTO_CACHE="${PRESTO_CACHE:-0}"
 PRESTO_CLEAR_CACHE="${PRESTO_CLEAR_CACHE:-0}"
 PRESTO_CACHE_DIR="$(absolute_path "${PRESTO_CACHE_DIR:-$RUN_DIR/presto-cache}")"
 
-mkdir -p "$LOG_DIR" "$PID_DIR" "$BIN_DIR" "$GOCACHE" "$PRESTO_CACHE_DIR"
+mkdir -p "$LOG_DIR" "$PID_DIR" "$BIN_DIR" "$GOCACHE"
+if is_truthy "$PRESTO_CACHE" || is_truthy "$PRESTO_CLEAR_CACHE"; then
+  mkdir -p "$PRESTO_CACHE_DIR"
+fi
 
 health_ok() {
   local url="$1"
@@ -256,7 +261,7 @@ start_presto() {
       args+=("--cache" "--cache-dir" "$PRESTO_CACHE_DIR")
     fi
     if is_truthy "$PRESTO_CLEAR_CACHE"; then
-      args+=("--clear-cache")
+      args+=("--clear-cache" "--cache-dir" "$PRESTO_CACHE_DIR")
     fi
     start_detached "$log_file" "$pid_file" "${args[@]}"
   )
@@ -289,7 +294,9 @@ start_jobagent() {
     export LEGATO_USE_PRESTO
     export LEGATO_TIMEOUT_MS
     export DIAGNOSIS_TIMEOUT_SECONDS
+    export JOB_MATCHING_TIMEOUT_SECONDS
     export ITEM_BENCHMARK_MAX_REQUESTS
+    export ITEM_BENCHMARK_BATCH_WORKERS
     export LEGATO_PYTHON
     export FRONTEND_DIR
     export MODEL_ROUTING_CONFIG
@@ -335,7 +342,8 @@ up() {
   ensure_legato_cli
 
   export PRESTO_URL LEGATO_PRESTO_URL LEGATO_USE_PRESTO LEGATO_TIMEOUT_MS
-  export ITEM_BENCHMARK_MAX_REQUESTS
+  export JOB_MATCHING_TIMEOUT_SECONDS
+  export ITEM_BENCHMARK_MAX_REQUESTS ITEM_BENCHMARK_BATCH_WORKERS
   export MODEL_ROUTING_CONFIG GOCACHE FRONTEND_DIR
 
   if [[ "$START_PRESTO" == "1" || "$START_PRESTO" == "true" ]]; then

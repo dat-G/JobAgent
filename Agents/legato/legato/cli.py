@@ -25,6 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
             "item_benchmark",
             "major_baseline",
             "job_matching",
+            "source_text",
             "answer",
         ],
         help="Run one workflow stage and return partial structured data.",

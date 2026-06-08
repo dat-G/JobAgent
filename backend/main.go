@@ -50,6 +50,7 @@ type AbilityProfile struct {
 	BasicInfo           BasicInfo        `json:"basic_info"`
 	Education           []EducationItem  `json:"education"`
 	RadarData           []ScoreDimension `json:"radar_data"`
+	RadarSeries         []RadarSeries    `json:"radar_series,omitempty"`
 	EvidenceSummary     []EvidenceItem   `json:"evidence_summary"`
 	AwardsStatus        string           `json:"awards_status"`
 	Awards              []AwardItem      `json:"awards"`
@@ -93,6 +94,14 @@ type ScoreDimension struct {
 	MaxScore int    `json:"max_score"`
 	Level    string `json:"level"`
 	Reason   string `json:"reason"`
+}
+
+type RadarSeries struct {
+	Key    string           `json:"key"`
+	Label  string           `json:"label"`
+	Count  int              `json:"count"`
+	Source string           `json:"source,omitempty"`
+	Scores []ScoreDimension `json:"scores"`
 }
 
 type EvidenceItem struct {
@@ -145,18 +154,21 @@ type MajorBaseline struct {
 }
 
 type MatchedJob struct {
-	Rank             int              `json:"rank"`
-	Title            string           `json:"title"`
-	Category         string           `json:"category,omitempty"`
-	Match            int              `json:"match"`
-	AbilityMatch     int              `json:"ability_match,omitempty"`
-	ExperienceMatch  int              `json:"experience_match,omitempty"`
-	EducationGate    string           `json:"education_gate,omitempty"`
-	FitSummary       string           `json:"fit_summary,omitempty"`
-	Risk             string           `json:"risk,omitempty"`
-	RequirementRadar []ScoreDimension `json:"requirement_radar,omitempty"`
-	Reasons          []string         `json:"reasons"`
-	NextProof        string           `json:"next_proof"`
+	Rank                int              `json:"rank"`
+	Title               string           `json:"title"`
+	Category            string           `json:"category,omitempty"`
+	Match               int              `json:"match"`
+	AbilityMatch        int              `json:"ability_match,omitempty"`
+	ExperienceMatch     int              `json:"experience_match,omitempty"`
+	EducationGate       string           `json:"education_gate,omitempty"`
+	EducationGateStatus string           `json:"education_gate_status,omitempty"`
+	EvidenceStrength    string           `json:"evidence_strength,omitempty"`
+	FitSummary          string           `json:"fit_summary,omitempty"`
+	Risk                string           `json:"risk,omitempty"`
+	RequirementRadar    []ScoreDimension `json:"requirement_radar,omitempty"`
+	Reasons             []string         `json:"reasons"`
+	ProofGaps           []string         `json:"proof_gaps,omitempty"`
+	NextProof           string           `json:"next_proof"`
 }
 
 type PathPlan struct {
@@ -186,20 +198,27 @@ type Resource struct {
 }
 
 type MatchingResult struct {
-	TargetRole      string           `json:"target_role"`
-	OverallMatch    int              `json:"overall_match"`
-	MatchLevel      string           `json:"match_level"`
-	Source          string           `json:"source,omitempty"`
-	MethodSummary   string           `json:"method_summary,omitempty"`
-	FitSummary      string           `json:"fit_summary,omitempty"`
-	SelectedJob     MatchedJob       `json:"selected_job,omitempty"`
-	StudentRadar    []ScoreDimension `json:"student_radar,omitempty"`
-	TargetRadar     []ScoreDimension `json:"target_radar,omitempty"`
-	ReportSections  []ReportRow      `json:"report_sections"`
-	GapDetails      []GapDetail      `json:"gap_details"`
-	Recommendations []string         `json:"recommendations"`
-	Reasons         []string         `json:"recommended_reasons"`
-	AgentNotes      []string         `json:"agent_notes,omitempty"`
+	TargetRole         string              `json:"target_role"`
+	OverallMatch       int                 `json:"overall_match"`
+	MatchLevel         string              `json:"match_level"`
+	Source             string              `json:"source,omitempty"`
+	MethodSummary      string              `json:"method_summary,omitempty"`
+	FitSummary         string              `json:"fit_summary,omitempty"`
+	SelectedJob        MatchedJob          `json:"selected_job,omitempty"`
+	StudentRadar       []ScoreDimension    `json:"student_radar,omitempty"`
+	TargetRadar        []ScoreDimension    `json:"target_radar,omitempty"`
+	ReportSections     []ReportRow         `json:"report_sections"`
+	GapDetails         []GapDetail         `json:"gap_details"`
+	DevelopmentActions []DevelopmentAction `json:"development_actions,omitempty"`
+	Recommendations    []string            `json:"recommendations"`
+	Reasons            []string            `json:"recommended_reasons"`
+	AgentNotes         []string            `json:"agent_notes,omitempty"`
+}
+
+type DevelopmentAction struct {
+	Priority    string `json:"priority"`
+	Scope       string `json:"scope"`
+	Description string `json:"description"`
 }
 
 type ReportRow struct {
@@ -207,6 +226,8 @@ type ReportRow struct {
 	Student    int    `json:"student"`
 	RoleNeed   int    `json:"role_need"`
 	Difference int    `json:"difference"`
+	Status     string `json:"status,omitempty"`
+	Note       string `json:"note,omitempty"`
 }
 
 type GapDetail struct {
@@ -670,6 +691,12 @@ func mockDiagnosis(req DiagnosisRequest) Diagnosis {
 				"暂缓投递算法、数据工程等强算法岗位，除非先补充题库训练和项目证据。",
 				"简历第一屏应突出项目上线、性能优化、组件化和实习贡献。",
 			},
+			DevelopmentActions: []DevelopmentAction{
+				{Priority: "高", Scope: "校外", Description: "将作品集项目整理为 GitHub 仓库，补充性能优化、测试覆盖和部署说明。"},
+				{Priority: "高", Scope: "校外", Description: "补充一个可运行的组件库或低代码 Demo，输出在线预览和技术复盘。"},
+				{Priority: "中", Scope: "校内", Description: "在课程项目或实验室项目中主动承担模块 owner，量化分工、进度和交付结果。"},
+				{Priority: "中", Scope: "校外", Description: "按目标岗位改写简历项目描述，突出问题、行动、结果和可验证指标。"},
+			},
 			Reasons: []string{
 				"专业背景与推荐岗位基础要求一致。",
 				"项目和实习经历能支撑前端方向。",
@@ -692,7 +719,7 @@ func backendRequirements() []BackendRequirement {
 		{ID: "BR-02", Title: "简历结构化解析 API", Status: "partial_in_legato_cli", Priority: "P0", Details: []string{"把 Legato 简历 workflow 暴露为 HTTP API", "输出基础信息、教育、证书奖项、经历和置信度", "支持 PDF、DOCX、Markdown、图片 OCR 回退"}},
 		{ID: "BR-03", Title: "成绩单解析与课程能力映射", Status: "partial_ocr_blocked", Priority: "P0", Details: []string{"解析课程、学期、成绩、GPA 和专业课程分类", "将课程映射到岗位能力维度", "扫描版成绩单需要稳定 OCR 服务"}},
 		{ID: "BR-04", Title: "岗位能力模型与 JD 解析", Status: "partial_in_legato_presto_team", Priority: "P0", Details: []string{"已新增 Adaptive Planner 动态派生多视角 Presto Agent", "后端会校验 Planner 输出并限制 3 到 6 个 Agent、最多 3 个并发 run", "每个 Presto run 的事件流会转发到前端 chat 状态卡", "当前基于简历证据、六维能力和学历门槛推断岗位", "后续仍需接入真实岗位库、JD 数据源和地区过滤", "后续可扩展为粘贴 JD 的定向分析模式"}},
-		{ID: "BR-05", Title: "能力评分与雷达数据引擎", Status: "partial_in_item_benchmark", Priority: "P0", Details: []string{"Item Benchmark 已生成证据级六维分布", "Major Baseline 已生成专业 prior", "Job Matching 已输出岗位目标雷达", "后续仍需服务端统一聚合学生最终六维画像并输出置信度"}},
+		{ID: "BR-05", Title: "能力评分与雷达数据引擎", Status: "ready_in_backend", Priority: "P0", Details: []string{"Item Benchmark 生成证据级六维分布和 Impact", "Major Baseline 生成专业六维 prior", "Go 后端统一聚合学生最终六维画像与雷达 series", "Job Matching 使用同一画像生成岗位目标雷达和差距"}},
 		{ID: "BR-06", Title: "成长路径规划生成", Status: "not_started", Priority: "P1", Details: []string{"生成阶段目标、周任务、资源链接、达标标准", "根据学生短板和岗位权重调整优先级", "支持任务完成状态和再规划"}},
 		{ID: "BR-07", Title: "结构化导出服务", Status: "mock_in_gateway", Priority: "P1", Details: []string{"能力画像导出 JSON 和 Excel", "路径规划导出 PDF 和 Word", "匹配结果导出可视化报表"}},
 		{ID: "BR-08", Title: "异步任务与 SSE 事件契约", Status: "partial_in_presto", Priority: "P1", Details: []string{"统一上传、解析、评分、生成报告的 run 状态", "提供可恢复的事件流和错误码", "支持长任务超时与重试"}},

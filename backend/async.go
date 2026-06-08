@@ -12,16 +12,20 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 )
 
 const defaultDiagnosisTimeout = 120 * time.Second
-const defaultJobMatchingTimeout = 180 * time.Second
+const defaultJobMatchingTimeout = 600 * time.Second
 const defaultDiagnosisTempRetention = 2 * time.Hour
+const defaultItemBenchmarkBatchWorkers = 2
+const maxItemBenchmarkBatchWorkers = 4
 
 type JobStore struct {
 	seq  uint64
@@ -129,6 +133,7 @@ func (j *DiagnosisJob) Emit(event DiagnosisEvent) {
 	event.ID = "evt_" + strconv.FormatUint(atomic.AddUint64(&j.nextEventID, 1), 10)
 	event.JobID = j.ID
 	event.Time = now.Format(time.RFC3339)
+	event.Data = snapshotEventData(event.Data)
 
 	j.mu.Lock()
 	switch event.Type {
@@ -159,7 +164,7 @@ func (j *DiagnosisJob) Emit(event DiagnosisEvent) {
 
 func (j *DiagnosisJob) SetDiagnosis(diagnosis Diagnosis) {
 	j.mu.Lock()
-	j.Diagnosis = diagnosis
+	j.Diagnosis = cloneDiagnosis(diagnosis)
 	j.UpdatedAt = time.Now().UTC()
 	j.mu.Unlock()
 }
@@ -175,6 +180,7 @@ func (j *DiagnosisJob) Subscribe(lastEventID string) ([]DiagnosisEvent, <-chan D
 	ch := make(chan DiagnosisEvent, 64)
 	j.mu.Lock()
 	replay := eventsAfter(j.events, lastEventID)
+	replay = cloneDiagnosisEvents(replay)
 	j.subscribers[ch] = struct{}{}
 	j.mu.Unlock()
 	unsubscribe := func() {
@@ -193,16 +199,68 @@ func (j *DiagnosisJob) Snapshot() map[string]any {
 		"status":     j.Status,
 		"created_at": j.CreatedAt,
 		"updated_at": j.UpdatedAt,
-		"diagnosis":  j.Diagnosis,
+		"diagnosis":  cloneDiagnosis(j.Diagnosis),
 		"error":      j.Error,
-		"events":     j.events,
+		"events":     cloneDiagnosisEvents(j.events),
 	}
 }
 
 func (j *DiagnosisJob) CurrentDiagnosis() Diagnosis {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	return j.Diagnosis
+	return cloneDiagnosis(j.Diagnosis)
+}
+
+func cloneDiagnosis(value Diagnosis) Diagnosis {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return value
+	}
+	var out Diagnosis
+	if err := json.Unmarshal(data, &out); err != nil {
+		return value
+	}
+	return out
+}
+
+func cloneDiagnosisEvents(events []DiagnosisEvent) []DiagnosisEvent {
+	out := make([]DiagnosisEvent, len(events))
+	for index, event := range events {
+		event.Data = snapshotEventData(event.Data)
+		out[index] = event
+	}
+	return out
+}
+
+func snapshotEventData(value any) any {
+	data, ok := value.(map[string]any)
+	if !ok {
+		return cloneJSONValue(value)
+	}
+	out := make(map[string]any, len(data))
+	for key, item := range data {
+		if key == "agent_team_event" {
+			out[key] = item
+			continue
+		}
+		out[key] = cloneJSONValue(item)
+	}
+	return out
+}
+
+func cloneJSONValue(value any) any {
+	if value == nil {
+		return nil
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return value
+	}
+	var out any
+	if err := json.Unmarshal(data, &out); err != nil {
+		return value
+	}
+	return out
 }
 
 func eventsAfter(events []DiagnosisEvent, lastEventID string) []DiagnosisEvent {
@@ -336,6 +394,10 @@ func (s Server) handleDiagnosisBenchmark(w http.ResponseWriter, r *http.Request,
 	}
 	items := sanitizeBenchmarkInputs(req.Items)
 	diagnosis := job.CurrentDiagnosis()
+	if message := benchmarkPrerequisiteError(diagnosis); message != "" {
+		writeError(w, http.StatusConflict, message)
+		return
+	}
 	if len(items) == 0 {
 		diagnosis.AbilityProfile.BenchmarkStatus = "empty"
 		job.SetDiagnosis(diagnosis)
@@ -381,6 +443,7 @@ func (s Server) handleDiagnosisBenchmark(w http.ResponseWriter, r *http.Request,
 	defer cancel()
 	majorBaselineInput := buildMajorBaselineStageInput(diagnosis)
 	batches := chunkBenchmarkInputs(items, itemBenchmarkMaxRequests())
+	batchWorkers := itemBenchmarkBatchWorkers()
 	type itemBenchmarkBatchCall struct {
 		index     int
 		total     int
@@ -405,7 +468,7 @@ func (s Server) handleDiagnosisBenchmark(w http.ResponseWriter, r *http.Request,
 				fmt.Sprintf("简历 Item Benchmark 第 %d/%d 批正在评估 %d 条证据", index+1, len(batches), len(batch)),
 				map[string]any{
 					"items":       batch,
-					"max_workers": 1,
+					"max_workers": batchWorkers,
 				},
 			)
 			itemBenchmarkCh <- itemBenchmarkBatchCall{
@@ -550,10 +613,13 @@ func (s Server) handleDiagnosisBenchmark(w http.ResponseWriter, r *http.Request,
 	}
 
 	diagnosis = job.CurrentDiagnosis()
+	if diagnosis.AbilityProfile.MajorBaselineStatus != "ready" {
+		benchmarkErrors = append(benchmarkErrors, "Major Baseline 未返回可用六维基线")
+	}
 	if len(benchmarkErrors) > 0 {
 		errMessage := strings.Join(benchmarkErrors, "；")
 		diagnosis.AbilityProfile.BenchmarkStatus = "failed"
-		if diagnosis.AbilityProfile.MajorBaselineStatus == "benchmarking" {
+		if diagnosis.AbilityProfile.MajorBaselineStatus == "benchmarking" || diagnosis.AbilityProfile.MajorBaselineStatus == "empty" {
 			diagnosis.AbilityProfile.MajorBaselineStatus = "failed"
 		}
 		diagnosis.ProductionLimitations = append(diagnosis.ProductionLimitations, "Benchmark 失败，六维分布、impact_factor 或专业六维基线未生成，可从失败阶段重试。")
@@ -590,20 +656,83 @@ func (s Server) handleDiagnosisBenchmark(w http.ResponseWriter, r *http.Request,
 		Message: "Benchmark 已返回，证据卡片已补充 impact_factor，雷达图已补充专业六维基线",
 		Data:    map[string]any{"ability_profile": diagnosis.AbilityProfile},
 	})
+	if message := matchingPrerequisiteError(diagnosis); message != "" {
+		log.Printf("diagnosis %s job matching blocked after benchmark: %s", job.ID, message)
+		diagnosis.ProductionLimitations = addProductionLimitationOnce(diagnosis.ProductionLimitations, message)
+		job.SetDiagnosis(diagnosis)
+		job.Emit(DiagnosisEvent{
+			Type:    "step.update",
+			Step:    "matching",
+			Status:  "failed",
+			Message: "岗位匹配未启动，能力画像尚未完整",
+			Data: map[string]any{
+				"ability_profile":        diagnosis.AbilityProfile,
+				"production_limitations": diagnosis.ProductionLimitations,
+				"matching_error":         message,
+			},
+		})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ability_profile":        diagnosis.AbilityProfile,
+			"production_limitations": diagnosis.ProductionLimitations,
+			"matching_error":         message,
+		})
+		return
+	}
 	s.runJobMatchingStageAndWrite(w, job, diagnosis)
 }
 
 func (s Server) handleDiagnosisMatching(w http.ResponseWriter, job *DiagnosisJob) {
 	diagnosis := job.CurrentDiagnosis()
-	if diagnosis.AbilityProfile.BenchmarkStatus == "benchmarking" || diagnosis.AbilityProfile.MajorBaselineStatus == "benchmarking" {
-		writeError(w, http.StatusConflict, "Benchmark 仍在运行，暂不能重跑岗位匹配")
-		return
-	}
-	if strings.TrimSpace(diagnosis.AbilityProfile.BasicInfo.ResumeStatus) == "" && strings.TrimSpace(diagnosis.AbilityProfile.BasicInfo.Name) == "" {
-		writeError(w, http.StatusConflict, "能力画像尚未生成，暂不能启动岗位匹配")
+	if message := matchingPrerequisiteError(diagnosis); message != "" {
+		writeError(w, http.StatusConflict, message)
 		return
 	}
 	s.runJobMatchingStageAndWrite(w, job, diagnosis)
+}
+
+func benchmarkPrerequisiteError(diagnosis Diagnosis) string {
+	profile := diagnosis.AbilityProfile
+	if !resumeProfileReady(profile) {
+		return "基础画像尚未完成，暂不能启动 Benchmark"
+	}
+	if !resumeEvidenceReady(profile.AwardsStatus) || !resumeEvidenceReady(profile.ExperiencesStatus) {
+		return "奖项或 experience_hybrid 尚未返回可用画像结果，暂不能启动 Benchmark"
+	}
+	return ""
+}
+
+func matchingPrerequisiteError(diagnosis Diagnosis) string {
+	if message := benchmarkPrerequisiteError(diagnosis); message != "" {
+		return message
+	}
+	profile := diagnosis.AbilityProfile
+	if profile.BenchmarkStatus == "benchmarking" || profile.MajorBaselineStatus == "benchmarking" {
+		return "Benchmark 仍在运行，暂不能启动岗位匹配"
+	}
+	if profile.BenchmarkStatus != "ready" || profile.MajorBaselineStatus != "ready" {
+		return "能力画像尚未完成 Benchmark 与 Major Baseline，暂不能启动岗位匹配"
+	}
+	return ""
+}
+
+func resumeProfileReady(profile AbilityProfile) bool {
+	status := strings.TrimSpace(profile.BasicInfo.ResumeStatus)
+	if status == "" || strings.Contains(status, "等待") {
+		return false
+	}
+	return strings.TrimSpace(profile.BasicInfo.Name) != "" ||
+		strings.TrimSpace(profile.BasicInfo.School) != "" ||
+		strings.TrimSpace(profile.BasicInfo.Major) != "" ||
+		len(profile.Education) > 0
+}
+
+func resumeEvidenceReady(status string) bool {
+	switch strings.TrimSpace(status) {
+	case "ready", "empty":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s Server) runJobMatchingStageAndWrite(w http.ResponseWriter, job *DiagnosisJob, diagnosis Diagnosis) {
@@ -651,6 +780,8 @@ func (s Server) runJobMatchingStageAndWrite(w http.ResponseWriter, job *Diagnosi
 }
 
 func (s Server) runJobMatchingStage(ctx context.Context, job *DiagnosisJob, diagnosis Diagnosis) (Diagnosis, error) {
+	refreshAbilityProfileRadarData(&diagnosis.AbilityProfile)
+	job.SetDiagnosis(diagnosis)
 	job.Emit(DiagnosisEvent{
 		Type:    "step.update",
 		Step:    "matching",
@@ -716,6 +847,7 @@ func (s Server) runDiagnosisJob(job *DiagnosisJob) {
 	}
 	diagnosis.AbilityProfile.Education = []EducationItem{}
 	diagnosis.AbilityProfile.RadarData = []ScoreDimension{}
+	diagnosis.AbilityProfile.RadarSeries = []RadarSeries{}
 	diagnosis.AbilityProfile.EvidenceSummary = []EvidenceItem{}
 	diagnosis.AbilityProfile.AwardsStatus = "waiting"
 	diagnosis.AbilityProfile.Awards = []AwardItem{}
@@ -868,7 +1000,6 @@ func (s Server) runDiagnosisJob(job *DiagnosisJob) {
 		Data:    map[string]any{"ability_profile": diagnosis.AbilityProfile},
 	})
 
-	job.Emit(DiagnosisEvent{Type: "step.update", Step: "matching", Status: "running", Message: "岗位匹配 Agent 正在计算推荐岗位"})
 	job.Emit(DiagnosisEvent{Type: "step.update", Step: "path", Status: "running", Message: "路径规划 Agent 正在生成阶段任务"})
 	var downstream sync.WaitGroup
 	downstream.Add(1)
@@ -1379,6 +1510,23 @@ func itemBenchmarkMaxRequests() int {
 	return 5
 }
 
+func itemBenchmarkBatchWorkers() int {
+	value := strings.TrimSpace(os.Getenv("ITEM_BENCHMARK_BATCH_WORKERS"))
+	if value == "" {
+		return defaultItemBenchmarkBatchWorkers
+	}
+	count, err := strconv.Atoi(value)
+	if err != nil || count <= 0 {
+		log.Printf("invalid ITEM_BENCHMARK_BATCH_WORKERS=%q, using %d", value, defaultItemBenchmarkBatchWorkers)
+		return defaultItemBenchmarkBatchWorkers
+	}
+	if count > maxItemBenchmarkBatchWorkers {
+		log.Printf("ITEM_BENCHMARK_BATCH_WORKERS=%d exceeds max %d, using %d", count, maxItemBenchmarkBatchWorkers, maxItemBenchmarkBatchWorkers)
+		return maxItemBenchmarkBatchWorkers
+	}
+	return count
+}
+
 func jobMatchingTimeout() time.Duration {
 	value := strings.TrimSpace(os.Getenv("JOB_MATCHING_TIMEOUT_SECONDS"))
 	if value == "" {
@@ -1650,8 +1798,14 @@ func applyResumeWorkflowItemBenchmark(diagnosis *Diagnosis, result *LegatoEnvelo
 	applied := 0
 	for _, benchmark := range items {
 		item := objectValue(benchmark["item"])
-		kind := stringValue(item["kind"])
-		key := stringValue(item["key"])
+		if len(item) == 0 {
+			item = benchmark
+		}
+		kind := strings.ToLower(stringValue(firstNonEmptyAny(item["kind"], benchmark["kind"])))
+		key := stringValue(firstNonEmptyAny(item["key"], benchmark["key"]))
+		if kind == "" {
+			kind = inferBenchmarkItemKind(key, item)
+		}
 		dimensions := stringArrayValue(benchmark["dimensions"])
 		if len(dimensions) == 0 {
 			dimensions = benchmarkDimensionNames()
@@ -1663,7 +1817,7 @@ func applyResumeWorkflowItemBenchmark(diagnosis *Diagnosis, result *LegatoEnvelo
 		impact := clampFloat(floatValue(benchmark["impact_factor"]), 0, 10)
 		scope := normalizeEvidenceScope(stringValue(item["evidence_scope"]), kind, stringValue(item["name"]), stringValue(item["result"]), stringValue(item["type"]), stringValue(item["role"]), stringValue(item["contribution"]))
 		if kind == "experience" {
-			if index, ok := benchmarkIndexFromKey(key, "experience", len(diagnosis.AbilityProfile.Experiences)); ok {
+			if index, ok := benchmarkExperienceIndex(key, item, diagnosis.AbilityProfile.Experiences); ok {
 				diagnosis.AbilityProfile.Experiences[index].ImpactFactor = floatPtr(impact)
 				diagnosis.AbilityProfile.Experiences[index].BenchmarkDimensions = dimensions
 				diagnosis.AbilityProfile.Experiences[index].BenchmarkScores = scores
@@ -1673,7 +1827,7 @@ func applyResumeWorkflowItemBenchmark(diagnosis *Diagnosis, result *LegatoEnvelo
 			}
 			continue
 		}
-		if index, ok := benchmarkIndexFromKey(key, "award", len(diagnosis.AbilityProfile.Awards)); ok {
+		if index, ok := benchmarkAwardIndex(key, item, diagnosis.AbilityProfile.Awards); ok {
 			diagnosis.AbilityProfile.Awards[index].ImpactFactor = floatPtr(impact)
 			diagnosis.AbilityProfile.Awards[index].BenchmarkDimensions = dimensions
 			diagnosis.AbilityProfile.Awards[index].BenchmarkScores = scores
@@ -1688,6 +1842,7 @@ func applyResumeWorkflowItemBenchmark(diagnosis *Diagnosis, result *LegatoEnvelo
 		return 0
 	}
 	diagnosis.AbilityProfile.BenchmarkStatus = "ready"
+	refreshAbilityProfileRadarData(&diagnosis.AbilityProfile)
 	diagnosis.AbilityProfile.EvidenceSummary = append(diagnosis.AbilityProfile.EvidenceSummary, EvidenceItem{
 		Category: "Legato Item Benchmark",
 		Summary:  fmt.Sprintf("已为 %d 条证据补充六维分布和 impact_factor。", applied),
@@ -1695,6 +1850,121 @@ func applyResumeWorkflowItemBenchmark(diagnosis *Diagnosis, result *LegatoEnvelo
 	})
 	applyLegatoWarnings(diagnosis, "Item Benchmark", result)
 	return applied
+}
+
+func refreshAbilityProfileRadarData(profile *AbilityProfile) int {
+	if profile == nil {
+		return 0
+	}
+	radar := aggregateEvidenceRadar(*profile, "")
+	if len(radar.Scores) != len(benchmarkDimensionNames()) {
+		return 0
+	}
+	profile.RadarData = radar.Scores
+	profile.RadarSeries = abilityRadarSeries(*profile, radar)
+	return radar.Count
+}
+
+func abilityRadarSeries(profile AbilityProfile, overall aggregatedRadar) []RadarSeries {
+	series := make([]RadarSeries, 0, 3)
+	if len(overall.Scores) == len(benchmarkDimensionNames()) {
+		series = append(series, radarSeriesFromAggregate("overall", "综合", overall))
+	}
+	for _, item := range []struct {
+		key   string
+		label string
+		scope string
+	}{
+		{key: "campus", label: "校内", scope: "校内"},
+		{key: "external", label: "校外", scope: "校外"},
+	} {
+		radar := aggregateEvidenceRadar(profile, item.scope)
+		if len(radar.Scores) == len(benchmarkDimensionNames()) {
+			series = append(series, radarSeriesFromAggregate(item.key, item.label, radar))
+		}
+	}
+	return series
+}
+
+func radarSeriesFromAggregate(key string, label string, radar aggregatedRadar) RadarSeries {
+	return RadarSeries{
+		Key:    key,
+		Label:  label,
+		Count:  radar.Count,
+		Source: radar.Source,
+		Scores: radar.Scores,
+	}
+}
+
+func benchmarkAwardIndex(key string, item map[string]any, awards []AwardItem) (int, bool) {
+	if index, ok := benchmarkIndexFromKey(key, "award", len(awards)); ok {
+		return index, true
+	}
+	target := benchmarkMatchText(stringValue(item["name"]), stringValue(item["result"]))
+	if target == "" {
+		return 0, false
+	}
+	match := -1
+	for index, award := range awards {
+		candidate := benchmarkMatchText(award.Name, award.Result)
+		if candidate == "" {
+			continue
+		}
+		if candidate == target || strings.Contains(candidate, target) || strings.Contains(target, candidate) {
+			if match >= 0 {
+				return 0, false
+			}
+			match = index
+		}
+	}
+	return match, match >= 0
+}
+
+func benchmarkExperienceIndex(key string, item map[string]any, experiences []ExperienceItem) (int, bool) {
+	if index, ok := benchmarkIndexFromKey(key, "experience", len(experiences)); ok {
+		return index, true
+	}
+	target := benchmarkMatchText(stringValue(item["type"]), stringValue(item["role"]), stringValue(item["contribution"]))
+	if target == "" {
+		return 0, false
+	}
+	match := -1
+	for index, experience := range experiences {
+		candidate := benchmarkMatchText(experience.Type, experience.Role, experience.Contribution)
+		if candidate == "" {
+			continue
+		}
+		if candidate == target || strings.Contains(candidate, target) || strings.Contains(target, candidate) {
+			if match >= 0 {
+				return 0, false
+			}
+			match = index
+		}
+	}
+	return match, match >= 0
+}
+
+func benchmarkMatchText(values ...string) string {
+	joined := strings.ToLower(strings.Join(values, ""))
+	return strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) {
+			return r
+		}
+		return -1
+	}, joined)
+}
+
+func inferBenchmarkItemKind(key string, item map[string]any) string {
+	if strings.HasPrefix(key, "experience:") {
+		return "experience"
+	}
+	if strings.HasPrefix(key, "award:") {
+		return "award"
+	}
+	if stringValue(item["role"]) != "" || stringValue(item["contribution"]) != "" || stringValue(item["type"]) != "" {
+		return "experience"
+	}
+	return "award"
 }
 
 func buildMajorBaselineStageInput(diagnosis Diagnosis) map[string]any {
@@ -1777,7 +2047,7 @@ func applyResumeWorkflowJobMatching(diagnosis *Diagnosis, result *LegatoEnvelope
 	if targetRole == "" {
 		targetRole = selectedJob.Title
 	}
-	studentRadar := buildScoreDimensions(raw["student_radar"])
+	studentRadar, authoritativeStudentRadar := authoritativeStudentRadar(diagnosis.AbilityProfile, buildScoreDimensions(raw["student_radar"]))
 	targetRadar := buildScoreDimensions(raw["target_radar"])
 	if len(targetRadar) == 0 {
 		targetRadar = selectedJob.RequirementRadar
@@ -1785,21 +2055,26 @@ func applyResumeWorkflowJobMatching(diagnosis *Diagnosis, result *LegatoEnvelope
 	if selectedJob.Title != "" && len(selectedJob.RequirementRadar) == 0 {
 		selectedJob.RequirementRadar = targetRadar
 	}
+	reportSections := buildReportRows(raw["report_sections"])
+	if authoritativeStudentRadar && len(studentRadar) == len(targetRadar) {
+		reportSections = reportRowsFromRadar(studentRadar, targetRadar)
+	}
 	diagnosis.MatchingResult = MatchingResult{
-		TargetRole:      targetRole,
-		OverallMatch:    clampInt(intValue(raw["overall_match"]), 0, 100),
-		MatchLevel:      stringValue(raw["match_level"]),
-		Source:          stringValue(raw["source"]),
-		MethodSummary:   stringValue(raw["method_summary"]),
-		FitSummary:      stringValue(raw["fit_summary"]),
-		SelectedJob:     selectedJob,
-		StudentRadar:    studentRadar,
-		TargetRadar:     targetRadar,
-		ReportSections:  buildReportRows(raw["report_sections"]),
-		GapDetails:      buildGapDetails(raw["gap_details"]),
-		Recommendations: stringArrayValue(raw["recommendations"]),
-		Reasons:         stringArrayValue(raw["recommended_reasons"]),
-		AgentNotes:      stringArrayValue(raw["agent_notes"]),
+		TargetRole:         targetRole,
+		OverallMatch:       clampInt(intValue(raw["overall_match"]), 0, 100),
+		MatchLevel:         stringValue(raw["match_level"]),
+		Source:             normalizeJobMatchingSource(stringValue(raw["source"])),
+		MethodSummary:      stringValue(raw["method_summary"]),
+		FitSummary:         stringValue(raw["fit_summary"]),
+		SelectedJob:        selectedJob,
+		StudentRadar:       studentRadar,
+		TargetRadar:        targetRadar,
+		ReportSections:     reportSections,
+		GapDetails:         buildGapDetails(raw["gap_details"]),
+		DevelopmentActions: buildDevelopmentActions(raw, selectedJob),
+		Recommendations:    stringArrayValue(raw["recommendations"]),
+		Reasons:            stringArrayValue(raw["recommended_reasons"]),
+		AgentNotes:         stringArrayValue(raw["agent_notes"]),
 	}
 	if diagnosis.MatchingResult.OverallMatch == 0 && selectedJob.Match > 0 {
 		diagnosis.MatchingResult.OverallMatch = selectedJob.Match
@@ -1823,6 +2098,52 @@ func applyResumeWorkflowJobMatching(diagnosis *Diagnosis, result *LegatoEnvelope
 		Signal:   "岗位推荐和目标能力雷达已结构化",
 	})
 	applyLegatoWarnings(diagnosis, "Job Matching", result)
+}
+
+func authoritativeStudentRadar(profile AbilityProfile, fallback []ScoreDimension) ([]ScoreDimension, bool) {
+	radar := canonicalScoreDimensions(profile.RadarData)
+	if len(radar) == len(benchmarkDimensionNames()) {
+		return radar, true
+	}
+	return fallback, false
+}
+
+func canonicalScoreDimensions(items []ScoreDimension) []ScoreDimension {
+	if len(items) == 0 {
+		return nil
+	}
+	byName := make(map[string]ScoreDimension, len(items))
+	for _, item := range items {
+		name := strings.TrimSpace(item.Name)
+		if name == "" {
+			continue
+		}
+		item.Name = name
+		if item.MaxScore <= 0 {
+			item.MaxScore = 100
+		}
+		item.Score = clampInt(item.Score, 0, 100)
+		item.MaxScore = clampInt(item.MaxScore, 1, 100)
+		byName[name] = item
+	}
+	out := make([]ScoreDimension, 0, len(benchmarkDimensionNames()))
+	for _, name := range benchmarkDimensionNames() {
+		item, ok := byName[name]
+		if !ok {
+			return nil
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func normalizeJobMatchingSource(value string) string {
+	trimmed := strings.TrimSpace(value)
+	compact := strings.NewReplacer(" ", "", "-", "", "_", "", "/", "").Replace(strings.ToLower(trimmed))
+	if compact == "legatojobmatchingteamviapresto" {
+		return "Legato Job Matching Team via Presto"
+	}
+	return trimmed
 }
 
 func buildMatchedJobs(value any) []MatchedJob {
@@ -1854,18 +2175,21 @@ func buildMatchedJob(item map[string]any, defaultRank int) MatchedJob {
 		return MatchedJob{}
 	}
 	return MatchedJob{
-		Rank:             clampInt(defaultInt(intValue(item["rank"]), defaultRank), 1, 99),
-		Title:            title,
-		Category:         stringValue(item["category"]),
-		Match:            clampInt(intValue(item["match"]), 0, 100),
-		AbilityMatch:     clampInt(intValue(item["ability_match"]), 0, 100),
-		ExperienceMatch:  clampInt(intValue(item["experience_match"]), 0, 100),
-		EducationGate:    stringValue(item["education_gate"]),
-		FitSummary:       stringValue(item["fit_summary"]),
-		Risk:             stringValue(item["risk"]),
-		RequirementRadar: buildScoreDimensions(item["requirement_radar"]),
-		Reasons:          stringArrayValue(item["reasons"]),
-		NextProof:        stringValue(item["next_proof"]),
+		Rank:                clampInt(defaultInt(intValue(item["rank"]), defaultRank), 1, 99),
+		Title:               title,
+		Category:            stringValue(item["category"]),
+		Match:               clampInt(intValue(item["match"]), 0, 100),
+		AbilityMatch:        clampInt(intValue(item["ability_match"]), 0, 100),
+		ExperienceMatch:     clampInt(intValue(item["experience_match"]), 0, 100),
+		EducationGate:       stringValue(item["education_gate"]),
+		EducationGateStatus: normalizeEducationGateStatus(stringValue(item["education_gate_status"]), stringValue(item["education_gate"])),
+		EvidenceStrength:    normalizeEvidenceStrength(stringValue(item["evidence_strength"]), intValue(item["match"]), intValue(item["ability_match"]), intValue(item["experience_match"])),
+		FitSummary:          stringValue(item["fit_summary"]),
+		Risk:                stringValue(item["risk"]),
+		RequirementRadar:    buildScoreDimensions(item["requirement_radar"]),
+		Reasons:             stringArrayValue(item["reasons"]),
+		ProofGaps:           stringArrayValue(item["proof_gaps"]),
+		NextProof:           stringValue(item["next_proof"]),
 	}
 }
 
@@ -1916,11 +2240,15 @@ func buildReportRows(value any) []ReportRow {
 		if difference == 0 {
 			difference = student - roleNeed
 		}
+		difference = clampInt(difference, -100, 100)
+		status := normalizeReportRowStatus(stringValue(item["status"]), difference)
 		rows = append(rows, ReportRow{
 			Name:       name,
 			Student:    student,
 			RoleNeed:   roleNeed,
-			Difference: clampInt(difference, -100, 100),
+			Difference: difference,
+			Status:     status,
+			Note:       normalizeReportRowNote(stringValue(item["note"]), name, difference, status),
 		})
 	}
 	return rows
@@ -1948,6 +2276,173 @@ func buildGapDetails(value any) []GapDetail {
 	return gaps
 }
 
+func buildDevelopmentActions(raw map[string]any, selectedJob MatchedJob) []DevelopmentAction {
+	actions := buildStructuredDevelopmentActions(raw["development_actions"])
+	for _, item := range stringArrayValue(raw["recommendations"]) {
+		actions = append(actions, developmentActionFromText(item, ""))
+	}
+	for _, gap := range buildGapDetails(raw["gap_details"]) {
+		if gap.Action == "" {
+			continue
+		}
+		actions = append(actions, DevelopmentAction{
+			Priority:    normalizeDevelopmentPriority(gap.Severity),
+			Scope:       inferDevelopmentScope(gap.Action),
+			Description: compactDevelopmentDescription(gap.Action),
+		})
+	}
+	if selectedJob.NextProof != "" {
+		actions = append(actions, DevelopmentAction{
+			Priority:    "中",
+			Scope:       inferDevelopmentScope(selectedJob.NextProof),
+			Description: compactDevelopmentDescription(selectedJob.NextProof),
+		})
+	}
+	return uniqueDevelopmentActions(actions, 12)
+}
+
+func buildStructuredDevelopmentActions(value any) []DevelopmentAction {
+	items := objectArray(value)
+	actions := make([]DevelopmentAction, 0, len(items))
+	for _, item := range items {
+		description := stringValue(item["description"])
+		if description == "" {
+			description = stringValue(item["action"])
+		}
+		if description == "" {
+			description = stringValue(item["task"])
+		}
+		if description == "" {
+			continue
+		}
+		actions = append(actions, DevelopmentAction{
+			Priority:    normalizeDevelopmentPriority(stringValue(item["priority"])),
+			Scope:       normalizeDevelopmentScope(stringValue(item["scope"]), description),
+			Description: compactDevelopmentDescription(description),
+		})
+	}
+	return actions
+}
+
+func developmentActionFromText(value string, fallbackPriority string) DevelopmentAction {
+	text, scope, priority := parseDevelopmentActionPrefix(value)
+	if priority == "" {
+		priority = fallbackPriority
+	}
+	return DevelopmentAction{
+		Priority:    normalizeDevelopmentPriority(priority),
+		Scope:       normalizeDevelopmentScope(scope, text),
+		Description: compactDevelopmentDescription(text),
+	}
+}
+
+func parseDevelopmentActionPrefix(value string) (string, string, string) {
+	text := strings.TrimSpace(value)
+	if !strings.HasPrefix(text, "【") {
+		return text, "", ""
+	}
+	end := strings.Index(text, "】")
+	if end <= 0 {
+		return text, "", ""
+	}
+	prefix := text[1:end]
+	body := strings.TrimSpace(text[end+len("】"):])
+	scope := ""
+	priority := ""
+	for _, token := range strings.FieldsFunc(prefix, func(r rune) bool {
+		return r == '·' || r == '/' || r == '|' || r == '｜' || r == ',' || r == '，' || r == ' '
+	}) {
+		token = strings.TrimSpace(token)
+		if strings.Contains(token, "校内") || strings.Contains(token, "校外") {
+			scope = token
+		}
+		if strings.Contains(token, "优先") || strings.Contains(token, "关注") || token == "高" || token == "中" || token == "低" {
+			priority = token
+		}
+	}
+	if body == "" {
+		body = text
+	}
+	return body, scope, priority
+}
+
+func uniqueDevelopmentActions(actions []DevelopmentAction, limit int) []DevelopmentAction {
+	seen := map[string]bool{}
+	out := make([]DevelopmentAction, 0, len(actions))
+	for _, action := range actions {
+		action.Priority = normalizeDevelopmentPriority(action.Priority)
+		action.Scope = normalizeDevelopmentScope(action.Scope, action.Description)
+		action.Description = compactDevelopmentDescription(action.Description)
+		if action.Description == "" {
+			continue
+		}
+		key := strings.ToLower(action.Priority + "|" + action.Scope + "|" + action.Description)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, action)
+	}
+	sort.SliceStable(out, func(left int, right int) bool {
+		leftWeight := developmentPriorityWeight(out[left].Priority)
+		rightWeight := developmentPriorityWeight(out[right].Priority)
+		if leftWeight == rightWeight {
+			return out[left].Scope < out[right].Scope
+		}
+		return leftWeight > rightWeight
+	})
+	if limit > 0 && len(out) > limit {
+		return out[:limit]
+	}
+	return out
+}
+
+func normalizeDevelopmentPriority(value string) string {
+	text := strings.TrimSpace(value)
+	switch {
+	case strings.Contains(text, "高") || strings.EqualFold(text, "high"):
+		return "高"
+	case strings.Contains(text, "低") || strings.EqualFold(text, "low"):
+		return "低"
+	default:
+		return "中"
+	}
+}
+
+func developmentPriorityWeight(value string) int {
+	switch normalizeDevelopmentPriority(value) {
+	case "高":
+		return 3
+	case "中":
+		return 2
+	default:
+		return 1
+	}
+}
+
+func normalizeDevelopmentScope(value string, description string) string {
+	text := strings.TrimSpace(value)
+	if strings.Contains(text, "校内") {
+		return "校内"
+	}
+	if strings.Contains(text, "校外") {
+		return "校外"
+	}
+	return inferDevelopmentScope(description)
+}
+
+func inferDevelopmentScope(description string) string {
+	text := strings.ToLower(description)
+	if containsAny(text, "课程", "实验室", "社团", "学生会", "校内", "老师", "导师", "课程项目", "大创") {
+		return "校内"
+	}
+	return "校外"
+}
+
+func compactDevelopmentDescription(value string) string {
+	return truncateRunes(strings.TrimSpace(value), 180)
+}
+
 func reportRowsFromRadar(studentRadar []ScoreDimension, targetRadar []ScoreDimension) []ReportRow {
 	targetByName := make(map[string]int, len(targetRadar))
 	for _, item := range targetRadar {
@@ -1956,14 +2451,100 @@ func reportRowsFromRadar(studentRadar []ScoreDimension, targetRadar []ScoreDimen
 	rows := make([]ReportRow, 0, len(studentRadar))
 	for _, item := range studentRadar {
 		roleNeed := targetByName[item.Name]
+		difference := item.Score - roleNeed
+		status := normalizeReportRowStatus("", difference)
 		rows = append(rows, ReportRow{
 			Name:       item.Name,
 			Student:    item.Score,
 			RoleNeed:   roleNeed,
-			Difference: item.Score - roleNeed,
+			Difference: difference,
+			Status:     status,
+			Note:       normalizeReportRowNote("", item.Name, difference, status),
 		})
 	}
 	return rows
+}
+
+func normalizeEducationGateStatus(value string, gate string) string {
+	combined := strings.ToLower(strings.TrimSpace(value + " " + gate))
+	switch {
+	case strings.Contains(combined, "blocked") || strings.Contains(combined, "reject") || strings.Contains(combined, "不建议") || strings.Contains(combined, "不通过"):
+		return "blocked"
+	case strings.Contains(combined, "stretch") || strings.Contains(combined, "breakthrough") || strings.Contains(combined, "突破") || strings.Contains(combined, "高impact"):
+		return "stretch"
+	case strings.Contains(combined, "risk") || strings.Contains(combined, "风险") || strings.Contains(combined, "谨慎"):
+		return "risk"
+	case strings.Contains(combined, "pass") || strings.Contains(combined, "通过") || strings.Contains(combined, "达标"):
+		return "pass"
+	default:
+		return "unknown"
+	}
+}
+
+func normalizeEvidenceStrength(value string, match int, ability int, experience int) string {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	switch {
+	case normalized == "strong" || strings.Contains(normalized, "强"):
+		return "strong"
+	case normalized == "medium" || strings.Contains(normalized, "中"):
+		return "medium"
+	case normalized == "weak" || strings.Contains(normalized, "弱") || strings.Contains(normalized, "有限"):
+		return "weak"
+	}
+	score := match
+	if ability > 0 && experience > 0 {
+		score = (match + ability + experience) / 3
+	}
+	switch {
+	case score >= 78:
+		return "strong"
+	case score >= 64:
+		return "medium"
+	default:
+		return "weak"
+	}
+}
+
+func normalizeReportRowStatus(value string, difference int) string {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	switch {
+	case normalized == "advantage" || strings.Contains(normalized, "优势"):
+		return "advantage"
+	case normalized == "fit" || strings.Contains(normalized, "达标") || strings.Contains(normalized, "匹配"):
+		return "fit"
+	case normalized == "limited" || strings.Contains(normalized, "有限"):
+		return "limited"
+	case normalized == "gap" || strings.Contains(normalized, "短板") || strings.Contains(normalized, "缺口"):
+		return "gap"
+	}
+	switch {
+	case difference >= 6:
+		return "advantage"
+	case difference >= -3:
+		return "fit"
+	case difference >= -12:
+		return "limited"
+	default:
+		return "gap"
+	}
+}
+
+func normalizeReportRowNote(value string, name string, difference int, status string) string {
+	if trimmed := strings.TrimSpace(value); trimmed != "" {
+		return trimmed
+	}
+	switch status {
+	case "advantage":
+		return fmt.Sprintf("%s高于岗位要求%d分，可作为面试支撑点。", name, difference)
+	case "fit":
+		return fmt.Sprintf("%s基本达到岗位要求。", name)
+	case "limited":
+		return fmt.Sprintf("%s低于岗位要求%d分，需要补证据。", name, -difference)
+	case "gap":
+		return fmt.Sprintf("%s是当前主要短板，差距%d分。", name, -difference)
+	default:
+		return ""
+	}
 }
 
 func matchLevelFromScore(score int) string {
@@ -2003,6 +2584,15 @@ func benchmarkIndexFromKey(key string, prefix string, length int) (int, bool) {
 		return 0, false
 	}
 	return index, true
+}
+
+func firstNonEmptyAny(values ...any) any {
+	for _, value := range values {
+		if strings.TrimSpace(stringValue(value)) != "" {
+			return value
+		}
+	}
+	return nil
 }
 
 func markResumeEvidenceStatus(diagnosis *Diagnosis, target string, status string) {

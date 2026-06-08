@@ -190,6 +190,19 @@ class ResumeWorkflowFormatter:
 
     def format_stage(self, resume_text: str, stage: str) -> WorkflowFormatResult:
         started = time.perf_counter()
+        if stage == "source_text":
+            total_ms = int((time.perf_counter() - started) * 1000)
+            return WorkflowFormatResult(
+                data={"resume_text": resume_text},
+                formatter="resume_workflow_source_text",
+                warnings=[],
+                debug=self._debug_envelope(
+                    {},
+                    merge_ms=0,
+                    total_ms=total_ms,
+                    local_stages=[{"stage": "source_text_export", "elapsed_ms": total_ms}],
+                ),
+            )
         if stage == "profile":
             result = self._run_group_with_retry("profile", resume_text)
             education_started = time.perf_counter()
