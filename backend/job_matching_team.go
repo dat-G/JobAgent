@@ -1041,7 +1041,13 @@ type radarDimensionContributions struct {
 func aggregateEvidenceRadar(profile AbilityProfile, scope string) aggregatedRadar {
 	dimensions := benchmarkDimensionNames()
 	items := radarEvidenceItems(profile, scope)
+	academicBaseline := radarAcademicBaselineVector(profile)
+	schoolTier := radarSchoolTierProfile(profile)
+	includeAcademicPrior := scope != "校外"
 	if len(items) == 0 {
+		if includeAcademicPrior {
+			return radarAcademicPriorAggregate(dimensions, academicBaseline, schoolTier)
+		}
 		return aggregatedRadar{Count: 0, Source: "empty"}
 	}
 	contributions := make([]radarDimensionContributions, len(dimensions))
@@ -1066,9 +1072,6 @@ func aggregateEvidenceRadar(profile AbilityProfile, scope string) aggregatedRada
 		}
 	}
 	quality := radarEvidenceQualitySummary(items)
-	academicBaseline := radarAcademicBaselineVector(profile)
-	schoolTier := radarSchoolTierProfile(profile)
-	includeAcademicPrior := scope != "校外"
 	scores := make([]ScoreDimension, len(dimensions))
 	for index, name := range dimensions {
 		dimensionContributions := contributions[index]
@@ -1095,6 +1098,16 @@ func aggregateEvidenceRadar(profile AbilityProfile, scope string) aggregatedRada
 		scores[index] = ScoreDimension{Name: name, Score: score, MaxScore: 100}
 	}
 	return aggregatedRadar{Scores: scores, Count: len(items), Source: "evidence_benchmark"}
+}
+
+func radarAcademicPriorAggregate(dimensions []string, academicBaseline radarAcademicBaseline, schoolTier radarSchoolTier) aggregatedRadar {
+	scores := make([]ScoreDimension, len(dimensions))
+	for index, name := range dimensions {
+		score := radarCombineEvidenceWithSchoolTier(0, academicBaseline, schoolTier, radarEvidenceQuality{}, 0, index, true)
+		scores[index] = ScoreDimension{Name: name, Score: score, MaxScore: 100}
+	}
+	source := fallbackString(academicBaseline.Source, "academic_baseline")
+	return aggregatedRadar{Scores: scores, Count: 0, Source: source}
 }
 
 func radarEvidenceItems(profile AbilityProfile, scope string) []radarEvidenceItem {

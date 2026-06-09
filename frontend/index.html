@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>学生成长诊断与路径规划</title>
     <meta name="description" content="上传简历后生成能力画像、岗位匹配分析和成长路径规划。">
-    <link rel="stylesheet" href="/styles.css?v=20260608-matching-top-intro">
+    <link rel="stylesheet" href="/styles.css?v=20260609-compact-print">
   </head>
   <body>
     <header class="topbar" aria-label="页面导航">
@@ -98,6 +98,7 @@
               <div class="panel-heading">
                 <h3 id="basicInfoTitle">基础信息</h3>
                 <span class="status-pill is-warning" id="basicInfoDataState">等待结构化数据</span>
+                <button type="button" class="evidence-chat-button context-chat-button is-inline" data-result-chat="basic" data-context-key="basic" aria-label="添加到聊天：基础信息" title="全部结果生成后才能追问" disabled><span aria-hidden="true">+</span><strong>添加到聊天</strong></button>
               </div>
               <div class="basic-list" id="basicInfo"></div>
               <div class="source-list" id="sourceList" aria-label="上传材料"></div>
@@ -106,7 +107,10 @@
             <section class="data-panel reveal radar-panel" aria-labelledby="radarTitle">
               <div class="panel-heading">
                 <h3 id="radarTitle">六维能力雷达</h3>
-                <span class="status-pill is-warning" id="radarDataState">等待 Benchmark</span>
+                <div class="panel-actions">
+                  <span class="status-pill is-warning" id="radarDataState">等待 Benchmark</span>
+                  <button type="button" class="evidence-chat-button context-chat-button is-inline" data-result-chat="profile_radar" data-context-key="profile_radar" aria-label="添加到聊天：六维能力雷达" title="全部结果生成后才能追问" disabled><span aria-hidden="true">+</span><strong>添加到聊天</strong></button>
+                </div>
               </div>
               <div class="radar-wrap">
                 <svg id="radarChart" viewBox="0 0 360 320" role="img" aria-labelledby="radarChartTitle radarChartDesc"></svg>
@@ -163,6 +167,7 @@
               <div class="meter" aria-hidden="true"><span id="overallMeter"></span></div>
             </div>
             <div class="match-narrative">
+              <button type="button" class="evidence-chat-button context-chat-button" data-result-chat="match_summary" data-context-key="match_summary" aria-label="添加到聊天：首选岗位匹配" title="全部结果生成后才能追问" disabled><span aria-hidden="true">+</span><strong>添加到聊天</strong></button>
               <span id="selectedJobLabel">首选岗位</span>
               <h3 id="selectedJobTitle">等待推荐</h3>
               <div id="matchDecisionBadges" class="match-decision-badges" aria-label="岗位决策状态"></div>
@@ -193,11 +198,16 @@
           <section class="data-panel reveal matching-radar-panel" aria-labelledby="matchingRadarTitle">
             <div class="panel-heading">
               <h3 id="matchingRadarTitle">个人画像与岗位目标雷达</h3>
+              <button type="button" class="evidence-chat-button context-chat-button is-inline" data-result-chat="matching_radar" data-context-key="matching_radar" aria-label="添加到聊天：个人画像与岗位目标雷达" title="全部结果生成后才能追问" disabled><span aria-hidden="true">+</span><strong>添加到聊天</strong></button>
             </div>
             <div class="matching-radar-grid">
-              <svg id="matchingRadarChart" class="radar-chart matching-radar-chart" viewBox="0 0 360 320" role="img" aria-labelledby="matchingRadarTitle"></svg>
+              <div class="matching-radar-stage">
+                <svg id="matchingRadarChart" class="radar-chart matching-radar-chart" viewBox="0 0 360 360" role="img" aria-labelledby="matchingRadarTitle"></svg>
+                <span class="matching-radar-hint">悬停或聚焦维度查看差距</span>
+              </div>
               <div class="matching-radar-copy">
                 <div id="matchingRadarLegend" class="radar-legend"></div>
+                <div id="matchingRadarStats" class="matching-radar-stats" aria-label="雷达摘要"></div>
                 <p id="matchingRadarText">等待首选岗位目标能力雷达。</p>
                 <div id="matchingRadarInsights" class="matching-radar-insights" aria-label="六维短板与优势"></div>
               </div>
@@ -207,6 +217,7 @@
           <section class="data-panel reveal job-recommendation-panel" aria-labelledby="matchingJobsTitle">
             <div class="panel-heading">
               <h3 id="matchingJobsTitle">推荐岗位队列</h3>
+              <button type="button" class="evidence-chat-button context-chat-button is-inline" data-result-chat="recommendation_queue" data-context-key="recommendation_queue" aria-label="添加到聊天：推荐岗位队列" title="全部结果生成后才能追问" disabled><span aria-hidden="true">+</span><strong>添加到聊天</strong></button>
             </div>
             <div id="matchingJobs" class="matching-job-list"></div>
           </section>
@@ -214,6 +225,7 @@
           <section class="data-panel reveal report-panel" aria-labelledby="reportTitle">
             <div class="panel-heading">
               <h3 id="reportTitle">六维差距报表</h3>
+              <button type="button" class="evidence-chat-button context-chat-button is-inline" data-result-chat="report" data-context-key="report" aria-label="添加到聊天：六维差距报表" title="全部结果生成后才能追问" disabled><span aria-hidden="true">+</span><strong>添加到聊天</strong></button>
             </div>
             <div id="reportRows" class="report-rows"></div>
           </section>
@@ -221,6 +233,7 @@
           <section class="data-panel reveal gap-panel" aria-labelledby="gapTitle">
             <div class="panel-heading">
               <h3 id="gapTitle">差距明细</h3>
+              <button type="button" class="evidence-chat-button context-chat-button is-inline" data-result-chat="gap_summary" data-context-key="gap_summary" aria-label="添加到聊天：差距明细" title="全部结果生成后才能追问" disabled><span aria-hidden="true">+</span><strong>添加到聊天</strong></button>
             </div>
             <div id="gapCards" class="gap-card-list"></div>
           </section>
@@ -231,8 +244,8 @@
         <div class="slide-shell path-layout">
           <div class="section-copy reveal">
             <p class="section-label">路径规划</p>
-            <h2 id="pathTitle">阶段目标、周任务、资源链接和达标标准</h2>
-            <p>路径规划当前为模拟数据，真实版本需要接入岗位权重、学生短板和任务达标追踪。</p>
+            <h2 id="pathTitle">匹配完成后的阶段目标、周任务和达标标准</h2>
+            <p>Legato Path Planning Team 会在岗位匹配完成后启动，把首选岗位、六维差距和证据缺口转成可执行路径。</p>
           </div>
           <div id="pathStages" class="path-stages"></div>
         </div>
@@ -242,60 +255,40 @@
         <div class="slide-shell outputs-layout">
           <div class="section-copy reveal">
             <p class="section-label">结构化输出</p>
-            <h2 id="outputsTitle">导出结果与后端待实现清单</h2>
-            <p>结构化输出已按硬性指标组织。当前评分、推荐、路径和导出模板中非真实解析内容均标记为模拟数据。</p>
+            <h2 id="outputsTitle">能力画像、匹配结果和路径规划导出</h2>
+            <p>每类输出可导出结构化数据，也可按对应页面样式导出 PDF。</p>
           </div>
 
           <section class="output-strip reveal" aria-label="导出能力">
             <article>
               <span>能力画像</span>
-              <strong>JSON / Excel</strong>
-              <span class="sim-badge">含模拟评分</span>
+              <strong>基础信息、六维雷达、证据评分</strong>
+              <small>JSON / Excel / PDF</small>
               <div class="button-row">
                 <button type="button" data-export="profile-json">导出 JSON</button>
                 <button type="button" data-export="profile-xlsx">导出 Excel</button>
-              </div>
-            </article>
-            <article>
-              <span>路径规划</span>
-              <strong>PDF / Word</strong>
-              <span class="sim-badge">含模拟路径</span>
-              <div class="button-row">
-                <button type="button" data-export="path-pdf">导出 PDF</button>
-                <button type="button" data-export="path-doc">导出 Word</button>
+                <button type="button" data-export="profile-pdf">导出 PDF</button>
               </div>
             </article>
             <article>
               <span>匹配结果</span>
-              <strong>可视化报表</strong>
-              <span>含目标岗位雷达</span>
+              <strong>推荐岗位、目标雷达、差距证据</strong>
+              <small>JSON / PDF</small>
               <div class="button-row">
-                <button type="button" data-export="match-json">导出报表 JSON</button>
+                <button type="button" data-export="match-json">导出 JSON</button>
+                <button type="button" data-export="match-pdf">导出 PDF</button>
               </div>
             </article>
-          </section>
-
-          <section class="data-panel reveal" aria-labelledby="jobsTitle">
-            <div class="panel-heading">
-              <h3 id="jobsTitle">TOP5 匹配岗位</h3>
-            </div>
-            <div id="topJobs" class="job-list"></div>
-          </section>
-
-          <section class="data-panel reveal limitations-panel" aria-labelledby="limitationsTitle">
-            <div class="panel-heading">
-              <h3 id="limitationsTitle">数据真实性标记</h3>
-              <span class="status-pill is-simulated">模拟数据说明</span>
-            </div>
-            <ul id="limitationsList" class="limitations-list"></ul>
-          </section>
-
-          <section class="data-panel reveal requirements-panel" aria-labelledby="requirementsTitle">
-            <div class="panel-heading">
-              <h3 id="requirementsTitle">后端待实现需求列表</h3>
-              <span class="status-pill">后端能力清单</span>
-            </div>
-            <div id="requirementsList" class="requirements-list"></div>
+            <article>
+              <span>路径规划</span>
+              <strong>阶段目标、周任务、资源和达标标准</strong>
+              <small>JSON / Word / PDF</small>
+              <div class="button-row">
+                <button type="button" data-export="path-json">导出 JSON</button>
+                <button type="button" data-export="path-doc">导出 Word</button>
+                <button type="button" data-export="path-pdf">导出 PDF</button>
+              </div>
+            </article>
           </section>
         </div>
       </section>
@@ -381,6 +374,6 @@
     </aside>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/app.js?v=20260608-matching-top-intro"></script>
+    <script type="module" src="/app.js?v=20260609-compact-print"></script>
   </body>
 </html>

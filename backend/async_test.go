@@ -240,6 +240,22 @@ func TestJobMatchingTimeoutDefaultsToLongBudget(t *testing.T) {
 	}
 }
 
+func TestPathPlanningTimeoutUsesDedicatedEnv(t *testing.T) {
+	t.Setenv("PATH_PLANNING_TIMEOUT_SECONDS", "360")
+
+	if got := pathPlanningTimeout(); got.Seconds() != 360 {
+		t.Fatalf("expected path planning timeout 360s, got %s", got)
+	}
+}
+
+func TestPathPlanningTimeoutDefaultsToLongBudget(t *testing.T) {
+	t.Setenv("PATH_PLANNING_TIMEOUT_SECONDS", "")
+
+	if got := pathPlanningTimeout(); got != defaultPathPlanningTimeout || got.Seconds() != 600 {
+		t.Fatalf("expected default path planning timeout 600s, got %s", got)
+	}
+}
+
 func TestJobMatchingFailureLimitationsAreDeduplicatedAndCleared(t *testing.T) {
 	message := "Job Matching 失败，岗位推荐和匹配雷达未生成，可点击匹配阶段继续或稍后重试。"
 	limitations := addProductionLimitationOnce([]string{"其他限制"}, message)
@@ -251,6 +267,45 @@ func TestJobMatchingFailureLimitationsAreDeduplicatedAndCleared(t *testing.T) {
 	cleared := withoutJobMatchingFailureLimitations(limitations)
 	if got := len(cleared); got != 1 || cleared[0] != "其他限制" {
 		t.Fatalf("expected only unrelated limitation to remain, got %#v", cleared)
+	}
+}
+
+func TestNormalizePathPlanOutputRequiresStagesWeeksAndStandards(t *testing.T) {
+	raw := map[string]any{
+		"export_formats": []any{"PDF", "Word"},
+		"stages": []any{
+			map[string]any{
+				"stage":       "第 1 阶段，0 到 30 天",
+				"goal":        "补齐首选岗位核心证据",
+				"deliverable": "作品集与复盘文档",
+				"weeks": []any{
+					map[string]any{"week": "第 1 周", "task": "梳理岗位能力矩阵", "metric": "完成 1 份矩阵", "priority": "高"},
+					map[string]any{"week": "第 2 周", "task": "补齐项目 README", "metric": "上线 1 个仓库", "priority": "中"},
+				},
+				"standards": []any{"矩阵覆盖 6 个维度", "项目可被面试官访问"},
+			},
+			map[string]any{
+				"stage":       "第 2 阶段，31 到 60 天",
+				"goal":        "补齐工程化证据",
+				"deliverable": "测试报告和性能报告",
+				"weeks": []any{
+					map[string]any{"week": "第 3 周", "task": "增加 E2E 测试", "metric": "核心路径 3 条", "priority": "高"},
+					map[string]any{"week": "第 4 周", "task": "完成性能优化", "metric": "Lighthouse 90+", "priority": "高"},
+				},
+				"standards": []any{"测试报告可展示", "性能前后对比清晰"},
+			},
+		},
+	}
+
+	plan, err := normalizePathPlanOutput(raw)
+	if err != nil {
+		t.Fatalf("expected valid path plan, got %v", err)
+	}
+	if len(plan.Stages) != 2 {
+		t.Fatalf("expected 2 stages, got %d", len(plan.Stages))
+	}
+	if len(plan.Stages[0].Weeks) != 2 || len(plan.Stages[0].Standards) != 2 {
+		t.Fatalf("expected weeks and standards preserved, got %#v", plan.Stages[0])
 	}
 }
 
@@ -523,6 +578,72 @@ func TestRefreshAbilityProfileRadarDataUsesCumulativeAbilityScale(t *testing.T) 
 	}
 	if total < 250 {
 		t.Fatalf("expected cumulative ability scale, got distribution-like total %d from %#v", total, diagnosis.AbilityProfile.RadarData)
+	}
+}
+
+func TestRefreshAbilityProfileRadarDataKeepsCampusPriorWithoutCampusEvidence(t *testing.T) {
+	impact := 7.2
+	profile := AbilityProfile{
+		BasicInfo: BasicInfo{Major: "计算机科学与技术"},
+		Education: []EducationItem{{
+			School:     "测试大学",
+			Major:      "计算机科学与技术",
+			Degree:     "本科",
+			RuankeRank: 180,
+		}},
+		MajorBaselineStatus: "ready",
+		MajorBaseline: MajorBaseline{
+			BaseScore:  48,
+			Dimensions: benchmarkDimensionNames(),
+			Scores:     []int{52, 42, 56, 38, 46, 50},
+			Source:     "major_baseline",
+		},
+		Awards: []AwardItem{{
+			Name:            "创新大赛",
+			Result:          "省二等奖",
+			EvidenceScope:   "校外",
+			Level:           7,
+			ImpactFactor:    &impact,
+			BenchmarkScores: []float64{0.24, 0.12, 0.26, 0.12, 0.14, 0.12},
+		}},
+		BenchmarkStatus: "ready",
+	}
+
+	refreshAbilityProfileRadarData(&profile)
+
+	var campus *RadarSeries
+	var external *RadarSeries
+	for index := range profile.RadarSeries {
+		switch profile.RadarSeries[index].Key {
+		case "campus":
+			campus = &profile.RadarSeries[index]
+		case "external":
+			external = &profile.RadarSeries[index]
+		}
+	}
+	if campus == nil {
+		t.Fatalf("expected campus radar series to be kept when campus evidence is absent, got %#v", profile.RadarSeries)
+	}
+	if campus.Count != 0 {
+		t.Fatalf("expected campus evidence count 0, got %d", campus.Count)
+	}
+	if got := len(campus.Scores); got != len(benchmarkDimensionNames()) {
+		t.Fatalf("expected campus prior to have six dimensions, got %d", got)
+	}
+	if campus.Source == "empty" {
+		t.Fatalf("expected campus prior source, got %q", campus.Source)
+	}
+	if external == nil || external.Count != 1 {
+		t.Fatalf("expected external radar series to keep the benchmarked item, got %#v", profile.RadarSeries)
+	}
+
+	radarContext := buildJobMatchingRadarContext(profile)
+	campusContext := objectValue(radarContext["campus"])
+	if got := intValue(campusContext["count"]); got != 0 {
+		t.Fatalf("expected job matching campus context count 0, got %d", got)
+	}
+	if scores, ok := campusContext["scores"].([]ScoreDimension); !ok || len(scores) != len(benchmarkDimensionNames()) {
+		t.Fatalf("expected job matching campus context to include prior scores, got %#v", campusContext["scores"])
 	}
 }
 

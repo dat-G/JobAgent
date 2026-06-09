@@ -720,7 +720,7 @@ func backendRequirements() []BackendRequirement {
 		{ID: "BR-03", Title: "成绩单解析与课程能力映射", Status: "partial_ocr_blocked", Priority: "P0", Details: []string{"解析课程、学期、成绩、GPA 和专业课程分类", "将课程映射到岗位能力维度", "扫描版成绩单需要稳定 OCR 服务"}},
 		{ID: "BR-04", Title: "岗位能力模型与 JD 解析", Status: "partial_in_legato_presto_team", Priority: "P0", Details: []string{"已新增 Adaptive Planner 动态派生多视角 Presto Agent", "后端会校验 Planner 输出并限制 3 到 6 个 Agent、最多 3 个并发 run", "每个 Presto run 的事件流会转发到前端 chat 状态卡", "当前基于简历证据、六维能力和学历门槛推断岗位", "后续仍需接入真实岗位库、JD 数据源和地区过滤", "后续可扩展为粘贴 JD 的定向分析模式"}},
 		{ID: "BR-05", Title: "能力评分与雷达数据引擎", Status: "ready_in_backend", Priority: "P0", Details: []string{"Item Benchmark 生成证据级六维分布和 Impact", "Major Baseline 生成专业六维 prior", "Go 后端统一聚合学生最终六维画像与雷达 series", "Job Matching 使用同一画像生成岗位目标雷达和差距"}},
-		{ID: "BR-06", Title: "成长路径规划生成", Status: "not_started", Priority: "P1", Details: []string{"生成阶段目标、周任务、资源链接、达标标准", "根据学生短板和岗位权重调整优先级", "支持任务完成状态和再规划"}},
+		{ID: "BR-06", Title: "成长路径规划生成", Status: "partial_in_presto_team", Priority: "P1", Details: []string{"Job Matching 完成后启动 Legato Path Planning Team", "Path Planner 动态派生路径规划 Agent", "输出阶段目标、周任务、资源链接和达标标准", "根据学生短板和岗位权重调整优先级", "后续支持任务完成状态和再规划"}},
 		{ID: "BR-07", Title: "结构化导出服务", Status: "mock_in_gateway", Priority: "P1", Details: []string{"能力画像导出 JSON 和 Excel", "路径规划导出 PDF 和 Word", "匹配结果导出可视化报表"}},
 		{ID: "BR-08", Title: "异步任务与 SSE 事件契约", Status: "partial_in_presto", Priority: "P1", Details: []string{"统一上传、解析、评分、生成报告的 run 状态", "提供可恢复的事件流和错误码", "支持长任务超时与重试"}},
 		{ID: "BR-09", Title: "用户数据安全与权限", Status: "not_started", Priority: "P0", Details: []string{"学生材料包含隐私数据，需要认证、授权和脱敏日志", "支持文件删除、数据保留周期和审计记录", "导出文件需要访问控制"}},

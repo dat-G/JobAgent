@@ -62,6 +62,8 @@ let assistantState = loadAssistantState();
 let assistantBusy = false;
 let assistantAbort = null;
 let assistantFocusedEvidence = null;
+let assistantFocusedContext = null;
+let assistantFocusedContexts = [];
 let assistantAgentStreamMessageId = "";
 let assistantAgentStreamActive = false;
 let assistantAgentStreamAutoOpened = false;
@@ -122,18 +124,18 @@ function runDetailForDiagnosisEvent(event, data = {}) {
 function agentTeamDockSummary(rawEvent) {
   const event = normalizeAgentTeamEvent(rawEvent);
   const group = agentStreamGroupForEvent(event);
-  const config = agentStreamPhaseConfig(group);
+  const config = agentStreamPhaseConfig(group, event.workflow);
   if (event.status === "failed") {
     const agent = event.agent && event.agent !== "Agent" ? event.agent : config.label;
     return `${agent} 分析失败，详细事件已收纳到 AI 助手。`;
   }
   if (group === "planning") {
-    if (event.status === "done") return "Adaptive Planner 已完成任务拆解，正在启动多视角 Agent Team。";
-    return "Adaptive Planner 正在拆解简历复杂度，详细事件已收纳到 AI 助手。";
+    if (event.status === "done") return `${config.label} 已完成任务拆解，正在启动多视角 Agent Team。`;
+    return `${config.label} 正在拆解任务复杂度，详细事件已收纳到 AI 助手。`;
   }
   if (group === "synthesis") {
-    if (event.status === "done") return "Synthesis Arbiter 已完成综合裁决，正在整理岗位匹配结果。";
-    return "Synthesis Arbiter 正在综合多视角结论，详细事件已收纳到 AI 助手。";
+    if (event.status === "done") return `${config.label} 已完成综合裁决，正在整理结果。`;
+    return `${config.label} 正在综合多视角结论，详细事件已收纳到 AI 助手。`;
   }
   const total = event.agentTotal || event.agentCount || 0;
   const index = event.agentIndex && total ? `（${event.agentIndex}/${total}）` : "";
@@ -367,13 +369,12 @@ async function runDiagnosis() {
     if (job.ability_profile) {
       diagnosis = job;
       renderDiagnosis(diagnosis);
-      unlockModule("profile");
-      unlockModule("matching");
-      unlockModule("path");
-      unlockModule("outputs");
+      reconcileRunStepsFromDiagnosis(diagnosis);
+      if (canMarkOutputsDone()) {
+        markAgentStep("outputs", "done");
+        unlockModule("outputs");
+      }
       setRunDone();
-      runButton.disabled = false;
-      runButton.textContent = "重新生成";
       return;
     }
     throw new Error("diagnosis job missing events_url");
@@ -462,6 +463,10 @@ function markAssistantAgentTeamFailed(messageText) {
 }
 
 function setRunDone() {
+  if (!canMarkRunDone()) {
+    keepRunPendingUntilAllStepsDone();
+    return;
+  }
   failedRunStep = "";
   matchingRequestInFlight = false;
   document.querySelector("#runStatus").textContent = "诊断已生成";
@@ -473,6 +478,98 @@ function setRunDone() {
   updateAssistantContext();
   renderAssistantSuggestions();
   syncAssistantAvailability();
+}
+
+function canMarkRunDone() {
+  if (benchmarkRequestInFlight || matchingRequestInFlight || failedRunStep) return false;
+  const allStepsDone = agentSteps.every((step) => document.querySelector(`[data-run-step="${step}"]`)?.classList.contains("is-done"));
+  return allStepsDone && moduleLocks.profile && moduleLocks.matching && moduleLocks.path && moduleLocks.outputs;
+}
+
+function canMarkOutputsDone() {
+  const allPriorStepsDone = agentSteps
+    .filter((step) => step !== "outputs")
+    .every((step) => document.querySelector(`[data-run-step="${step}"]`)?.classList.contains("is-done"));
+  return allPriorStepsDone && moduleLocks.profile && moduleLocks.matching && moduleLocks.path;
+}
+
+function hasMeaningfulValue(value) {
+  if (value === null || value === undefined) return false;
+  if (Array.isArray(value)) return hasMeaningfulArray(value);
+  if (typeof value === "object") return Object.values(value).some((entry) => hasMeaningfulValue(entry));
+  return cleanDisplayText(value).length > 0;
+}
+
+function hasMeaningfulArray(value) {
+  return Array.isArray(value) && value.some((item) => hasMeaningfulValue(item));
+}
+
+function hasMeaningfulMatchingResult(match) {
+  if (!match || typeof match !== "object") return false;
+  const selected = match.selected_job || {};
+  return Boolean(
+    cleanDisplayText(match.source)
+    || cleanDisplayText(match.target_role)
+    || cleanDisplayText(match.fit_summary)
+    || cleanDisplayText(selected.title)
+    || cleanDisplayText(selected.fit_summary)
+    || Number(match.overall_match) > 0
+    || hasMeaningfulArray(match.student_radar)
+    || hasMeaningfulArray(match.target_radar)
+    || hasMeaningfulArray(match.report_sections)
+    || hasMeaningfulArray(match.gap_details)
+    || hasMeaningfulArray(match.development_actions)
+    || hasMeaningfulArray(match.recommendations)
+    || hasMeaningfulArray(match.recommended_reasons)
+  );
+}
+
+function hasMeaningfulPathPlan(plan) {
+  if (!plan || typeof plan !== "object") return false;
+  const stages = Array.isArray(plan.stages) ? plan.stages : [];
+  return Boolean(
+    cleanDisplayText(plan.summary)
+    || cleanDisplayText(plan.path_plan_summary)
+    || stages.some((stage) => {
+      if (!stage || typeof stage !== "object") return false;
+      return cleanDisplayText(stage.stage)
+        || cleanDisplayText(stage.title)
+        || cleanDisplayText(stage.goal)
+        || cleanDisplayText(stage.deliverable)
+        || hasMeaningfulArray(stage.weekly_tasks)
+        || hasMeaningfulArray(stage.acceptance)
+        || hasMeaningfulArray(stage.resources);
+    })
+  );
+}
+
+function hasReadyPathPlan(plan, match) {
+  return hasMeaningfulPathPlan(plan) && hasMeaningfulMatchingResult(match);
+}
+
+function isProfileStepReady(profile) {
+  return Boolean(profile) && isMatchingGateOpen(profile);
+}
+
+function keepRunPendingUntilAllStepsDone() {
+  document.querySelector("#runStatus").textContent = "生成中";
+  setRunDetail(nextIncompleteRunStepDetail(), { immediate: true });
+  document.querySelector(".generation-dock").classList.add("is-running");
+  runButton.disabled = true;
+  runButton.textContent = "生成中";
+  syncAssistantAvailability();
+}
+
+function nextIncompleteRunStepDetail() {
+  const running = agentSteps.find((step) => document.querySelector(`[data-run-step="${step}"]`)?.classList.contains("is-running"));
+  if (running) return runStepDetails[running] || `${stepLabel(running)}正在生成。`;
+  const pending = agentSteps.find((step) => !document.querySelector(`[data-run-step="${step}"]`)?.classList.contains("is-done"));
+  if (pending) return runStepDetails[pending] || `等待${stepLabel(pending)}完成。`;
+  if (!moduleLocks.profile) return "等待能力画像模块解锁。";
+  if (!moduleLocks.matching) return "等待岗位匹配模块解锁。";
+  if (!moduleLocks.path) return "等待路径规划模块解锁。";
+  if (!moduleLocks.outputs) return "等待结构化输出模块解锁。";
+  return "等待最后阶段状态同步。";
 }
 
 function setRunFailed(message) {
@@ -523,14 +620,18 @@ function connectDiagnosisEvents(eventsUrl) {
         renderRequirements(diagnosis.backend_requirements || []);
         renderLimitations(diagnosis.production_limitations || []);
       }
+      reconcileRunStepsFromDiagnosis(diagnosis);
     }
-    unlockModule("outputs");
     const keepEventsForBenchmark = benchmarkRequestInFlight || diagnosis?.ability_profile?.benchmark_status === "benchmarking";
     if (keepEventsForBenchmark) {
       setRunWaitingForBenchmark();
     } else if (diagnosis?.ability_profile?.benchmark_status === "failed") {
       setBenchmarkRunFailed();
     } else {
+      if (canMarkOutputsDone()) {
+        markAgentStep("outputs", "done");
+        unlockModule("outputs");
+      }
       setRunDone();
     }
     if (!keepEventsForBenchmark) {
@@ -554,15 +655,63 @@ function connectDiagnosisEvents(eventsUrl) {
   };
 }
 
+function reconcileRunStepsFromDiagnosis(result) {
+  if (!result) return;
+  if (result.ability_profile && !failedRunStep) {
+    completeRunStepsThrough("transcript_agent");
+    unlockModule("profile");
+    if (isProfileStepReady(result.ability_profile)) {
+      completeRunStepsThrough("profile");
+    }
+  }
+  if (hasMeaningfulMatchingResult(result.matching_result) && !failedRunStep) {
+    completeRunStepsThrough("matching");
+    unlockModule("matching");
+  }
+  if (hasReadyPathPlan(result.path_plan, result.matching_result) && !failedRunStep) {
+    completeRunStepsThrough("path");
+    unlockModule("path");
+  }
+}
+
+function reconcileRunStepsFromEventData(data = {}) {
+  const eventDiagnosis = data.diagnosis || {};
+  const profile = data.ability_profile || eventDiagnosis.ability_profile || diagnosis?.ability_profile;
+  if (profile && isProfileStepReady(profile) && !failedRunStep) {
+    completeRunStepsThrough("profile");
+    unlockModule("profile");
+  }
+  const match = data.matching_result || eventDiagnosis.matching_result || diagnosis?.matching_result;
+  if (hasMeaningfulMatchingResult(match) && !failedRunStep) {
+    completeRunStepsThrough("matching");
+    unlockModule("matching");
+  }
+  const plan = data.path_plan || eventDiagnosis.path_plan || diagnosis?.path_plan;
+  if (hasReadyPathPlan(plan, match) && !failedRunStep) {
+    completeRunStepsThrough("path");
+    unlockModule("path");
+  }
+}
+
 function handleDiagnosisEvent(event) {
-  markAgentStep(event.step, event.status);
   const data = event.data || {};
+  reconcileRunStepsFromEventData(data);
+  const runStepStatus = normalizedRunStepStatus(event, data);
+  markAgentStep(event.step, runStepStatus);
+  if (event.step === "path" && (runStepStatus === "running" || runStepStatus === "pending")) {
+    lockModule("path");
+  }
+  if (event.step === "outputs" && (runStepStatus === "running" || runStepStatus === "pending")) {
+    lockModule("outputs");
+  }
   const hasAgentTeamEvent = Boolean(data.agent_team_event);
-  const statusText = event.status === "running"
+  const statusText = runStepStatus === "running"
     ? "生成中"
-    : event.status === "failed"
+    : runStepStatus === "failed"
       ? `失败：${stepLabel(event.step)}`
-      : `已完成：${stepLabel(event.step)}`;
+      : runStepStatus === "done"
+        ? `已完成：${stepLabel(event.step)}`
+        : "生成中";
   document.querySelector("#runStatus").textContent = statusText;
   setRunDetail(runDetailForDiagnosisEvent(event, data), {
     immediate: event.status !== "running" || !hasAgentTeamEvent,
@@ -593,7 +742,10 @@ function handleDiagnosisEvent(event) {
   if (event.step === "matching" && event.status === "failed") {
     setMatchingRunFailed(formatAgentDisplayText(data.matching_error || data.error || event.message));
   }
-  if (data.matching_result) {
+  if (event.step === "path" && event.status === "failed") {
+    setPathRunFailed(formatAgentDisplayText(data.path_error || data.error || event.message));
+  }
+  if (hasMeaningfulMatchingResult(data.matching_result)) {
     diagnosis = diagnosis || createDiagnosisShell();
     diagnosis.matching_result = data.matching_result;
     renderMatching(data.matching_result);
@@ -606,14 +758,20 @@ function handleDiagnosisEvent(event) {
     diagnosis.ability_profile.top5_matching_jobs = data.top_jobs;
     renderTopJobs(data.top_jobs);
   }
-  if (data.path_plan) {
+  if (hasReadyPathPlan(data.path_plan, data.matching_result || diagnosis?.matching_result)) {
     diagnosis = diagnosis || createDiagnosisShell();
     diagnosis.path_plan = data.path_plan;
     renderPath(data.path_plan);
+    if (event.step === "path" && event.status === "done") {
+      finalizePathPlanningStreamFromPathPayload(data);
+    }
+  } else if (data.path_plan && event.step === "path" && event.status === "done") {
+    lockModule("path");
   }
   if (data.diagnosis) {
     diagnosis = data.diagnosis;
     renderDiagnosis(diagnosis);
+    reconcileRunStepsFromDiagnosis(diagnosis);
   }
   if (data.backend_requirements) {
     diagnosis = diagnosis || createDiagnosisShell();
@@ -622,19 +780,38 @@ function handleDiagnosisEvent(event) {
   }
   if (event.status === "done") {
     if (event.step === "profile") unlockModule("profile");
-    if (event.step === "matching") unlockModule("matching");
-    if (event.step === "path") unlockModule("path");
-    if (event.step === "outputs") unlockModule("outputs");
+    if (event.step === "matching" && hasMeaningfulMatchingResult(diagnosis?.matching_result)) unlockModule("matching");
+    if (event.step === "path" && hasReadyPathPlan(diagnosis?.path_plan, diagnosis?.matching_result)) unlockModule("path");
+    if (event.step === "outputs" && canMarkOutputsDone()) unlockModule("outputs");
+    if (baseJobDone) setRunDone();
   }
   updateAssistantContext();
   renderAssistantSuggestions();
+}
+
+function normalizedRunStepStatus(event, data = {}) {
+  const eventDiagnosis = data.diagnosis || {};
+  if ((event.status === "running" || event.status === "done") && !arePriorRunStepsDone(event.step)) {
+    return "pending";
+  }
+  if (event.status !== "done") return event.status;
+  if (event.step === "matching" && !hasMeaningfulMatchingResult(data.matching_result || eventDiagnosis.matching_result || diagnosis?.matching_result)) {
+    return "pending";
+  }
+  if (event.step === "path" && !hasReadyPathPlan(data.path_plan || eventDiagnosis.path_plan || diagnosis?.path_plan, data.matching_result || eventDiagnosis.matching_result || diagnosis?.matching_result)) {
+    return "pending";
+  }
+  if (event.step === "outputs" && !canMarkOutputsDone()) {
+    return "pending";
+  }
+  return event.status;
 }
 
 function handleAgentTeamChatEvent(event) {
   const normalized = normalizeAgentTeamEvent(event);
   const terminalStatus = normalized.status === "done" || normalized.status === "failed";
   const streamTerminal = terminalStatus
-    && (normalized.agentKey === "team" || normalized.agentKey === "synthesis_arbiter" || normalized.phase === "final_synthesis");
+    && (normalized.agentKey === "team" || normalized.agentKey === "synthesis_arbiter" || normalized.agentKey === "path_synthesis_arbiter" || normalized.phase === "final_synthesis");
   const isTokenDelta = normalized.tokenChannel === "content" && Boolean(normalized.tokenDelta);
   assistantAgentStreamActive = !streamTerminal;
   const session = ensureAssistantSession();
@@ -665,7 +842,7 @@ function handleAgentTeamChatEvent(event) {
   }
   if (isTokenDelta && !isAgentStreamExpanded(message.agentStream, normalized.agentKey)) return;
   renderAssistant();
-  if (streamTerminal && baseJobDone && !benchmarkRequestInFlight) {
+  if (streamTerminal && baseJobDone && !benchmarkRequestInFlight && !matchingRequestInFlight) {
     if (normalized.status === "done" && !failedRunStep) setRunDone();
     closeDiagnosisEvents();
   }
@@ -673,19 +850,22 @@ function handleAgentTeamChatEvent(event) {
 
 function ensureAgentTeamStreamMessage(session, event = null) {
   const phaseGroup = agentStreamGroupForEvent(event);
+  const workflow = agentStreamWorkflowForEvent(event);
   let message = session.messages.find((item) => {
     if (item.streamType !== "agent_team") return false;
     const streamGroup = item.agentStream?.phaseGroup || "team";
-    return streamGroup === phaseGroup;
+    const streamWorkflow = item.agentStream?.workflow || "resume/job_matching";
+    return streamGroup === phaseGroup && streamWorkflow === workflow;
   });
   if (message) {
-    if (!message.agentStream) message.agentStream = createAgentTeamStreamState(phaseGroup);
+    if (!message.agentStream) message.agentStream = createAgentTeamStreamState(phaseGroup, workflow);
     if (!message.agentStream.phaseGroup) message.agentStream.phaseGroup = phaseGroup;
+    if (!message.agentStream.workflow) message.agentStream.workflow = workflow;
     assistantAgentStreamMessageId = message.id;
     return { message, created: false };
   }
   const now = new Date().toISOString();
-  const stream = createAgentTeamStreamState(phaseGroup);
+  const stream = createAgentTeamStreamState(phaseGroup, workflow);
   message = {
     id: uniqueId("msg"),
     role: "assistant",
@@ -702,10 +882,11 @@ function ensureAgentTeamStreamMessage(session, event = null) {
   return { message, created: true };
 }
 
-function createAgentTeamStreamState(phaseGroup = "planning") {
-  const config = agentStreamPhaseConfig(phaseGroup);
+function createAgentTeamStreamState(phaseGroup = "planning", workflow = "resume/job_matching") {
+  const config = agentStreamPhaseConfig(phaseGroup, workflow);
   return {
     title: config.title,
+    workflow: config.workflow,
     phaseGroup: config.group,
     stageOrder: config.stageOrder,
     status: "running",
@@ -723,10 +904,14 @@ function createAgentTeamStreamState(phaseGroup = "planning") {
 
 function updateAgentTeamStreamState(stream, event) {
   const phaseGroup = stream?.phaseGroup || agentStreamGroupForEvent(event);
-  stream = stream || createAgentTeamStreamState(phaseGroup);
+  const workflow = stream?.workflow || agentStreamWorkflowForEvent(event);
+  stream = stream || createAgentTeamStreamState(phaseGroup, workflow);
   const isTokenDelta = event.tokenChannel === "content" && Boolean(event.tokenDelta);
   stream.phaseGroup = phaseGroup;
-  stream.stageOrder = agentStreamPhaseConfig(phaseGroup).stageOrder;
+  stream.workflow = workflow;
+  const config = agentStreamPhaseConfig(phaseGroup, workflow);
+  stream.title = config.title;
+  stream.stageOrder = config.stageOrder;
   stream.complexity = event.complexity || stream.complexity;
   if (phaseGroup === "team") {
     stream.agentCount = event.agentCount || event.agentTotal || stream.agentCount;
@@ -758,37 +943,76 @@ function updateAgentTeamStreamState(stream, event) {
 }
 
 function completeSynthesisAgentFromTeamEvent(stream, event) {
-  const existing = stream.agents.synthesis_arbiter;
+  const synthesisKey = stream.workflow === "resume/path_planning" ? "path_synthesis_arbiter" : "synthesis_arbiter";
+  const existing = stream.agents[synthesisKey];
   const message = existing?.message && existing.status === "done"
     ? existing.message
-    : "Synthesis Arbiter 已返回结构化岗位匹配结果。";
+    : stream.workflow === "resume/path_planning"
+      ? "Path Synthesis Arbiter 已返回结构化路径规划结果。"
+      : "Synthesis Arbiter 已返回结构化岗位匹配结果。";
   upsertAgentStreamAgent(stream, {
     ...event,
-    agentKey: "synthesis_arbiter",
-    agent: "Synthesis Arbiter",
+    agentKey: synthesisKey,
+    agent: stream.workflow === "resume/path_planning" ? "Path Synthesis Arbiter" : "Synthesis Arbiter",
     status: "done",
     phase: "final_synthesis",
     perspective: existing?.perspective || "multi_view_decision",
     reasoningEffort: existing?.reasoningEffort || "",
-    focus: existing?.focus || "综合所有视角结果，输出岗位匹配报告。",
+    focus: existing?.focus || (stream.workflow === "resume/path_planning" ? "综合所有视角结果，输出路径规划。" : "综合所有视角结果，输出岗位匹配报告。"),
     agentIndex: 1,
     agentTotal: 1,
     runID: existing?.runID || event.runID || "",
     message,
     outputPreview: existing?.outputPreview || event.outputPreview || ""
   });
-  const item = stream.agents.synthesis_arbiter;
+  const item = stream.agents[synthesisKey];
   if (item?.outputPreview && !item.typedOutput) {
     item.typedOutput = item.outputPreview;
     item.typingDone = true;
   }
 }
 
-function agentStreamPhaseConfig(phaseGroup = "planning") {
+function agentStreamPhaseConfig(phaseGroup = "planning", workflow = "resume/job_matching") {
   const group = ["planning", "team", "synthesis"].includes(phaseGroup) ? phaseGroup : "team";
-  const configs = {
+  const isPathPlanning = workflow === "resume/path_planning";
+  const configs = isPathPlanning ? {
     planning: {
       group: "planning",
+      workflow,
+      title: "路径规划 · Planner",
+      label: "Path Planner",
+      phase: "planning",
+      stageOrder: 1,
+      agentCount: 1,
+      summary: "Path Planner 正在把岗位匹配结果拆解成路径规划 Agent 队列。",
+      empty: "等待 Path Planner 返回路径规划方案。"
+    },
+    team: {
+      group: "team",
+      workflow,
+      title: "路径规划 · Agent Team",
+      label: "路径设计",
+      phase: "orchestration",
+      stageOrder: 2,
+      agentCount: 0,
+      summary: "路径规划 Agent 将从阶段目标、周任务、证据交付和达标标准并发设计。",
+      empty: "等待 Planner 派生的路径规划 Agent 队列。"
+    },
+    synthesis: {
+      group: "synthesis",
+      workflow,
+      title: "路径规划 · Synthesis",
+      label: "路径综合",
+      phase: "final_synthesis",
+      stageOrder: 3,
+      agentCount: 1,
+      summary: "Path Synthesis Arbiter 将综合 Agent 结果并输出可执行路径规划。",
+      empty: "等待 Path Synthesis Arbiter 启动。"
+    }
+  } : {
+    planning: {
+      group: "planning",
+      workflow,
       title: "规划阶段",
       label: "Adaptive Planner",
       phase: "planning",
@@ -799,6 +1023,7 @@ function agentStreamPhaseConfig(phaseGroup = "planning") {
     },
     team: {
       group: "team",
+      workflow,
       title: "多视角 Agent Team",
       label: "并行分析",
       phase: "orchestration",
@@ -809,6 +1034,7 @@ function agentStreamPhaseConfig(phaseGroup = "planning") {
     },
     synthesis: {
       group: "synthesis",
+      workflow,
       title: "Synthesis Arbiter",
       label: "综合裁决",
       phase: "final_synthesis",
@@ -825,21 +1051,30 @@ function agentStreamGroupForEvent(event = null) {
   if (!event) return "planning";
   const agentKey = String(event.agentKey || "");
   const phase = String(event.phase || "");
-  if (agentKey === "synthesis_arbiter" || phase === "final_synthesis") return "synthesis";
-  if (agentKey === "adaptive_planner" || phase === "planning") return "planning";
+  if (agentKey === "synthesis_arbiter" || agentKey === "path_synthesis_arbiter" || phase === "final_synthesis") return "synthesis";
+  if (agentKey === "adaptive_planner" || agentKey === "path_planner" || phase === "planning") return "planning";
   if (agentKey === "team" && event.status === "done") return "synthesis";
   if (agentKey === "team" && phase === "orchestration" && !event.agentCount && event.status !== "failed") return "planning";
   return "team";
 }
 
+function agentStreamWorkflowForEvent(event = null) {
+  const workflow = String(event?.workflow || "");
+  return workflow === "resume/path_planning" ? workflow : "resume/job_matching";
+}
+
 function resolveAgentStreamStatus(stream, event) {
   if (event.status === "failed") return "failed";
+  const planningKey = stream.workflow === "resume/path_planning" ? "path_planner" : "adaptive_planner";
+  const synthesisKey = stream.workflow === "resume/path_planning" ? "path_synthesis_arbiter" : "synthesis_arbiter";
   if (stream.phaseGroup === "planning") {
-    return stream.agents.adaptive_planner?.status === "done" ? "done" : "running";
+    if (stream.agents[planningKey]?.status === "failed") return "failed";
+    return stream.agents[planningKey]?.status === "done" ? "done" : "running";
   }
   if (stream.phaseGroup === "synthesis") {
     if (event.agentKey === "team" && event.status === "done") return "done";
-    return stream.agents.synthesis_arbiter?.status === "done" ? "done" : "running";
+    if (stream.agents[synthesisKey]?.status === "failed") return "failed";
+    return stream.agents[synthesisKey]?.status === "done" ? "done" : "running";
   }
   const total = stream.agentCount || stream.order.length;
   const completed = stream.order.filter((key) => stream.agents[key]?.status === "done").length;
@@ -911,6 +1146,8 @@ function upsertAgentStreamAgent(stream, event) {
 
 function normalizeAgentTeamEvent(event) {
   return {
+    team: String(event.team || ""),
+    workflow: String(event.workflow || "resume/job_matching"),
     agentKey: String(event.agent_key || ""),
     agent: String(event.agent || event.agent_key || "Agent"),
     status: normalizeAgentStreamStatus(event.status || "running"),
@@ -938,7 +1175,7 @@ function normalizeAgentStreamStatus(status) {
 }
 
 function agentTeamStreamFallback(stream) {
-  const config = agentStreamPhaseConfig(stream.phaseGroup);
+  const config = agentStreamPhaseConfig(stream.phaseGroup, stream.workflow);
   const completed = stream.order.filter((key) => stream.agents[key]?.status === "done").length;
   const total = stream.phaseGroup === "team" ? stream.agentCount || stream.order.length : 1;
   const complexity = stream.complexity ? `复杂度 ${stream.complexity}，` : "";
@@ -959,10 +1196,50 @@ function shortRunId(value) {
   return text.length > 12 ? text.slice(0, 12) : text;
 }
 
+function runStepItem(step) {
+  return document.querySelector(`[data-run-step="${step}"]`);
+}
+
+function isRunStepDone(step) {
+  return Boolean(runStepItem(step)?.classList.contains("is-done"));
+}
+
+function updateRunProgressFromSteps() {
+  const doneCount = agentSteps.filter((name) => isRunStepDone(name)).length;
+  const runningCount = agentSteps.filter((name) => runStepItem(name)?.classList.contains("is-running")).length;
+  const perceivedProgress = doneCount + runningCount * 0.35;
+  setRunProgress(Math.round((perceivedProgress / agentSteps.length) * 100));
+}
+
+function arePriorRunStepsDone(step) {
+  const index = agentSteps.indexOf(step);
+  if (index <= 0) return true;
+  return agentSteps.slice(0, index).every((name) => isRunStepDone(name));
+}
+
+function forceRunStepDone(step) {
+  if (!agentSteps.includes(step)) return;
+  const item = runStepItem(step);
+  if (!item) return;
+  item.classList.add("is-done");
+  item.classList.remove("is-running", "is-failed");
+  setRunStepRetryable(step, false);
+}
+
+function completeRunStepsThrough(step) {
+  const index = agentSteps.indexOf(step);
+  if (index < 0) return;
+  agentSteps.slice(0, index + 1).forEach((name) => forceRunStepDone(name));
+  updateRunProgressFromSteps();
+}
+
 function markAgentStep(step, status) {
   if (!agentSteps.includes(step)) return;
-  const item = document.querySelector(`[data-run-step="${step}"]`);
+  const item = runStepItem(step);
   if (!item) return;
+  if ((status === "running" || status === "done") && !arePriorRunStepsDone(step)) {
+    status = "pending";
+  }
   const alreadyDone = item.classList.contains("is-done");
   if (status === "done") {
     item.classList.add("is-done");
@@ -975,11 +1252,11 @@ function markAgentStep(step, status) {
     item.classList.add("is-running");
     item.classList.remove("is-failed");
     setRunStepRetryable(step, false);
+  } else if (status === "pending") {
+    item.classList.remove("is-done", "is-running", "is-failed");
+    setRunStepRetryable(step, false);
   }
-  const doneCount = agentSteps.filter((name) => document.querySelector(`[data-run-step="${name}"]`)?.classList.contains("is-done")).length;
-  const runningCount = agentSteps.filter((name) => document.querySelector(`[data-run-step="${name}"]`)?.classList.contains("is-running")).length;
-  const perceivedProgress = doneCount + runningCount * 0.35;
-  setRunProgress(Math.round((perceivedProgress / agentSteps.length) * 100));
+  updateRunProgressFromSteps();
 }
 
 function setRunStepRetryable(step, enabled) {
@@ -1046,10 +1323,21 @@ function resetResultModules() {
   document.querySelector("#reportRows").innerHTML = "";
   document.querySelector("#gapCards").innerHTML = "";
   document.querySelector("#pathStages").innerHTML = "";
-  document.querySelector("#topJobs").innerHTML = "";
   document.querySelector("#matchingJobs").innerHTML = "";
-  document.querySelector("#requirementsList").innerHTML = "";
-  document.querySelector("#limitationsList").innerHTML = "";
+  const topJobs = document.querySelector("#topJobs");
+  if (topJobs) topJobs.innerHTML = "";
+  const requirementsList = document.querySelector("#requirementsList");
+  if (requirementsList) requirementsList.innerHTML = "";
+  const limitationsList = document.querySelector("#limitationsList");
+  if (limitationsList) limitationsList.innerHTML = "";
+}
+
+function lockModule(module) {
+  moduleLocks[module] = false;
+  const section = document.querySelector(`#${module}`);
+  if (!section) return;
+  section.classList.remove("is-unlocking");
+  section.classList.add("is-module-locked");
 }
 
 function unlockModule(module) {
@@ -1093,7 +1381,7 @@ function renderDiagnosis(data) {
     maybeRequestItemBenchmark(data.ability_profile);
   }
   renderMatching(data.matching_result);
-  renderPath(data.path_plan);
+  renderPath(hasReadyPathPlan(data.path_plan, data.matching_result) ? data.path_plan : {});
   renderTopJobs(data.ability_profile.top5_matching_jobs);
   renderRequirements(data.backend_requirements || []);
   renderLimitations(data.production_limitations || []);
@@ -1308,10 +1596,33 @@ function normalizedBackendRadarSeries(profile) {
       scores
     };
   }).filter(Boolean);
-  if (series.length) return series;
+  if (series.length) return ensureCampusRadarSeries(profile, series);
   const profileRadar = normalizedProfileRadarData(profile);
   if (profileRadar.length !== benchmarkDimensions.length) return [];
-  return [{ key: "overall", label: "综合", count: "", scores: profileRadar }];
+  return ensureCampusRadarSeries(profile, [{ key: "overall", label: "综合", count: "", scores: profileRadar }]);
+}
+
+function ensureCampusRadarSeries(profile, series) {
+  if (!Array.isArray(series) || series.some((entry) => entry.key === "campus")) return series;
+  const scores = normalizedMajorBaselineScores(profile);
+  if (scores.length !== benchmarkDimensions.length) return series;
+  const campusSeries = { key: "campus", label: "校内", count: 0, scores };
+  const overallIndex = series.findIndex((entry) => entry.key === "overall");
+  if (overallIndex < 0) return [campusSeries, ...series];
+  return [
+    ...series.slice(0, overallIndex + 1),
+    campusSeries,
+    ...series.slice(overallIndex + 1)
+  ];
+}
+
+function normalizedMajorBaselineScores(profile) {
+  const baseline = profile?.major_baseline || {};
+  const rawScores = Array.isArray(baseline.scores) ? baseline.scores : [];
+  if (rawScores.length === benchmarkDimensions.length && rawScores.every((score) => Number.isFinite(Number(score)))) {
+    return rawScores.map((score) => Math.max(0, Math.min(100, Number(score))));
+  }
+  return scoreDimensionArrayToScores(rawScores);
 }
 
 function scoreDimensionArrayToScores(items) {
@@ -1325,6 +1636,7 @@ function scoreDimensionArrayToScores(items) {
 }
 
 function radarValueHoverLayer(items, series, center, radius) {
+  const cardHeight = 88;
   return items.map((item, index) => {
     const outer = pointFor(index, items.length, radius + 8, center);
     const card = radarValueCardPosition(index, items.length, radius, center);
@@ -1334,7 +1646,7 @@ function radarValueHoverLayer(items, series, center, radius) {
         <line class="radar-hover-zone" x1="${center.x}" y1="${center.y}" x2="${outer.x.toFixed(2)}" y2="${outer.y.toFixed(2)}"></line>
         <circle class="radar-hover-point" cx="${outer.x.toFixed(2)}" cy="${outer.y.toFixed(2)}" r="7"></circle>
         <g class="radar-value-card" transform="translate(${card.x}, ${card.y})" aria-hidden="true">
-          <rect width="108" height="76" rx="8"></rect>
+          <rect width="108" height="${cardHeight}" rx="8"></rect>
           <text class="radar-value-title" x="12" y="20">${escapeHTML(item.name)}</text>
           ${series.map((entry, rowIndex) => `
             <circle class="radar-value-swatch radar-value-swatch-${entry.key}" cx="15" cy="${36 + rowIndex * 16}" r="4"></circle>
@@ -1349,7 +1661,7 @@ function radarValueHoverLayer(items, series, center, radius) {
 function radarValueCardPosition(index, count, radius, center) {
   const anchor = pointFor(index, count, radius + 30, center);
   const x = Math.max(8, Math.min(244, Math.round(anchor.x - 54)));
-  const y = Math.max(10, Math.min(234, Math.round(anchor.y - 36)));
+  const y = Math.max(10, Math.min(222, Math.round(anchor.y - 42)));
   return { x, y };
 }
 
@@ -1602,7 +1914,7 @@ function maybeRequestItemBenchmark(profile, options = {}) {
       renderBasicInfo(diagnosis);
       renderAbilityRadar(payload.ability_profile);
       renderResumeEvidence(payload.ability_profile);
-      if (payload.matching_result) {
+      if (hasMeaningfulMatchingResult(payload.matching_result)) {
         diagnosis.matching_result = payload.matching_result;
         renderMatching(payload.matching_result);
         finalizeAgentTeamStreamFromMatchingPayload(payload);
@@ -1615,18 +1927,32 @@ function maybeRequestItemBenchmark(profile, options = {}) {
         diagnosis.production_limitations = payload.production_limitations;
         renderLimitations(payload.production_limitations);
       }
+      reconcileRunStepsFromEventData(payload);
       if (payload.ability_profile.benchmark_status === "failed" || payload.error) {
         setBenchmarkRunFailed(payload.error);
         return;
       }
-      markAgentStep("profile", "done");
+      completeRunStepsThrough("profile");
       if (payload.matching_error) {
         setMatchingRunFailed(payload.matching_error);
         return;
       }
-      if (payload.matching_result || payload.match_generated) {
-        markAgentStep("matching", "done");
+      if (hasMeaningfulMatchingResult(diagnosis.matching_result)) {
+        completeRunStepsThrough("matching");
         unlockModule("matching");
+      }
+      if (payload.path_error) {
+        setPathRunFailed(payload.path_error);
+        return;
+      }
+      if (hasReadyPathPlan(payload.path_plan, diagnosis.matching_result)) {
+        diagnosis.path_plan = payload.path_plan;
+        renderPath(payload.path_plan);
+        finalizePathPlanningStreamFromPathPayload(payload);
+        completeRunStepsThrough("path");
+        unlockModule("path");
+      } else if (payload.path_plan || payload.match_generated || payload.matching_result) {
+        lockModule("path");
       }
       if (baseJobDone) setRunDone();
     })
@@ -1639,6 +1965,7 @@ function maybeRequestItemBenchmark(profile, options = {}) {
     })
     .finally(() => {
       benchmarkRequestInFlight = false;
+      if (baseJobDone && !failedRunStep) setRunDone();
       if (baseJobDone && !assistantAgentStreamActive) closeDiagnosisEvents();
       updateAssistantContext();
     });
@@ -1686,6 +2013,7 @@ function finalizeLegacySynthesisStreams(session, event) {
   session.messages.forEach((message) => {
     const stream = message.agentStream;
     if (message.streamType !== "agent_team" || !stream || !stream.agents) return;
+    if (stream.workflow === "resume/path_planning") return;
     const hasSynthesisAgent = Boolean(stream.agents.synthesis_arbiter);
     if (!hasSynthesisAgent && stream.phaseGroup !== "synthesis") return;
     upsertAgentStreamAgent(stream, event);
@@ -1704,6 +2032,74 @@ function finalizeLegacySynthesisStreams(session, event) {
     }
     message.updatedAt = event.time;
   });
+}
+
+function finalizePathPlanningStreamFromPathPayload(payload = {}) {
+  if (!payload.path_plan) return;
+  const session = activeAssistantSession();
+  if (!session) return;
+  const hasPathStream = session.messages.some((item) => item.streamType === "agent_team" && item.agentStream?.workflow === "resume/path_planning");
+  if (!hasPathStream) return;
+  const preview = pathPlanAgentPreview(payload.path_plan);
+  const event = normalizeAgentTeamEvent({
+    workflow: "resume/path_planning",
+    agent_key: "path_synthesis_arbiter",
+    agent: "Path Synthesis Arbiter",
+    status: "done",
+    phase: "final_synthesis",
+    perspective: "path_plan_synthesis",
+    message: "Path Synthesis Arbiter 已返回结构化路径规划结果。",
+    output_preview: preview
+  });
+  const { message } = ensureAgentTeamStreamMessage(session, event);
+  message.agentStream = updateAgentTeamStreamState(message.agentStream, event);
+  message.content = agentTeamStreamFallback(message.agentStream);
+  message.status = "done";
+  message.updatedAt = event.time;
+  finalizePathPlanningStreams(session, event);
+  session.updatedAt = event.time;
+  assistantAgentStreamActive = false;
+  saveAssistantState();
+  renderAssistant();
+}
+
+function finalizePathPlanningStreams(session, event) {
+  session.messages.forEach((message) => {
+    const stream = message.agentStream;
+    if (message.streamType !== "agent_team" || !stream || !stream.agents) return;
+    if (stream.workflow !== "resume/path_planning") return;
+    upsertAgentStreamAgent(stream, event);
+    const item = stream.agents.path_synthesis_arbiter;
+    if (!item) return;
+    item.status = "done";
+    item.message = event.message || "Path Synthesis Arbiter 已返回结构化路径规划结果。";
+    item.typingDone = true;
+    if (event.outputPreview) item.outputPreview = event.outputPreview;
+    if (item.outputPreview && !item.typedOutput) item.typedOutput = item.outputPreview;
+    if (stream.phaseGroup === "synthesis") {
+      stream.status = "done";
+      stream.summary = item.message;
+      message.status = "done";
+      message.content = agentTeamStreamFallback(stream);
+    }
+    message.updatedAt = event.time;
+  });
+}
+
+function pathPlanAgentPreview(plan = {}) {
+  const stages = Array.isArray(plan.stages) ? plan.stages : [];
+  const summary = plan.summary || plan.method_summary || "";
+  const payload = {
+    path_plan_summary: summary || "Path Planning Team 已生成路径规划。",
+    stage_count: stages.length,
+    stages: stages.slice(0, 4).map((stage) => ({
+      title: stage.title || stage.name || "",
+      goal: stage.goal || stage.objective || "",
+      deliverable: stage.deliverable || "",
+      standards: Array.isArray(stage.standards) ? stage.standards.slice(0, 3) : []
+    }))
+  };
+  return JSON.stringify(payload);
 }
 
 function setBenchmarkRunFailed(errorMessage = "") {
@@ -1742,6 +2138,68 @@ function setMatchingRunFailed(errorMessage = "") {
   syncAssistantAvailability();
 }
 
+function setPathRunFailed(errorMessage = "") {
+  failedRunStep = "path";
+  assistantAgentStreamActive = false;
+  markAgentStep("path", "failed");
+  setRunStepRetryable("path", false);
+  document.querySelector("#runStatus").textContent = "失败：路径规划";
+  setRunDetail(errorMessage
+    ? `Path Planning 失败：${errorMessage}。岗位匹配结果已保留。`
+    : "Path Planning 失败，路径规划模块未生成，岗位匹配结果已保留。", { immediate: true });
+  markAssistantPathPlanningStreamsFailed(errorMessage
+    ? `Path Planning 失败：${errorMessage}`
+    : "Path Planning 失败，路径规划模块未生成。");
+  document.querySelector(".generation-dock").classList.remove("is-running");
+  runButton.disabled = false;
+  runButton.textContent = "重新生成";
+  syncAssistantAvailability();
+}
+
+function markAssistantPathPlanningStreamsFailed(messageText = "") {
+  const session = activeAssistantSession();
+  if (!session) return;
+  const now = new Date().toISOString();
+  const summary = formatAgentDisplayText(messageText || "Path Planning 失败，路径规划模块未生成。");
+  const failureEvent = normalizeAgentTeamEvent({
+    workflow: "resume/path_planning",
+    agent_key: "path_synthesis_arbiter",
+    agent: "Path Synthesis Arbiter",
+    status: "failed",
+    phase: "final_synthesis",
+    message: summary
+  });
+  failureEvent.time = now;
+  let changed = false;
+  stopAgentTypewriters();
+  session.messages.forEach((sessionMessage) => {
+    const stream = sessionMessage.agentStream;
+    if (sessionMessage.streamType !== "agent_team" || !stream?.agents) return;
+    if (stream.workflow !== "resume/path_planning") return;
+    if (stream.phaseGroup === "synthesis" || stream.agents.path_synthesis_arbiter) {
+      upsertAgentStreamAgent(stream, failureEvent);
+    }
+    Object.keys(stream.agents).forEach((key) => {
+      const agent = stream.agents[key];
+      if (!agent || agent.status === "done") return;
+      agent.status = "failed";
+      agent.message = summary;
+      agent.typingDone = true;
+    });
+    stream.status = stream.status === "done" ? "done" : "failed";
+    stream.summary = summary;
+    stream.updatedAt = now;
+    sessionMessage.status = stream.status === "done" ? "done" : "error";
+    sessionMessage.content = agentTeamStreamFallback(stream);
+    sessionMessage.updatedAt = now;
+    changed = true;
+  });
+  if (!changed) return;
+  session.updatedAt = now;
+  saveAssistantState();
+  renderAssistant();
+}
+
 function markAssistantMatchingStreamsFailed(messageText = "") {
   const session = activeAssistantSession();
   if (!session) return;
@@ -1762,6 +2220,7 @@ function markAssistantMatchingStreamsFailed(messageText = "") {
   session.messages.forEach((sessionMessage) => {
     const stream = sessionMessage.agentStream;
     if (sessionMessage.streamType !== "agent_team" || !stream?.agents) return;
+    if (stream.workflow === "resume/path_planning") return;
     sawAgentStream = true;
     if (stream.phaseGroup === "synthesis" || stream.agents.synthesis_arbiter) sawSynthesisStream = true;
     if (stream.status === "done" && stream.phaseGroup !== "synthesis") return;
@@ -1825,7 +2284,12 @@ function retryJobMatching() {
   assistantAgentStreamActive = false;
   setRunStepRetryable("matching", false);
   document.querySelector(`[data-run-step="matching"]`)?.classList.remove("is-done", "is-failed");
+  document.querySelector(`[data-run-step="path"]`)?.classList.remove("is-done", "is-failed");
+  document.querySelector(`[data-run-step="outputs"]`)?.classList.remove("is-done", "is-failed");
   markAgentStep("matching", "running");
+  lockModule("matching");
+  lockModule("path");
+  lockModule("outputs");
   document.querySelector("#runStatus").textContent = "生成中";
   setRunDetail("正在从岗位匹配继续，Legato Job Matching Team 正在重新生成推荐。", { immediate: true });
   document.querySelector(".generation-dock").classList.add("is-running");
@@ -1868,8 +2332,27 @@ function retryJobMatching() {
         diagnosis.ability_profile.top5_matching_jobs = payload.top_jobs;
         renderTopJobs(payload.top_jobs);
       }
-      markAgentStep("matching", "done");
-      unlockModule("matching");
+      reconcileRunStepsFromEventData(payload);
+      if (hasMeaningfulMatchingResult(diagnosis.matching_result)) {
+        completeRunStepsThrough("matching");
+        unlockModule("matching");
+      } else {
+        setMatchingRunFailed("Job Matching 未返回有效匹配结果。");
+        return;
+      }
+      if (payload.path_error || payload.error) {
+        setPathRunFailed(payload.path_error || payload.error);
+        return;
+      }
+      if (hasReadyPathPlan(payload.path_plan, diagnosis.matching_result)) {
+        diagnosis.path_plan = payload.path_plan;
+        renderPath(payload.path_plan);
+        finalizePathPlanningStreamFromPathPayload(payload);
+        completeRunStepsThrough("path");
+        unlockModule("path");
+      } else {
+        lockModule("path");
+      }
       if (baseJobDone) setRunDone();
     })
     .catch((error) => {
@@ -1877,6 +2360,7 @@ function retryJobMatching() {
     })
     .finally(() => {
       matchingRequestInFlight = false;
+      if (baseJobDone && !failedRunStep) setRunDone();
       updateAssistantContext();
       renderAssistantSuggestions();
     });
@@ -2061,7 +2545,7 @@ function renderExperienceItem(item, refining = false, benchmarkLoading = false, 
 }
 
 function renderEvidenceChatButton(kind, index, label) {
-  const ready = isAssistantReady();
+  const available = isAssistantInspectable();
   const aria = `添加到聊天：${kind === "award" ? "奖项" : "经历"} ${label}`;
   return `
     <button
@@ -2072,13 +2556,41 @@ function renderEvidenceChatButton(kind, index, label) {
       data-evidence-key="${escapeAttribute(`${kind}:${index}`)}"
       aria-label="${escapeAttribute(aria)}"
       aria-pressed="false"
-      title="${ready ? "添加到聊天" : "全部结果生成后才能追问"}"
-      ${ready ? "" : "disabled"}
+      title="${available ? "添加到聊天" : "生成诊断后可添加到聊天"}"
+      ${available ? "" : "disabled"}
     >
       <span aria-hidden="true">+</span>
       <strong>添加到聊天</strong>
     </button>
   `;
+}
+
+function renderResultChatButton(kind, index = "", label = "生成结果", subindex = "") {
+  const available = isAssistantInspectable();
+  const key = resultContextKey(kind, index, subindex);
+  const selected = isFocusedContextSelected(key);
+  const variantClass = kind === "path_task" ? " is-path-task-chat" : "";
+  return `
+    <button
+      type="button"
+      class="evidence-chat-button context-chat-button${variantClass}${selected ? " is-added" : ""}"
+      data-result-chat="${escapeAttribute(kind)}"
+      data-result-index="${escapeAttribute(index)}"
+      data-result-subindex="${escapeAttribute(subindex)}"
+      data-context-key="${escapeAttribute(key)}"
+      aria-label="添加到聊天：${escapeAttribute(label)}"
+      aria-pressed="${selected ? "true" : "false"}"
+      title="${available ? selected ? "已加入聊天上下文" : "添加到聊天" : "生成诊断后可添加到聊天"}"
+      ${available ? "" : "disabled"}
+    >
+      <span aria-hidden="true">+</span>
+      <strong>添加到聊天</strong>
+    </button>
+  `;
+}
+
+function resultContextKey(kind, index = "", subindex = "") {
+  return [kind, index, subindex].filter((value) => value !== "" && value !== undefined && value !== null).join(":");
 }
 
 function isExperienceItemRefining(item, listRefining) {
@@ -2382,7 +2894,7 @@ function renderMatching(match) {
     .join("");
   document.querySelector("#matchPrimaryReason").innerHTML = renderFocusReasonList(reasons, selected);
   document.querySelector("#matchMainGap").innerHTML = renderFocusGap(mainGap, radarSummary);
-  document.querySelector("#matchNextProof").innerHTML = renderFocusText(nextProof, 104);
+  document.querySelector("#matchNextProof").innerHTML = renderFocusText(nextProof);
   document.querySelector("#matchEducationGate").innerHTML = renderEducationGateChip(selected.education_gate || match.education_gate || "未返回门槛限制", selected.education_gate_status || match.education_gate_status);
   document.querySelector("#matchActionList").innerHTML = renderMatchActionList(match, selected, mainGap, radarSummary);
   renderMatchingRadar(match, reportRows);
@@ -2420,7 +2932,7 @@ function matchingReasonList(match, selected) {
   });
   const seen = new Set();
   return values
-    .map((item) => compactMatchingText(item, 54))
+    .map((item) => normalizeMatchingFocusText(item))
     .filter((item) => {
       const key = item.toLowerCase();
       if (!item || seen.has(key)) return false;
@@ -2605,23 +3117,32 @@ function evidenceStrengthMeta(value, selected = {}) {
 }
 
 function renderFocusReasonList(reasons, selected) {
-  const items = (reasons.length ? reasons : [selected?.fit_summary || "等待证据"]).slice(0, 3);
-  return `<ul class="focus-evidence-list">${items.map((item) => `<li>${escapeHTML(compactMatchingText(item, 82))}</li>`).join("")}</ul>`;
+  const sourceItems = reasons.length ? reasons : [selected?.fit_summary || "等待证据"];
+  const items = sourceItems
+    .map((item) => normalizeMatchingFocusText(item))
+    .filter(Boolean)
+    .slice(0, 3);
+  const safeItems = items.length ? items : ["等待证据"];
+  return `<ul class="focus-evidence-list">${safeItems.map((item) => `<li>${escapeHTML(item)}</li>`).join("")}</ul>`;
 }
 
 function renderFocusGap(mainGap, radarSummary) {
   const status = mainGap ? severityClass(mainGap.severity) : matchingRowStatus(radarSummary?.weakest);
-  const capability = mainGap?.capability || radarSummary?.weakest?.name || "等待差距分析";
+  const capability = normalizeMatchingFocusText(mainGap?.capability || radarSummary?.weakest?.name || "等待差距分析");
   const text = mainGap ? (mainGap.current || mainGap.expected || mainGap.action || "") : (radarSummary?.weakest?.note || "");
   return `
     <span class="focus-status is-${escapeAttribute(status || "pending")}">${escapeHTML(status === "high" ? "高风险" : status === "medium" ? "需关注" : status === "gap" ? "短板" : status === "limited" ? "有限" : "跟踪")}</span>
     <strong>${escapeHTML(capability)}</strong>
-    ${text ? `<small>${escapeHTML(compactMatchingText(text, 88))}</small>` : ""}
+    ${text ? `<small>${escapeHTML(normalizeMatchingFocusText(text))}</small>` : ""}
   `;
 }
 
-function renderFocusText(text, limit = 96) {
-  return `<strong>${escapeHTML(compactMatchingText(text, limit))}</strong>`;
+function renderFocusText(text) {
+  return `<strong>${escapeHTML(normalizeMatchingFocusText(text))}</strong>`;
+}
+
+function normalizeMatchingFocusText(value) {
+  return cleanDisplayText(value).replace(/\s+/g, " ");
 }
 
 function renderMatchActionList(match, selected, mainGap, radarSummary = {}) {
@@ -2788,7 +3309,7 @@ function renderGapCard(gap, index) {
   const expected = formatAgentDisplayText(gap?.expected || "等待岗位要求");
   const action = formatAgentDisplayText(gap?.action || "补充可验证成果");
   return `
-    <article class="gap-card is-${escapeAttribute(severityClass(severity))}" style="--match-stagger:${index * 36}ms">
+    <article class="gap-card context-chat-host is-${escapeAttribute(severityClass(severity))}" style="--match-stagger:${index * 36}ms">
       <header>
         <strong>${escapeHTML(gap?.capability || "能力项")}</strong>
         <span class="severity ${severityClass(severity)}">${escapeHTML(severity)}</span>
@@ -2801,6 +3322,7 @@ function renderGapCard(gap, index) {
         <span>建议</span>
         <strong>${escapeHTML(action)}</strong>
       </div>
+      ${renderResultChatButton("gap", index, gap?.capability || "差距明细")}
     </article>
   `;
 }
@@ -2827,6 +3349,7 @@ function renderMatchingRadar(match, reportRows = []) {
   const svg = document.querySelector("#matchingRadarChart");
   const text = document.querySelector("#matchingRadarText");
   const legend = document.querySelector("#matchingRadarLegend");
+  const stats = document.querySelector("#matchingRadarStats");
   const insights = document.querySelector("#matchingRadarInsights");
   if (!svg) return;
   const student = matchingStudentRadar(match);
@@ -2834,14 +3357,16 @@ function renderMatchingRadar(match, reportRows = []) {
   if (student.length !== benchmarkDimensions.length || target.length !== benchmarkDimensions.length) {
     renderMatchingRadarWaiting(svg);
     if (legend) legend.innerHTML = "";
+    if (stats) stats.innerHTML = "";
     if (text) text.textContent = "等待首选岗位目标能力雷达。";
     if (insights) insights.innerHTML = "";
     return;
   }
   const rows = reportRows.length ? reportRows : normalizedMatchingReportRows(match);
+  const summary = matchingRadarSummary(rows);
   const rowByName = new Map(rows.map((row) => [row.name, row]));
-  const center = { x: 180, y: 158 };
-  const radius = 104;
+  const center = { x: 180, y: 178 };
+  const radius = 106;
   const ring = (score) => benchmarkDimensions.map((_, index) => {
     const point = pointFor(index, benchmarkDimensions.length, radius * radarVisualRatio(score), center);
     return `${point.x.toFixed(2)},${point.y.toFixed(2)}`;
@@ -2865,34 +3390,119 @@ function renderMatchingRadar(match, reportRows = []) {
     }).join("")}
     <polygon class="matching-radar-area is-target" points="${targetPoints}"></polygon>
     <polygon class="matching-radar-area is-student" points="${studentPoints}"></polygon>
-    ${student.map((item, index) => {
-      const point = pointFor(index, benchmarkDimensions.length, radius * radarVisualRatio(item.score), center);
-      const status = matchingRowStatus(rowByName.get(item.name));
-      return `
-        ${status === "gap" || status === "limited" ? `<circle class="matching-radar-highlight is-${escapeAttribute(status)}" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="9"></circle>` : ""}
-        <circle class="matching-radar-dot is-student" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="3.5"></circle>
-      `;
-    }).join("")}
-    ${target.map((item, index) => {
-      const point = pointFor(index, benchmarkDimensions.length, radius * radarVisualRatio(item.score), center);
-      return `<circle class="matching-radar-dot is-target" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="3"></circle>`;
-    }).join("")}
+    ${matchingRadarDimensionLayer(student, target, rowByName, center, radius)}
   `;
   if (legend) {
+    const studentAvg = averageMatchingRadarScore(student);
+    const targetAvg = averageMatchingRadarScore(target);
     legend.innerHTML = `
-      <span><i class="legend-dot is-student"></i>个人画像</span>
-      <span><i class="legend-dot is-target"></i>岗位目标</span>
+      <span class="radar-legend-item matching-radar-legend-student" tabindex="0">
+        <i></i>个人画像<b>${escapeHTML(studentAvg)}分</b>
+      </span>
+      <span class="radar-legend-item matching-radar-legend-target" tabindex="0">
+        <i></i>岗位目标<b>${escapeHTML(targetAvg)}分</b>
+      </span>
     `;
   }
+  if (stats) {
+    stats.innerHTML = renderMatchingRadarStats(rows, summary);
+  }
   if (text) {
-    const summary = matchingRadarSummary(rows);
     const weakest = summary.weakest;
     const strongest = summary.strongest;
-    text.textContent = `${match?.target_role || match?.selected_job?.title || "首选岗位"}要求下，${weakest ? `最大短板为${weakest.name}${weakest.difference}分` : "短板待判断"}，${strongest ? `当前相对优势为${strongest.name}${strongest.difference >= 0 ? "+" : ""}${strongest.difference}分` : "优势待判断"}。`;
+    const weakestDelta = Number(weakest?.difference || 0);
+    const strongestDelta = Number(strongest?.difference || 0);
+    const shortboardText = weakest && weakestDelta < 0
+      ? `最大短板为${weakest.name}${formatSignedDelta(weakest.difference)}分`
+      : "暂无明显短板";
+    const advantageText = strongest && strongestDelta > 0
+      ? `当前相对优势为${strongest.name}${formatSignedDelta(strongest.difference)}分`
+      : "暂无明显优势";
+    text.textContent = `${match?.target_role || match?.selected_job?.title || "首选岗位"}要求下，${shortboardText}，${advantageText}。`;
   }
   if (insights) {
     insights.innerHTML = renderMatchingRadarInsights(rows);
   }
+}
+
+function matchingRadarDimensionLayer(student, target, rowByName, center, radius) {
+  return benchmarkDimensions.map((name, index) => {
+    const studentScore = safeScore(student[index]?.score);
+    const targetScore = safeScore(target[index]?.score);
+    const row = rowByName.get(name) || {
+      name,
+      student: Math.round(studentScore),
+      role_need: Math.round(targetScore),
+      difference: Math.round(studentScore - targetScore)
+    };
+    const status = matchingRowStatus(row);
+    const delta = Math.round(Number(row.difference ?? studentScore - targetScore) || 0);
+    const studentPoint = pointFor(index, benchmarkDimensions.length, radius * radarVisualRatio(studentScore), center);
+    const targetPoint = pointFor(index, benchmarkDimensions.length, radius * radarVisualRatio(targetScore), center);
+    const outer = pointFor(index, benchmarkDimensions.length, radius + 8, center);
+    const card = matchingRadarValueCardPosition(index, benchmarkDimensions.length, radius, center);
+    const delay = 160 + index * 34;
+    const aria = `${name}：个人${Math.round(studentScore)}分，岗位${Math.round(targetScore)}分，差距${formatSignedDelta(delta)}分，${matchingStatusLabel(status)}`;
+    return `
+      <g class="radar-dimension-hover matching-radar-dimension is-${escapeAttribute(status)}" tabindex="0" aria-label="${escapeAttribute(aria)}" style="--radar-delay:${delay}ms">
+        <line class="radar-hover-zone" x1="${center.x}" y1="${center.y}" x2="${outer.x.toFixed(2)}" y2="${outer.y.toFixed(2)}"></line>
+        <line class="matching-radar-delta-line is-${escapeAttribute(status)}" x1="${targetPoint.x.toFixed(2)}" y1="${targetPoint.y.toFixed(2)}" x2="${studentPoint.x.toFixed(2)}" y2="${studentPoint.y.toFixed(2)}"></line>
+        ${status === "gap" || status === "limited" ? `<circle class="matching-radar-highlight is-${escapeAttribute(status)}" cx="${studentPoint.x.toFixed(2)}" cy="${studentPoint.y.toFixed(2)}" r="9"></circle>` : ""}
+        <circle class="matching-radar-dot is-target" cx="${targetPoint.x.toFixed(2)}" cy="${targetPoint.y.toFixed(2)}" r="3.2"></circle>
+        <circle class="matching-radar-dot is-student" cx="${studentPoint.x.toFixed(2)}" cy="${studentPoint.y.toFixed(2)}" r="3.8"></circle>
+        <circle class="radar-hover-point matching-radar-hover-point" cx="${outer.x.toFixed(2)}" cy="${outer.y.toFixed(2)}" r="7"></circle>
+        <g class="radar-value-card matching-radar-value-card" transform="translate(${card.x}, ${card.y})" aria-hidden="true">
+          <rect width="132" height="94" rx="8"></rect>
+          <text class="radar-value-title" x="12" y="20">${escapeHTML(name)}</text>
+          <circle class="matching-radar-swatch-student" cx="15" cy="37" r="4"></circle>
+          <text class="matching-radar-value-row" x="25" y="40">个人 ${Math.round(studentScore)}分</text>
+          <circle class="matching-radar-swatch-target" cx="15" cy="54" r="4"></circle>
+          <text class="matching-radar-value-row" x="25" y="57">岗位 ${Math.round(targetScore)}分</text>
+          <text class="matching-radar-value-delta is-${escapeAttribute(status)}" x="12" y="74">差距 ${escapeHTML(formatSignedDelta(delta))}分 · ${escapeHTML(matchingStatusLabel(status))}</text>
+        </g>
+      </g>
+    `;
+  }).join("");
+}
+
+function matchingRadarValueCardPosition(index, count, radius, center) {
+  const anchor = pointFor(index, count, radius + 36, center);
+  const x = Math.max(8, Math.min(220, Math.round(anchor.x - 66)));
+  const y = Math.max(12, Math.min(254, Math.round(anchor.y - 47)));
+  return { x, y };
+}
+
+function averageMatchingRadarScore(items = []) {
+  const scores = items.map((item) => Number(item?.score)).filter(Number.isFinite);
+  if (!scores.length) return "--";
+  return Math.round(scores.reduce((sum, score) => sum + score, 0) / scores.length);
+}
+
+function renderMatchingRadarStats(rows = [], summary = matchingRadarSummary(rows)) {
+  if (!rows.length) return "";
+  const averageDelta = Math.round(rows.reduce((sum, row) => sum + Number(row.difference || 0), 0) / rows.length);
+  const weakest = summary.weakest;
+  const strongest = summary.strongest;
+  const weakestDelta = Number(weakest?.difference || 0);
+  const strongestDelta = Number(strongest?.difference || 0);
+  const hasShortboard = weakest && weakestDelta < 0;
+  const hasAdvantage = strongest && strongestDelta > 0;
+  return `
+    <span class="matching-radar-stat ${averageDelta < -3 ? "is-gap" : averageDelta > 5 ? "is-advantage" : ""}">
+      <span>平均差</span><b>${escapeHTML(formatSignedDelta(averageDelta))}</b>
+    </span>
+    <span class="matching-radar-stat ${hasShortboard ? "is-gap" : ""}">
+      <span>最大短板</span><b>${hasShortboard ? `${escapeHTML(weakest.name)} ${escapeHTML(formatSignedDelta(weakest.difference))}` : "暂无明显短板"}</b>
+    </span>
+    <span class="matching-radar-stat ${hasAdvantage ? "is-advantage" : ""}">
+      <span>优势项</span><b>${hasAdvantage ? `${escapeHTML(strongest.name)} ${escapeHTML(formatSignedDelta(strongest.difference))}` : "暂无明显优势"}</b>
+    </span>
+  `;
+}
+
+function formatSignedDelta(value) {
+  const number = Math.round(Number(value) || 0);
+  return `${number > 0 ? "+" : ""}${number}`;
 }
 
 function renderMatchingRadarInsights(rows = []) {
@@ -2916,8 +3526,8 @@ function renderMatchingRadarInsights(rows = []) {
 }
 
 function renderMatchingRadarWaiting(svg) {
-  const center = { x: 180, y: 158 };
-  const radius = 104;
+  const center = { x: 180, y: 178 };
+  const radius = 106;
   const ring = (score) => benchmarkDimensions.map((_, index) => {
     const point = pointFor(index, benchmarkDimensions.length, radius * radarVisualRatio(score), center);
     return `${point.x.toFixed(2)},${point.y.toFixed(2)}`;
@@ -2948,30 +3558,95 @@ function normalizeMatchingRadar(items) {
 }
 
 function renderPath(plan) {
-  document.querySelector("#pathStages").innerHTML = plan.stages.map((stage) => `
-    <article class="stage-panel reveal is-visible">
-      <div class="stage-heading">
-        <h3>${escapeHTML(stage.stage)}</h3>
-        <span class="sim-badge">模拟数据</span>
-      </div>
-      <p class="stage-goal">${escapeHTML(stage.goal)}</p>
-      <ol class="task-list">
-        ${stage.weeks.map((week) => `
-          <li>
-            <strong>${escapeHTML(week.week)}：${escapeHTML(week.task)}</strong>
-            <span>${escapeHTML(week.metric)}，优先级 ${escapeHTML(week.priority)}</span>
-          </li>
-        `).join("")}
-      </ol>
-      <strong>达标标准</strong>
-      <ul>
-        ${stage.standards.map((standard) => `<li>${escapeHTML(standard)}</li>`).join("")}
-      </ul>
-      <div class="resource-list">
-        ${stage.resources.map((resource) => `<a href="${safeURLAttribute(resource.url)}" target="_blank" rel="noreferrer">${escapeHTML(resource.label)}</a>`).join("")}
-      </div>
-    </article>
-  `).join("");
+  const target = document.querySelector("#pathStages");
+  if (!target) return;
+  const stages = Array.isArray(plan?.stages) ? plan.stages : [];
+  if (!stages.length) {
+    target.innerHTML = `
+      <article class="path-empty">
+        <strong>等待 Path Planning Team</strong>
+        <span>岗位匹配完成后，Legato 会生成阶段目标、周任务和达标标准。</span>
+      </article>
+    `;
+    return;
+  }
+  target.innerHTML = stages.map((stage, index) => {
+    const weeks = Array.isArray(stage.weeks) ? stage.weeks : [];
+    const standards = Array.isArray(stage.standards) ? stage.standards : [];
+    const resources = Array.isArray(stage.resources) ? stage.resources : [];
+    const taskRows = weeks.length ? weeks : [{ week: "待生成", task: "等待周任务", metric: "Path Planning Team 正在整理可执行任务", priority: "中" }];
+    const highCount = taskRows.filter((week) => pathPriorityClass(week.priority) === "high").length;
+    const resourceRows = resources.length ? resources : [];
+    return `
+      <article class="stage-panel context-chat-host reveal is-visible" style="--path-stagger:${index * 54}ms">
+        <div class="stage-heading">
+          <span class="path-stage-index">${String(index + 1).padStart(2, "0")}</span>
+          <div>
+            <h3>${escapeHTML(stage.stage || `第 ${index + 1} 阶段`)}</h3>
+            <p class="stage-goal">${escapeHTML(stage.goal || "等待阶段目标")}</p>
+            <div class="stage-meta-chips" aria-label="阶段任务摘要">
+              <span>${escapeHTML(`${taskRows.length} 个周任务`)}</span>
+              ${highCount ? `<span class="is-high">${escapeHTML(`${highCount} 个高优先`)}</span>` : ""}
+              <span>${escapeHTML(resources.length ? `${resources.length} 个资源` : "资源待补充")}</span>
+            </div>
+          </div>
+        </div>
+        <div class="path-deliverable">
+          <span>阶段交付物</span>
+          <strong>${escapeHTML(stage.deliverable || "阶段作品、复盘文档和可验证证据")}</strong>
+        </div>
+        <ol class="task-list">
+          ${taskRows.map((week, weekIndex) => {
+            const priority = normalizePathPriority(week.priority);
+            const priorityClass = pathPriorityClass(priority);
+            const isOpen = priorityClass === "high" || weekIndex === 0;
+            return `
+            <li class="is-${escapeAttribute(priorityClass)}" style="--task-stagger:${weekIndex * 34}ms">
+              <details class="path-task" ${isOpen ? "open" : ""}>
+                <summary>
+                  <span class="task-week">${escapeHTML(week.week || "本周")}</span>
+                  <strong>${escapeHTML(week.task || "等待任务")}</strong>
+                  <b>${escapeHTML(priority)}</b>
+                  ${renderResultChatButton("path_task", index, week.task || "周任务", weekIndex)}
+                </summary>
+                <div class="task-detail">
+                  <span>达标指标</span>
+                  <p>${escapeHTML(week.metric || "等待达标指标")}</p>
+                </div>
+              </details>
+            </li>
+            `;
+          }).join("")}
+        </ol>
+        <div class="path-standard-block">
+          <strong>达标标准</strong>
+          <ul class="acceptance-list">
+            ${standards.map((standard) => `<li>${escapeHTML(standard)}</li>`).join("")}
+          </ul>
+        </div>
+        <div class="resource-list${resourceRows.length ? "" : " is-empty"}" aria-label="阶段资源">
+          ${resourceRows.length
+            ? resourceRows.map((resource) => `<a href="${safeURLAttribute(resource.url)}" target="_blank" rel="noreferrer">${escapeHTML(resource.label)}</a>`).join("")
+            : `<span>暂无资源链接</span>`}
+        </div>
+        ${renderResultChatButton("path_stage", index, stage.stage || "路径阶段")}
+      </article>
+    `;
+  }).join("");
+}
+
+function normalizePathPriority(priority) {
+  const value = cleanDisplayText(priority);
+  if (value.includes("高")) return "高";
+  if (value.includes("低")) return "低";
+  return "中";
+}
+
+function pathPriorityClass(priority) {
+  priority = normalizePathPriority(priority);
+  if (priority === "高") return "high";
+  if (priority === "低") return "low";
+  return "medium";
 }
 
 function renderTopJobs(jobs) {
@@ -2984,7 +3659,7 @@ function renderTopJobs(jobs) {
       : `<div class="matching-empty">等待 Job Matching 返回岗位队列。</div>`;
   }
   if (outputList) {
-    outputList.innerHTML = jobs.map((job) => renderOutputJobCard(job)).join("");
+    outputList.innerHTML = jobs.map((job, index) => renderOutputJobCard(job, index)).join("");
   }
 }
 
@@ -2997,7 +3672,7 @@ function renderMatchingJobCard(job, index = 0) {
   const isTop = rank === 1;
   const sizeClass = isTop ? " is-top is-large" : " is-small";
   return `
-    <article class="matching-job-card${sizeClass}" data-job-card-size="${isTop ? "large" : "small"}" style="--match-stagger:${index * 42}ms">
+    <article class="matching-job-card context-chat-host${sizeClass}" data-job-card-size="${isTop ? "large" : "small"}" style="--match-stagger:${index * 42}ms">
       <header>
         <div>
           <span class="job-rank">${rank ? `#${rank}` : ""}</span>
@@ -3019,15 +3694,16 @@ function renderMatchingJobCard(job, index = 0) {
       ${reasons.length ? `<ul class="job-reason-list">${reasons.slice(0, isTop ? 4 : 2).map((item) => `<li>${escapeHTML(compactMatchingText(item, isTop ? 82 : 58))}</li>`).join("")}</ul>` : ""}
       ${proofGaps.length ? `<div class="job-proof-gaps"><span>缺口</span>${proofGaps.slice(0, 3).map((item) => `<b>${escapeHTML(compactMatchingText(item, 46))}</b>`).join("")}</div>` : ""}
       ${job.next_proof ? `<small class="job-next-proof"><span>下一步</span>${escapeHTML(compactMatchingText(job.next_proof, isTop ? 120 : 74))}</small>` : ""}
+      ${renderResultChatButton("job", index, job.title || "推荐岗位")}
     </article>
   `;
 }
 
-function renderOutputJobCard(job) {
+function renderOutputJobCard(job, index = 0) {
   const reasons = Array.isArray(job.reasons) ? job.reasons : [];
   const mockBadge = isMockMatchingResult() ? `<span class="sim-badge">模拟数据</span>` : "";
   return `
-    <article class="job-item">
+    <article class="job-item context-chat-host">
       <div class="job-head">
         <strong>${job.rank}. ${escapeHTML(job.title || "")}</strong>
         ${mockBadge}
@@ -3039,6 +3715,7 @@ function renderOutputJobCard(job) {
       ${job.category ? `<p>${escapeHTML(formatAgentDisplayText(job.category))}${job.education_gate ? `，${escapeHTML(formatAgentDisplayText(job.education_gate))}` : ""}</p>` : ""}
       ${reasons.length ? `<p>${escapeHTML(formatAgentDisplayText(reasons.join("；")))}</p>` : ""}
       ${job.next_proof ? `<p>${escapeHTML(formatAgentDisplayText(job.next_proof))}</p>` : ""}
+      ${renderResultChatButton("output_job", index, job.title || "TOP5 岗位")}
     </article>
   `;
 }
@@ -3060,7 +3737,9 @@ function isMockMatchingResult() {
 }
 
 function renderRequirements(requirements) {
-  document.querySelector("#requirementsList").innerHTML = requirements.map((item) => `
+  const target = document.querySelector("#requirementsList");
+  if (!target) return;
+  target.innerHTML = requirements.map((item) => `
     <article class="requirement">
       <header>
         <div>
@@ -3095,15 +3774,23 @@ function setupExports() {
     if (type === "profile-xlsx") {
       window.location.href = "/api/export/ability-profile.xlsx";
     }
+    if (type === "profile-pdf") {
+      printSectionAsPDF("profile", "能力画像");
+    }
+    if (type === "match-json") {
+      downloadJSON("matching-result.json", diagnosis.matching_result);
+    }
+    if (type === "match-pdf") {
+      printSectionAsPDF("matching", "匹配结果");
+    }
+    if (type === "path-json") {
+      downloadJSON("path-plan.json", diagnosis.path_plan);
+    }
     if (type === "path-doc") {
       window.location.href = "/api/export/path-plan.doc";
     }
     if (type === "path-pdf") {
-      showToast("即将打开打印面板，请选择另存为 PDF。");
-      window.setTimeout(() => window.print(), 180);
-    }
-    if (type === "match-json") {
-      downloadJSON("matching-report.json", diagnosis.matching_result);
+      printSectionAsPDF("path", "路径规划");
     }
   });
 }
@@ -3161,7 +3848,16 @@ function setupAssistant() {
   document.addEventListener("click", (event) => {
     const button = event.target.closest("[data-evidence-chat]");
     if (!button) return;
+    event.preventDefault();
+    event.stopPropagation();
     addEvidenceToAssistant(button.dataset.evidenceChat, Number(button.dataset.evidenceIndex));
+  });
+  document.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-result-chat]");
+    if (!button) return;
+    event.preventDefault();
+    event.stopPropagation();
+    addResultToAssistant(button.dataset.resultChat, button.dataset.resultIndex || "", button.dataset.resultSubindex || "");
   });
   assistantSuggestions.addEventListener("click", (event) => {
     const button = event.target.closest("[data-suggestion]");
@@ -3184,7 +3880,7 @@ function setupAssistant() {
   assistantEvidenceTray.addEventListener("click", (event) => {
     const button = event.target.closest("[data-clear-evidence-context]");
     if (!button || assistantBusy) return;
-    clearAssistantFocusedEvidence();
+    clearAssistantFocusedEvidence(button.dataset.clearEvidenceContext || "");
   });
   setupAssistantScrollbar(assistantMessages);
   setupAssistantScrollbar(assistantArchiveList);
@@ -3231,6 +3927,8 @@ function loadAssistantState() {
         diagnosisJobId: typeof session.diagnosisJobId === "string" ? session.diagnosisJobId : "",
         diagnosisFileName: typeof session.diagnosisFileName === "string" ? session.diagnosisFileName : "",
         focusedEvidence: normalizeFocusedEvidence(session.focusedEvidence),
+        focusedContext: normalizeFocusedContext(session.focusedContext),
+        focusedContexts: normalizeFocusedContexts(session.focusedContexts || session.focusedContext),
         archived: Boolean(session.archived),
         createdAt: session.createdAt || new Date().toISOString(),
         updatedAt: session.updatedAt || new Date().toISOString(),
@@ -3277,6 +3975,7 @@ function normalizeAssistantMessage(message) {
     retryPrompt: typeof message.retryPrompt === "string" ? message.retryPrompt : "",
     streamType: ["agent_team", "evidence_context"].includes(message.streamType) ? message.streamType : "",
     focusEvidenceKey: typeof message.focusEvidenceKey === "string" ? message.focusEvidenceKey : "",
+    focusedContexts: normalizeFocusedContexts(message.focusedContexts),
     agentStream: message.streamType === "agent_team" ? normalizeAgentStreamState(message.agentStream) : null
   };
 }
@@ -3285,6 +3984,7 @@ function shouldSplitLegacyAgentStreamMessage(rawMessage, normalizedMessage) {
   const rawStream = rawMessage?.agentStream;
   const stream = normalizedMessage?.agentStream;
   if (normalizedMessage?.streamType !== "agent_team" || !stream) return false;
+  if (stream.workflow === "resume/path_planning") return false;
   const keys = new Set(stream.order || []);
   const mixedLegacyTeam = keys.has("adaptive_planner") && keys.has("synthesis_arbiter") && stream.order.length > 2;
   return mixedLegacyTeam && (!rawStream?.phaseGroup || rawStream.phaseGroup === "team");
@@ -3292,6 +3992,7 @@ function shouldSplitLegacyAgentStreamMessage(rawMessage, normalizedMessage) {
 
 function splitLegacyAgentStreamMessage(message) {
   const source = message.agentStream;
+  const workflow = source.workflow || "resume/job_matching";
   const groups = {
     planning: source.order.filter((key) => key === "adaptive_planner"),
     team: source.order.filter((key) => key !== "adaptive_planner" && key !== "synthesis_arbiter"),
@@ -3300,7 +4001,7 @@ function splitLegacyAgentStreamMessage(message) {
   return ["planning", "team", "synthesis"]
     .filter((group) => groups[group].length > 0)
     .map((group) => {
-      const stream = createAgentTeamStreamState(group);
+      const stream = createAgentTeamStreamState(group, workflow);
       stream.complexity = source.complexity || "";
       stream.order = groups[group];
       stream.agents = {};
@@ -3350,7 +4051,8 @@ function legacyAgentStreamGroupSummary(stream, fallback) {
 function normalizeAgentStreamState(stream) {
   if (!stream || typeof stream !== "object") return createAgentTeamStreamState();
   const phaseGroup = ["planning", "team", "synthesis"].includes(stream.phaseGroup) ? stream.phaseGroup : "team";
-  const defaults = createAgentTeamStreamState(phaseGroup);
+  const workflow = stream.workflow === "resume/path_planning" ? "resume/path_planning" : "resume/job_matching";
+  const defaults = createAgentTeamStreamState(phaseGroup, workflow);
   const agents = {};
   const order = Array.isArray(stream.order) ? stream.order.slice(0, 8).map(String) : [];
   const sourceAgents = stream.agents && typeof stream.agents === "object" ? stream.agents : {};
@@ -3383,6 +4085,7 @@ function normalizeAgentStreamState(stream) {
   });
   const normalized = {
     title: String(stream.title || defaults.title).slice(0, 80),
+    workflow,
     phaseGroup,
     stageOrder: Number(stream.stageOrder || defaults.stageOrder),
     status: normalizeAgentStreamStatus(stream.status || "running"),
@@ -3408,12 +4111,15 @@ function normalizeAgentStreamState(stream) {
 
 function repairStaleSynthesisStream(stream) {
   if (stream.phaseGroup !== "synthesis" || stream.status !== "running") return stream;
-  const item = stream.agents.synthesis_arbiter;
+  const synthesisKey = stream.workflow === "resume/path_planning" ? "path_synthesis_arbiter" : "synthesis_arbiter";
+  const item = stream.agents[synthesisKey];
   if (!item || item.status === "done" || item.status === "failed") return stream;
   const updatedAt = Date.parse(item.updatedAt || stream.updatedAt || "");
   if (!Number.isFinite(updatedAt) || Date.now() - updatedAt < 2 * 60 * 1000) return stream;
   item.status = "failed";
-  item.message = "Synthesis Arbiter 未收到结束事件，请查看匹配阶段状态或重试。";
+  item.message = stream.workflow === "resume/path_planning"
+    ? "Path Synthesis Arbiter 未收到结束事件，请查看路径规划阶段状态。"
+    : "Synthesis Arbiter 未收到结束事件，请查看匹配阶段状态或重试。";
   item.typingDone = true;
   if (item.outputPreview && !item.typedOutput) item.typedOutput = item.outputPreview;
   stream.status = "failed";
@@ -3430,10 +4136,15 @@ function saveAssistantState() {
     window.clearTimeout(assistantStateSaveTimer);
     assistantStateSaveTimer = 0;
   }
-  assistantState.sessions = assistantState.sessions.slice(0, assistantMaxSessions).map((session) => ({
-    ...session,
-    messages: session.messages.slice(-assistantMaxMessages)
-  }));
+  assistantState.sessions = assistantState.sessions.slice(0, assistantMaxSessions).map((session) => {
+    const focusedContexts = normalizeFocusedContexts(session.focusedContexts || session.focusedContext);
+    return {
+      ...session,
+      focusedContexts,
+      focusedContext: focusedContexts.at(-1) || null,
+      messages: session.messages.slice(-assistantMaxMessages)
+    };
+  });
   try {
     window.localStorage.setItem(assistantStorageKey, JSON.stringify(assistantState));
   } catch {
@@ -3465,6 +4176,8 @@ function ensureAssistantSession() {
 function createAssistantSession(announce = true, options = {}) {
   const now = new Date().toISOString();
   assistantFocusedEvidence = null;
+  assistantFocusedContext = null;
+  assistantFocusedContexts = [];
   const session = {
     id: uniqueId("chat"),
     title: String(options.title || "新诊断对话").slice(0, 80),
@@ -3472,6 +4185,8 @@ function createAssistantSession(announce = true, options = {}) {
     diagnosisJobId: String(options.diagnosisJobId || ""),
     diagnosisFileName: String(options.diagnosisFileName || ""),
     focusedEvidence: null,
+    focusedContext: null,
+    focusedContexts: [],
     archived: false,
     createdAt: now,
     updatedAt: now,
@@ -3490,6 +4205,8 @@ function isEmptyAssistantSession(session) {
     !session.diagnosisJobId &&
     !session.diagnosisFileName &&
     !session.focusedEvidence &&
+    !session.focusedContext &&
+    (!Array.isArray(session.focusedContexts) || session.focusedContexts.length === 0) &&
     (!Array.isArray(session.messages) || session.messages.length === 0)
   );
 }
@@ -3522,6 +4239,8 @@ function restoreAssistantSession(sessionID) {
   session.updatedAt = new Date().toISOString();
   assistantState.activeId = session.id;
   assistantFocusedEvidence = normalizeFocusedEvidence(session.focusedEvidence);
+  assistantFocusedContexts = normalizeFocusedContexts(session.focusedContexts || session.focusedContext);
+  assistantFocusedContext = assistantFocusedContexts.at(-1) || normalizeFocusedContext(session.focusedContext);
   assistantArchive.open = false;
   saveAssistantState();
   renderAssistant();
@@ -3543,8 +4262,8 @@ function deleteAssistantSession(sessionID) {
 }
 
 function addEvidenceToAssistant(kind, index) {
-  if (!isAssistantReady()) {
-    showToast("全部诊断结果生成后才能追问。");
+  if (!isAssistantInspectable()) {
+    showToast("生成诊断后可添加到聊天。");
     return;
   }
   const evidence = evidenceContextByKey(kind, index);
@@ -3552,11 +4271,12 @@ function addEvidenceToAssistant(kind, index) {
     showToast("未找到这条证据，请重新生成诊断。");
     return;
   }
+  const context = focusedContextFromEvidence(evidence);
   assistantFocusedEvidence = evidence;
   const session = ensureAssistantSession();
-  const now = new Date().toISOString();
+  appendFocusedContext(context, { evidence });
   session.focusedEvidence = evidence;
-  session.updatedAt = now;
+  assistantInput.value = context.prompt || assistantInput.value;
   updateAssistantInputMeta();
   saveAssistantState();
   setAssistantExpanded(true);
@@ -3565,16 +4285,47 @@ function addEvidenceToAssistant(kind, index) {
   showToast("已加入聊天上下文。");
 }
 
-function clearAssistantFocusedEvidence() {
+function addResultToAssistant(kind, index = "", subindex = "") {
+  if (!isAssistantInspectable()) {
+    showToast("生成诊断后可添加到聊天。");
+    return;
+  }
+  const context = resultContextByKey(kind, index, subindex);
+  if (!context) {
+    showToast("这部分结果还未生成。");
+    return;
+  }
+  appendFocusedContext(context);
+  assistantInput.value = context.prompt || assistantInput.value;
+  updateAssistantInputMeta();
+  saveAssistantState();
+  setAssistantExpanded(true);
+  renderAssistant();
+  assistantInput.focus();
+  showToast("已加入聊天上下文。");
+}
+
+function clearAssistantFocusedEvidence(key = "") {
+  if (key) {
+    removeFocusedContext(key);
+    saveAssistantState();
+    renderAssistant();
+    showToast("已移除聊天上下文。");
+    return;
+  }
   assistantFocusedEvidence = null;
+  assistantFocusedContext = null;
+  assistantFocusedContexts = [];
   const session = activeAssistantSession();
   if (session) {
     session.focusedEvidence = null;
+    session.focusedContext = null;
+    session.focusedContexts = [];
     session.updatedAt = new Date().toISOString();
   }
   saveAssistantState();
   renderAssistant();
-  showToast("已移除重点证据。");
+  showToast("已清空聊天上下文。");
 }
 
 function evidenceContextByKey(kind, index) {
@@ -3589,15 +4340,215 @@ function evidenceContextByKey(kind, index) {
   const context = kind === "award" ? assistantAwardContext(item) : assistantExperienceContext(item);
   const title = kind === "award"
     ? cleanDisplayText(item.name || item.result)
-    : cleanDisplayText([item.type, item.role].filter(Boolean).join(" · ") || item.contribution);
+    : cleanDisplayText(item.role || item.contribution || item.type);
   return {
     ...context,
     key: `${kind}:${index}`,
     kind,
+    type: cleanDisplayText(item.type || context.type || ""),
     title: title || (kind === "award" ? "奖项与证书" : "经历"),
     score_summary: evidenceScoreSummary(item),
     dimension_summary: evidenceDimensionSummary(item)
   };
+}
+
+function resultContextByKey(kind, index = "", subindex = "") {
+  const profile = diagnosis?.ability_profile || {};
+  const match = diagnosis?.matching_result || {};
+  const pathPlan = diagnosis?.path_plan || {};
+  const jobs = Array.isArray(profile.top5_matching_jobs) ? profile.top5_matching_jobs : [];
+  const reportRows = normalizedMatchingReportRows(match);
+  const gaps = Array.isArray(match.gap_details) ? match.gap_details : [];
+  const stages = Array.isArray(pathPlan.stages) ? pathPlan.stages : [];
+  const numericIndex = Number(index);
+  const numericSubindex = Number(subindex);
+  switch (kind) {
+    case "basic":
+      return makeFocusedContext({
+        key: "basic",
+        category: "能力画像",
+        type: "基础信息",
+        title: profile.basic_info?.name ? `${profile.basic_info.name}的基础信息` : "基础信息",
+        summary: "基础信息、学校、学院、专业和上传材料来源。",
+        data: {
+          basic_info: profile.basic_info || {},
+          education: normalizedEducation(profile),
+          input_sources: diagnosis?.input_sources || []
+        }
+      });
+    case "profile_radar":
+      return makeFocusedContext({
+        key: "profile_radar",
+        category: "能力画像",
+        type: "六维雷达",
+        title: "六维能力画像",
+        summary: "学生当前能力分布、Benchmark 状态和雷达序列。",
+        data: {
+          benchmark_status: profile.benchmark_status || "",
+          radar_series: normalizedBackendRadarSeries(profile),
+          six_dim_scores: radarScoresToMatchingDimensions(normalizedProfileRadarData(profile))
+        }
+      });
+    case "match_summary":
+      return makeFocusedContext({
+        key: "match_summary",
+        category: "岗位匹配",
+        type: "首选岗位",
+        title: match.selected_job?.title || match.target_role || "首选岗位匹配",
+        summary: match.fit_summary || match.selected_job?.fit_summary || "首选岗位匹配度、推荐理由和下一步证据。",
+        data: {
+          selected_job: match.selected_job || {},
+          overall_match: match.overall_match || "",
+          match_level: match.match_level || "",
+          reasons: matchingReasonList(match, match.selected_job || {}),
+          main_gap: primaryMatchingGap(match, reportRows),
+          development_actions: structuredDevelopmentActions(match)
+        }
+      });
+    case "matching_radar":
+      return makeFocusedContext({
+        key: "matching_radar",
+        category: "岗位匹配",
+        type: "目标雷达",
+        title: "个人画像与岗位目标雷达",
+        summary: "个人能力与岗位目标能力的六维差距。",
+        data: {
+          target_role: match.target_role || match.selected_job?.title || "",
+          student_radar: matchingStudentRadar(match),
+          target_radar: matchingTargetRadar(match),
+          report_rows: reportRows,
+          summary: matchingRadarSummary(reportRows)
+        }
+      });
+    case "recommendation_queue":
+      return makeFocusedContext({
+        key: "recommendation_queue",
+        category: "岗位匹配",
+        type: "推荐队列",
+        title: "推荐岗位队列",
+        summary: "TOP 推荐岗位及每个岗位的匹配度、理由和证据缺口。",
+        data: { jobs: jobs.slice(0, 5) }
+      });
+    case "job":
+    case "output_job": {
+      const job = jobs[numericIndex];
+      if (!job) return null;
+      return makeFocusedContext({
+        key: `${kind}:${numericIndex}`,
+        category: kind === "output_job" ? "结构化输出" : "岗位匹配",
+        type: "推荐岗位",
+        title: job.title || `推荐岗位 ${numericIndex + 1}`,
+        summary: job.fit_summary || (Array.isArray(job.reasons) ? job.reasons.join("；") : ""),
+        data: job
+      });
+    }
+    case "report":
+      return makeFocusedContext({
+        key: "report",
+        category: "岗位匹配",
+        type: "差距报表",
+        title: "六维差距报表",
+        summary: "每个能力维度的学生分值、岗位要求和差距。",
+        data: { rows: reportRows }
+      });
+    case "report_row": {
+      const row = reportRows[numericIndex];
+      if (!row) return null;
+      return makeFocusedContext({
+        key: `report_row:${numericIndex}`,
+        category: "岗位匹配",
+        type: "能力维度",
+        title: `${row.name}维度差距`,
+        summary: row.note || matchingRowNote(row),
+        data: row
+      });
+    }
+    case "gap": {
+      const gap = gaps[numericIndex];
+      if (!gap) return null;
+      return makeFocusedContext({
+        key: `gap:${numericIndex}`,
+        category: "岗位匹配",
+        type: "差距明细",
+        title: gap.capability || `差距 ${numericIndex + 1}`,
+        summary: gap.action || gap.expected || gap.current || "",
+        data: gap
+      });
+    }
+    case "gap_summary":
+      return makeFocusedContext({
+        key: "gap_summary",
+        category: "岗位匹配",
+        type: "差距明细",
+        title: "差距明细",
+        summary: "岗位能力差距、当前证据、目标要求和补强建议。",
+        data: { gaps }
+      });
+    case "path_stage": {
+      const stage = stages[numericIndex];
+      if (!stage) return null;
+      return makeFocusedContext({
+        key: `path_stage:${numericIndex}`,
+        category: "路径规划",
+        type: "阶段目标",
+        title: stage.stage || `第 ${numericIndex + 1} 阶段`,
+        summary: stage.goal || stage.deliverable || "",
+        data: stage
+      });
+    }
+    case "path_task": {
+      const stage = stages[numericIndex];
+      const week = Array.isArray(stage?.weeks) ? stage.weeks[numericSubindex] : null;
+      if (!stage || !week) return null;
+      return makeFocusedContext({
+        key: `path_task:${numericIndex}:${numericSubindex}`,
+        category: "路径规划",
+        type: "周任务",
+        title: `${stage.stage || `第 ${numericIndex + 1} 阶段`}：${week.week || `任务 ${numericSubindex + 1}`}`,
+        summary: week.task || week.metric || "",
+        data: { stage: stage.stage || "", goal: stage.goal || "", task: week }
+      });
+    }
+    case "top_jobs":
+      return makeFocusedContext({
+        key: "top_jobs",
+        category: "结构化输出",
+        type: "TOP5 岗位",
+        title: "TOP5 匹配岗位",
+        summary: "结构化输出中的 TOP5 岗位列表。",
+        data: { jobs: jobs.slice(0, 5) }
+      });
+    default:
+      return null;
+  }
+}
+
+function makeFocusedContext({ key, category, type, title, summary, data }) {
+  const cleanTitle = cleanDisplayText(title || type || category || "生成结果");
+  const cleanType = cleanDisplayText(type || category || "结果");
+  const cleanCategory = cleanDisplayText(category || "生成结果");
+  const cleanSummary = cleanDisplayText(summary || "");
+  return {
+    key: String(key || cleanType).slice(0, 120),
+    kind: "result",
+    category: cleanCategory,
+    type: cleanType,
+    title: cleanTitle.slice(0, 120),
+    summary: cleanSummary.slice(0, 500),
+    data,
+    prompt: `请围绕「${cleanTitle}」解释关键依据、风险和下一步该怎么做。`
+  };
+}
+
+function focusedContextFromEvidence(evidence) {
+  return makeFocusedContext({
+    key: evidence.key,
+    category: evidence.kind === "award" ? "奖项与证书" : "经历",
+    type: assistantEvidenceTypeLabel(evidence),
+    title: assistantEvidenceDisplayTitle(evidence, assistantEvidenceTypeLabel(evidence)),
+    summary: evidence.reason || "",
+    data: evidence
+  });
 }
 
 function evidenceScoreSummary(item) {
@@ -3630,10 +4581,89 @@ function normalizeFocusedEvidence(evidence) {
     ...evidence,
     key,
     kind,
+    type: cleanDisplayText(evidence.type || ""),
     title: cleanDisplayText(evidence.title || (kind === "award" ? evidence.name || evidence.result : evidence.role || evidence.contribution)).slice(0, 120) || (kind === "award" ? "奖项与证书" : "经历证据"),
     score_summary: evidence.score_summary && typeof evidence.score_summary === "object" ? evidence.score_summary : {},
     dimension_summary: Array.isArray(evidence.dimension_summary) ? evidence.dimension_summary.slice(0, 8) : []
   };
+}
+
+function normalizeFocusedContext(context) {
+  if (!context || typeof context !== "object") return null;
+  const key = typeof context.key === "string" ? context.key.slice(0, 120) : "";
+  if (!key) return null;
+  return {
+    ...context,
+    key,
+    kind: cleanDisplayText(context.kind || "result"),
+    category: cleanDisplayText(context.category || "生成结果"),
+    type: cleanDisplayText(context.type || "结果"),
+    title: cleanDisplayText(context.title || context.type || "生成结果").slice(0, 120),
+    summary: cleanDisplayText(context.summary || "").slice(0, 500),
+    prompt: cleanDisplayText(context.prompt || "")
+  };
+}
+
+function normalizeFocusedContexts(value) {
+  const source = Array.isArray(value) ? value : value ? [value] : [];
+  const byKey = new Map();
+  source.forEach((item) => {
+    const context = normalizeFocusedContext(item);
+    if (!context) return;
+    byKey.delete(context.key);
+    byKey.set(context.key, context);
+  });
+  return Array.from(byKey.values()).slice(-8);
+}
+
+function focusedContextKeySet() {
+  return new Set(focusedContextsForAssistant({ persist: false }).map((context) => context.key));
+}
+
+function isFocusedContextSelected(key) {
+  return Boolean(key && focusedContextKeySet().has(key));
+}
+
+function persistFocusedContexts(contexts, options = {}) {
+  const normalized = normalizeFocusedContexts(contexts);
+  const latestContext = normalized.at(-1) || null;
+  assistantFocusedContexts = normalized;
+  assistantFocusedContext = latestContext;
+  if (options.evidence !== undefined) assistantFocusedEvidence = options.evidence;
+  const session = ensureAssistantSession();
+  session.focusedContexts = normalized;
+  session.focusedContext = latestContext;
+  if (options.evidence !== undefined) session.focusedEvidence = options.evidence;
+  session.updatedAt = new Date().toISOString();
+  return normalized;
+}
+
+function appendFocusedContext(context, options = {}) {
+  const normalized = normalizeFocusedContext(context);
+  if (!normalized) return [];
+  const current = focusedContextsForAssistant({ persist: false });
+  return persistFocusedContexts([...current.filter((item) => item.key !== normalized.key), normalized], options);
+}
+
+function removeFocusedContext(key) {
+  const cleanKey = String(key || "").slice(0, 120);
+  if (!cleanKey) return focusedContextsForAssistant({ persist: false });
+  const current = focusedContextsForAssistant({ persist: false });
+  const next = current.filter((context) => context.key !== cleanKey);
+  const removedEvidence = assistantFocusedEvidence?.key === cleanKey;
+  return persistFocusedContexts(next, { evidence: removedEvidence ? null : assistantFocusedEvidence });
+}
+
+function clearAssistantFocusedContextsSilently(session = activeAssistantSession()) {
+  assistantFocusedEvidence = null;
+  assistantFocusedContext = null;
+  assistantFocusedContexts = [];
+  if (session) {
+    session.focusedEvidence = null;
+    session.focusedContext = null;
+    session.focusedContexts = [];
+    session.updatedAt = new Date().toISOString();
+  }
 }
 
 function focusedEvidenceForAssistant() {
@@ -3644,52 +4674,87 @@ function focusedEvidenceForAssistant() {
   return focused;
 }
 
+function focusedContextForAssistant() {
+  const focused = focusedContextsForAssistant().at(-1);
+  assistantFocusedContext = focused;
+  return focused;
+}
+
+function focusedContextsForAssistant(options = {}) {
+  const persist = options.persist !== false;
+  const session = activeAssistantSession();
+  const evidence = normalizeFocusedEvidence(session?.focusedEvidence) || normalizeFocusedEvidence(assistantFocusedEvidence);
+  const evidenceContext = evidence ? focusedContextFromEvidence(evidence) : null;
+  const merged = normalizeFocusedContexts([
+    evidenceContext,
+    ...(Array.isArray(session?.focusedContexts) ? session.focusedContexts : []),
+    ...(Array.isArray(assistantFocusedContexts) ? assistantFocusedContexts : []),
+    session?.focusedContext,
+    assistantFocusedContext
+  ]);
+  assistantFocusedContexts = merged;
+  assistantFocusedContext = merged.at(-1) || null;
+  if (session && persist) {
+    session.focusedContexts = merged;
+    session.focusedContext = assistantFocusedContext;
+  }
+  return merged;
+}
+
 function renderAssistantEvidenceTray() {
   if (!assistantEvidenceTray) return;
-  const evidence = focusedEvidenceForAssistant();
-  assistantEvidenceTray.hidden = !evidence;
-  if (!evidence) {
+  const contexts = focusedContextsForAssistant();
+  assistantEvidenceTray.hidden = contexts.length === 0;
+  if (contexts.length === 0) {
     assistantEvidenceTray.innerHTML = "";
     return;
   }
-  const typeLabel = assistantEvidenceTypeLabel(evidence);
-  const icon = assistantEvidenceIconLabel(evidence);
-  const score = assistantEvidenceCompactScore(evidence);
-  assistantEvidenceTray.innerHTML = `
-    <div class="assistant-evidence-chip" title="${escapeAttribute(evidence.title)}">
-      <span class="assistant-evidence-icon" aria-hidden="true">${escapeHTML(icon)}</span>
-      <span class="assistant-evidence-copy">
-        <span>${escapeHTML(typeLabel)}</span>
-        <strong>${escapeHTML(evidence.title)}</strong>
-      </span>
-      ${score ? `<span class="assistant-evidence-score">${escapeHTML(score)}</span>` : ""}
-      <button type="button" data-clear-evidence-context aria-label="移除重点证据" title="移除重点证据">×</button>
+  assistantEvidenceTray.innerHTML = contexts.map((context) => {
+    const typeLabel = context.type || "结果";
+    const title = context.title || "生成结果";
+    const category = context.category || "生成结果";
+    return `
+    <div class="assistant-evidence-chip" title="${escapeAttribute(`${typeLabel}：${title}`)}" data-context-chip="${escapeAttribute(context.key)}">
+      <span class="assistant-evidence-type">${escapeHTML(typeLabel)}</span>
+      <strong class="assistant-evidence-title">${escapeHTML(title)}</strong>
+      <span class="assistant-evidence-category">${escapeHTML(category)}</span>
+      <button type="button" data-clear-evidence-context="${escapeAttribute(context.key)}" aria-label="移除聊天上下文" title="移除聊天上下文">×</button>
     </div>
   `;
+  }).join("");
 }
 
-function assistantEvidenceIconLabel(evidence) {
-  const title = cleanDisplayText(evidence?.title || "");
-  const first = [...title].find((char) => /\S/.test(char));
-  if (first) return first;
-  return evidence?.kind === "award" ? "证" : "项";
+function assistantEvidenceDisplayTitle(evidence, typeLabel) {
+  let title = cleanDisplayText(evidence?.title || "");
+  const type = cleanDisplayText(typeLabel || evidence?.type || "");
+  if (type) {
+    const escapedType = escapeRegExp(type);
+    title = title.replace(new RegExp(`^${escapedType}\\s*[·•|｜:：/\\-—]+\\s*`), "");
+  }
+  title = title.replace(/^(项目|经历|实习|科研项目|课程项目|校园活动|社会实践|竞赛项目)\s*[·•|｜:：/\-—]+\s*/, "");
+  return title || type || "重点证据";
 }
 
 function assistantEvidenceTypeLabel(evidence) {
-  if (evidence?.kind === "award") return "证书/奖项";
-  const text = cleanDisplayText(`${evidence?.type || ""} ${evidence?.role || ""} ${evidence?.title || ""}`);
-  if (/实习|intern/i.test(text)) return "实习";
-  if (/项目|课题|project/i.test(text)) return "项目";
-  return "经历";
+  if (evidence?.kind === "award") {
+    const text = cleanDisplayText(`${evidence?.type || ""} ${evidence?.title || ""}`);
+    if (/证书|认证|certificate|certification/i.test(text)) return "证书";
+    if (/竞赛|比赛|大赛|获奖|奖/i.test(text)) return "竞赛奖项";
+    return "奖项证书";
+  }
+  const explicitType = cleanDisplayText(evidence?.type || "");
+  const text = cleanDisplayText(`${explicitType} ${evidence?.role || ""} ${evidence?.title || ""}`);
+  if (/科研|课题|论文|实验室|research/i.test(text)) return "科研项目";
+  if (/课程|课设|course/i.test(text)) return "课程项目";
+  if (/实习|intern/i.test(text)) return "实习经历";
+  if (/竞赛|比赛|大赛|challenge|competition/i.test(text)) return "竞赛项目";
+  if (/社团|学生会|校园|志愿|活动|实践/i.test(text)) return "校园实践";
+  if (/项目|project/i.test(text)) return explicitType || "项目经历";
+  return explicitType || "经历";
 }
 
-function assistantEvidenceCompactScore(evidence) {
-  const score = evidence?.score_summary || {};
-  const parts = [
-    score.level ? `L${score.level}` : "",
-    score.impact_factor ? `I${score.impact_factor}` : ""
-  ].filter(Boolean);
-  return parts.join(" · ");
+function assistantEvidenceCategoryLabel(evidence) {
+  return evidence?.kind === "award" ? "奖项与证书" : "经历";
 }
 
 function assistantEvidenceContextMessage(evidence) {
@@ -3738,20 +4803,29 @@ function syncAssistantAvailability() {
   assistant.classList.toggle("is-streaming", assistantAgentStreamActive && !ready);
   assistantToggle.setAttribute("aria-disabled", String(!inspectable));
   assistantPanel.setAttribute("aria-disabled", "false");
-  assistantInput.disabled = assistantBusy || !ready;
+  assistantInput.disabled = assistantBusy || !inspectable;
   assistantSend.disabled = assistantBusy || !ready;
   assistantNewSession.disabled = assistantBusy || !ready;
   assistantArchiveSession.disabled = assistantBusy || !ready;
   assistantSuggestions.querySelectorAll("button").forEach((button) => {
     button.disabled = assistantBusy || !ready;
   });
+  const selectedContextKeys = focusedContextKeySet();
   document.querySelectorAll("[data-evidence-chat]").forEach((button) => {
-    const selected = assistantFocusedEvidence?.key === button.dataset.evidenceKey;
-    button.disabled = !ready;
-    button.setAttribute("aria-disabled", String(!ready));
+    const selected = selectedContextKeys.has(button.dataset.evidenceKey);
+    button.disabled = !inspectable;
+    button.setAttribute("aria-disabled", String(!inspectable));
     button.setAttribute("aria-pressed", String(selected));
     button.classList.toggle("is-added", selected);
-    button.title = selected ? "已加入聊天" : ready ? "添加到聊天" : "全部结果生成后才能追问";
+    button.title = selected ? "已加入聊天" : inspectable ? "添加到聊天" : "生成诊断后可添加到聊天";
+  });
+  document.querySelectorAll("[data-result-chat]").forEach((button) => {
+    const selected = selectedContextKeys.has(button.dataset.contextKey);
+    button.disabled = !inspectable;
+    button.setAttribute("aria-disabled", String(!inspectable));
+    button.setAttribute("aria-pressed", String(selected));
+    button.classList.toggle("is-added", selected);
+    button.title = selected ? "已加入聊天上下文" : inspectable ? "添加到聊天" : "生成诊断后可添加到聊天";
   });
   if (!inspectable && !assistant.classList.contains("is-collapsed")) {
     setAssistantExpanded(false, { silent: true });
@@ -3816,6 +4890,7 @@ function renderAssistantMessages(options = {}) {
     const stateClass = message.status === "loading" ? " is-loading" : message.status === "error" ? " is-error" : "";
     const streamClass = message.streamType === "agent_team" ? " is-agent-stream" : message.streamType === "evidence_context" ? " is-evidence-context" : "";
     const content = message.role === "user" ? message.content : formatAgentDisplayText(message.content);
+    const userRefs = message.role === "user" ? renderAssistantMessageRefs(message.focusedContexts) : "";
     const body = message.streamType === "agent_team" && message.agentStream
       ? renderAgentTeamStreamMessage(message.agentStream, message.id)
       : `<div class="assistant-bubble">${escapeHTML(content)}</div>`;
@@ -3823,6 +4898,7 @@ function renderAssistantMessages(options = {}) {
       <article class="assistant-message is-${escapeAttribute(message.role)}${stateClass}${streamClass}">
         <b>${escapeHTML(label)} · ${formatTime(message.createdAt)}</b>
         ${body}
+        ${userRefs}
         ${message.status === "error" && message.retryPrompt ? `<button type="button" class="assistant-retry" data-retry-message="${escapeAttribute(message.id)}">重试这条问题</button>` : ""}
       </article>
     `;
@@ -3838,6 +4914,24 @@ function renderAssistantMessages(options = {}) {
     const maxScrollTop = Math.max(0, assistantMessages.scrollHeight - assistantMessages.clientHeight);
     assistantMessages.scrollTop = Math.min(previousScrollTop, maxScrollTop);
   }
+}
+
+function renderAssistantMessageRefs(contexts) {
+  const refs = normalizeFocusedContexts(contexts);
+  if (refs.length === 0) return "";
+  const visibleRefs = refs.slice(0, 4);
+  const rest = refs.length - visibleRefs.length;
+  return `
+    <div class="assistant-message-refs" aria-label="本条问题引用的上下文">
+      <span>引用</span>
+      ${visibleRefs.map((context) => `
+        <em title="${escapeAttribute(`${context.category || "生成结果"}：${context.title || context.type || "上下文"}`)}">
+          ${escapeHTML(context.type || context.category || "结果")} · ${escapeHTML(context.title || "上下文")}
+        </em>
+      `).join("")}
+      ${rest > 0 ? `<em>+${rest}</em>` : ""}
+    </div>
+  `;
 }
 
 function captureAgentTypeoutState() {
@@ -3880,6 +4974,7 @@ function assistantDisplayMessages(messages) {
 function shouldSplitRenderedAgentStreamMessage(message) {
   const stream = message?.agentStream;
   if (message?.streamType !== "agent_team" || !stream) return false;
+  if (stream.workflow === "resume/path_planning") return false;
   const keys = new Set(stream.order || []);
   return keys.has("adaptive_planner") && keys.has("synthesis_arbiter") && stream.order.length > 2;
 }
@@ -3895,7 +4990,8 @@ function shouldStickAssistantToBottom() {
 }
 
 function renderAgentTeamStreamMessage(stream, messageID = "") {
-  const config = agentStreamPhaseConfig(stream.phaseGroup);
+  const config = agentStreamPhaseConfig(stream.phaseGroup, stream.workflow);
+  const workflowClass = stream.workflow === "resume/path_planning" ? " is-path-planning" : " is-job-matching";
   const completed = stream.order.filter((key) => stream.agents[key]?.status === "done").length;
   const failed = stream.order.filter((key) => stream.agents[key]?.status === "failed").length;
   const total = stream.phaseGroup === "team" ? stream.agentCount || stream.order.length : 1;
@@ -3904,7 +5000,7 @@ function renderAgentTeamStreamMessage(stream, messageID = "") {
     ? `${completed}/${total || "--"} 个视角${failed ? ` · ${failed} 个失败` : ""}`
     : config.label;
   return `
-    <div class="assistant-bubble agent-stream-card is-${escapeAttribute(config.group)}">
+    <div class="assistant-bubble agent-stream-card is-${escapeAttribute(config.group)}${workflowClass}">
       <div class="agent-stream-head">
         <div class="agent-stream-title">
           <strong>${escapeHTML(stream.title || "Agent Team 正在匹配岗位")}</strong>
@@ -4060,13 +5156,20 @@ function buildStructuredAgentOutputView(payload, agent, rawText) {
     "rationale",
     "recommendation",
     "recommended_jobs_scope",
+    "path_plan_summary",
+    "method_summary",
     "target_role",
+    "goal",
+    "objective",
     "fit_summary",
     "final_recommendation",
     "decision"
   ]) || agent.message || agent.focus || "", 132);
   const sectionDefs = [
     { label: "推荐方向", keys: ["recommended_jobs", "recommended_jobs_scope", "job_families", "target_roles", "target_role", "best_fit_roles", "role_recommendations", "recommended_roles"] },
+    { label: "路径阶段", keys: ["stages", "stage_plan", "milestones", "phases", "goal", "objective", "deliverable"] },
+    { label: "周任务", keys: ["weeks", "weekly_tasks", "tasks", "learning_path", "development_plan", "roadmap"] },
+    { label: "达标标准", keys: ["standards", "acceptance_criteria", "success_metrics", "metrics", "deliverables"] },
     { label: "判断依据", keys: ["rationale", "evidence", "supporting_evidence", "strengths", "signals", "fit_reasoning", "fit_summary", "method_summary", "positive_signals"] },
     { label: "风险盲点", keys: ["risks", "counterfactual_risks", "gaps", "gap_summary", "weaknesses", "concerns", "risk_summary"] },
     { label: "下一步", keys: ["actions", "next_steps", "recommendations", "learning_path", "development_plan", "roadmap", "mitigations"] }
@@ -4206,10 +5309,10 @@ function flattenAgentOutputValue(value) {
     return value.flatMap((item) => flattenAgentOutputValue(item)).slice(0, 8);
   }
   if (typeof value === "object") {
-    const preferred = ["title", "name", "role", "job", "direction", "reason", "description", "evidence", "action"];
+    const preferred = ["title", "name", "week", "task", "role", "job", "direction", "goal", "objective", "reason", "description", "evidence", "action", "deliverable"];
     const headline = preferred.map((key) => value[key]).find((item) => item != null && String(item).trim());
     if (headline) {
-      const detail = ["reason", "description", "evidence", "action"]
+      const detail = ["goal", "objective", "task", "metric", "deliverable", "reason", "description", "evidence", "action"]
         .map((key) => value[key])
         .find((item) => item != null && String(item).trim() && String(item).trim() !== String(headline).trim());
       return [detail ? `${headline}：${detail}` : String(headline)];
@@ -4520,10 +5623,13 @@ function updateAssistantContext() {
 function updateAssistantInputMeta() {
   const length = assistantInput.value.length;
   const ready = isAssistantReady();
-  assistantInput.placeholder = ready ? "追问能力短板、岗位理由或任务优先级" : "诊断完成后可追问";
+  const inspectable = isAssistantInspectable();
+  assistantInput.placeholder = ready
+    ? "追问能力短板、岗位理由或任务优先级"
+    : inspectable ? "可先编辑问题，诊断完成后发送" : "诊断完成后可追问";
   assistantInputMeta.textContent = ready
     ? length ? `${length}/${assistantPromptLimit}` : `最多 ${assistantPromptLimit} 字`
-    : isAssistantInspectable() ? "当前仅可查看 Agent Team 进度" : `最多 ${assistantPromptLimit} 字`;
+    : inspectable ? "可编辑，等待全部结果后发送" : `最多 ${assistantPromptLimit} 字`;
   assistantInputMeta.style.color = length > assistantPromptLimit * 0.9 ? "var(--danger)" : "";
 }
 
@@ -4544,7 +5650,7 @@ function applyAssistantExpandedState(expanded) {
   assistantToggle.setAttribute("aria-expanded", String(expanded));
 }
 
-async function sendAssistantMessage(promptOverride = "") {
+async function sendAssistantMessage(promptOverride = "", focusedContextsOverride = null) {
   if (!isAssistantReady()) {
     showToast("诊断仍在生成。你可以查看 Agent Team 进度，结果完成后再追问。");
     if (!isAssistantInspectable()) setAssistantExpanded(false, { silent: true });
@@ -4568,17 +5674,21 @@ async function sendAssistantMessage(promptOverride = "") {
   assistantInput.disabled = true;
   updateAssistantRailStatus("生成中");
   const now = new Date().toISOString();
-  session.messages.push({ id: uniqueId("msg"), role: "user", content: prompt, createdAt: now, status: "done" });
+  const focusedContexts = Array.isArray(focusedContextsOverride)
+    ? normalizeFocusedContexts(focusedContextsOverride)
+    : focusedContextsForAssistant();
+  session.messages.push({ id: uniqueId("msg"), role: "user", content: prompt, createdAt: now, status: "done", focusedContexts });
   const loadingID = uniqueId("msg");
-  session.messages.push({ id: loadingID, role: "assistant", content: "正在通过 Legato Chat workflow 生成回答。", createdAt: now, status: "loading", retryPrompt: prompt });
+  session.messages.push({ id: loadingID, role: "assistant", content: "正在通过 Legato Chat workflow 生成回答。", createdAt: now, status: "loading", retryPrompt: prompt, focusedContexts });
   session.title = titleForPrompt(prompt);
   session.updatedAt = now;
   assistantInput.value = "";
+  clearAssistantFocusedContextsSilently(session);
   saveAssistantState();
   renderAssistant();
 
   try {
-    const answer = await requestAssistantAnswer(session, prompt);
+    const answer = await requestAssistantAnswer(session, prompt, focusedContexts);
     const loading = session.messages.find((message) => message.id === loadingID);
     if (loading) {
       loading.content = answer || "模型没有返回可用内容。";
@@ -4606,12 +5716,13 @@ async function retryAssistantMessage(messageID) {
   const session = activeAssistantSession();
   const message = session?.messages.find((item) => item.id === messageID);
   if (!message?.retryPrompt) return;
+  const retryContexts = normalizeFocusedContexts(message.focusedContexts);
   session.messages = session.messages.filter((item) => item.id !== messageID);
   saveAssistantState();
-  await sendAssistantMessage(message.retryPrompt);
+  await sendAssistantMessage(message.retryPrompt, retryContexts);
 }
 
-async function requestAssistantAnswer(session, prompt) {
+async function requestAssistantAnswer(session, prompt, focusedContexts = null) {
   assistantAbort = new AbortController();
   const timeout = window.setTimeout(() => assistantAbort.abort(), 70000);
   try {
@@ -4620,7 +5731,7 @@ async function requestAssistantAnswer(session, prompt) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         question: prompt,
-        diagnosis: assistantContextForModel(),
+        diagnosis: assistantContextForModel({ focusedContexts }),
         history: assistantHistoryForModel(session, prompt)
       }),
       signal: assistantAbort.signal
@@ -4651,7 +5762,7 @@ async function fetchJSON(url, options) {
   return data;
 }
 
-function assistantContextForModel() {
+function assistantContextForModel(options = {}) {
   if (!diagnosis) return { status: "no_diagnosis", message: "尚未生成诊断。用户可能仍在材料上传阶段。" };
   const profile = diagnosis.ability_profile || {};
   const info = profile.basic_info || {};
@@ -4665,6 +5776,9 @@ function assistantContextForModel() {
   const gaps = Array.isArray(match.gap_details) ? match.gap_details.slice(0, 5) : [];
   const developmentActions = Array.isArray(match.development_actions) ? match.development_actions.slice(0, 12) : [];
   const stages = Array.isArray(diagnosis.path_plan?.stages) ? diagnosis.path_plan.stages.slice(0, 3) : [];
+  const focusedContexts = Array.isArray(options.focusedContexts)
+    ? normalizeFocusedContexts(options.focusedContexts)
+    : focusedContextsForAssistant();
   return {
     status: "ready",
     basic_info: {
@@ -4698,6 +5812,8 @@ function assistantContextForModel() {
       goal: stage.goal,
       deliverable: stage.deliverable
     })),
+    focused_contexts: focusedContexts,
+    focused_context: focusedContexts.at(-1) || null,
     focused_evidence: focusedEvidenceForAssistant(),
     production_limitations: diagnosis.production_limitations || []
   };
@@ -4795,6 +5911,40 @@ function downloadJSON(filename, value) {
   URL.revokeObjectURL(url);
 }
 
+function printSectionAsPDF(target, label) {
+  const printTarget = ["profile", "matching", "path"].includes(target) ? target : "";
+  if (!printTarget) {
+    showToast("暂不支持该模块导出 PDF。");
+    return;
+  }
+  const targetSlide = document.querySelector(`#${printTarget}`);
+  const restoredDetails = [];
+  targetSlide?.querySelectorAll("details").forEach((detail) => {
+    if (!detail.open) {
+      detail.open = true;
+      restoredDetails.push(detail);
+    }
+  });
+  document.body.dataset.printTarget = printTarget;
+  document.body.classList.add("is-printing-export");
+  showToast(`即将打开打印面板，请选择另存为 PDF：${label}`);
+  const cleanup = () => {
+    delete document.body.dataset.printTarget;
+    document.body.classList.remove("is-printing-export");
+    restoredDetails.forEach((detail) => {
+      detail.open = false;
+    });
+    window.removeEventListener("afterprint", cleanup);
+  };
+  window.addEventListener("afterprint", cleanup);
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      window.print();
+      window.setTimeout(cleanup, 1400);
+    });
+  });
+}
+
 function showToast(message) {
   window.clearTimeout(toastTimer);
   toast.textContent = formatAgentDisplayText(message);
@@ -4804,6 +5954,10 @@ function showToast(message) {
 
 function cleanDisplayText(value) {
   return String(value ?? "").trim();
+}
+
+function escapeRegExp(value) {
+  return String(value ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function formatAgentDisplayText(value) {

@@ -23,6 +23,7 @@ import (
 
 const defaultDiagnosisTimeout = 120 * time.Second
 const defaultJobMatchingTimeout = 600 * time.Second
+const defaultPathPlanningTimeout = 600 * time.Second
 const defaultDiagnosisTempRetention = 2 * time.Hour
 const defaultItemBenchmarkBatchWorkers = 2
 const maxItemBenchmarkBatchWorkers = 4
@@ -766,10 +767,48 @@ func (s Server) runJobMatchingStageAndWrite(w http.ResponseWriter, job *Diagnosi
 		return
 	}
 	diagnosis.ProductionLimitations = withoutJobMatchingFailureLimitations(diagnosis.ProductionLimitations)
+	pathCtx, pathCancel := context.WithTimeout(context.Background(), pathPlanningTimeout())
+	defer pathCancel()
+	diagnosis, pathErr := s.runPathPlanningStage(pathCtx, job, diagnosis)
+	if pathErr != nil {
+		log.Printf("diagnosis %s path planning failed: %v", job.ID, pathErr)
+		diagnosis.ProductionLimitations = addProductionLimitationOnce(
+			diagnosis.ProductionLimitations,
+			"Path Planning 失败，阶段目标、周任务和达标标准未生成，可稍后从岗位匹配后重新规划。",
+		)
+		job.SetDiagnosis(diagnosis)
+		job.Emit(DiagnosisEvent{
+			Type:    "step.update",
+			Step:    "path",
+			Status:  "failed",
+			Message: "Legato Path Planning Team 失败，路径规划模块未生成",
+			Data: map[string]any{
+				"matching_result":        diagnosis.MatchingResult,
+				"production_limitations": diagnosis.ProductionLimitations,
+				"path_error":             pathErr.Error(),
+				"error":                  pathErr.Error(),
+			},
+		})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ability_profile":        diagnosis.AbilityProfile,
+			"matching_result":        diagnosis.MatchingResult,
+			"top_jobs":               diagnosis.AbilityProfile.TopJobs,
+			"production_limitations": diagnosis.ProductionLimitations,
+			"path_error":             pathErr.Error(),
+			"match_generated":        true,
+			"matching_source":        diagnosis.MatchingResult.Source,
+			"job_matching_run":       "Legato Job Matching Team via Presto",
+		})
+		return
+	}
+	diagnosis.ProductionLimitations = withoutPathPlanningFailureLimitations(diagnosis.ProductionLimitations)
+	diagnosis.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
 	job.SetDiagnosis(diagnosis)
+	emitDiagnosisOutputsDone(job, diagnosis)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ability_profile":        diagnosis.AbilityProfile,
 		"matching_result":        diagnosis.MatchingResult,
+		"path_plan":              diagnosis.PathPlan,
 		"top_jobs":               diagnosis.AbilityProfile.TopJobs,
 		"production_limitations": diagnosis.ProductionLimitations,
 		"generated_at":           diagnosis.GeneratedAt,
@@ -810,6 +849,78 @@ func (s Server) runJobMatchingStage(ctx context.Context, job *DiagnosisJob, diag
 		},
 	})
 	return diagnosis, nil
+}
+
+func (s Server) runPathPlanningStage(ctx context.Context, job *DiagnosisJob, diagnosis Diagnosis) (Diagnosis, error) {
+	if strings.TrimSpace(diagnosis.MatchingResult.TargetRole) == "" && strings.TrimSpace(diagnosis.MatchingResult.SelectedJob.Title) == "" {
+		return diagnosis, errors.New("岗位匹配尚未完成，无法启动 Path Planning")
+	}
+	job.SetDiagnosis(diagnosis)
+	job.Emit(DiagnosisEvent{
+		Type:    "step.update",
+		Step:    "path",
+		Status:  "running",
+		Message: "Legato Path Planning Team 正在基于岗位匹配结果生成阶段目标、周任务和达标标准",
+		Data: map[string]any{
+			"matching_result": diagnosis.MatchingResult,
+		},
+	})
+	result, err := s.runLegatoPathPlanningTeam(ctx, job, diagnosis)
+	if err != nil {
+		return diagnosis, err
+	}
+	var plan PathPlan
+	switch value := result.Data["path_plan"].(type) {
+	case PathPlan:
+		plan = value
+	default:
+		raw := objectValue(value)
+		if len(raw) == 0 {
+			raw = result.Data
+		}
+		normalized, normalizeErr := normalizePathPlanOutput(raw)
+		if normalizeErr != nil {
+			return diagnosis, normalizeErr
+		}
+		plan = normalized
+	}
+	diagnosis.PathPlan = plan
+	job.SetDiagnosis(diagnosis)
+	job.Emit(DiagnosisEvent{
+		Type:    "step.update",
+		Step:    "path",
+		Status:  "done",
+		Message: "Legato Path Planning Team 已返回阶段目标、周任务和达标标准",
+		Data: map[string]any{
+			"path_plan": diagnosis.PathPlan,
+		},
+	})
+	return diagnosis, nil
+}
+
+func emitDiagnosisOutputsDone(job *DiagnosisJob, diagnosis Diagnosis) {
+	if job == nil {
+		return
+	}
+	job.Emit(DiagnosisEvent{Type: "step.update", Step: "outputs", Status: "running", Message: "导出 Agent 正在整理结构化输出"})
+	shortPause()
+	job.Emit(DiagnosisEvent{
+		Type:    "step.update",
+		Step:    "outputs",
+		Status:  "done",
+		Message: "结构化输出已就绪",
+		Data: map[string]any{
+			"backend_requirements":   diagnosis.BackendRequirements,
+			"production_limitations": diagnosis.ProductionLimitations,
+			"generated_at":           diagnosis.GeneratedAt,
+		},
+	})
+	job.Emit(DiagnosisEvent{
+		Type:    "job.done",
+		Status:  "completed",
+		Message: "异步诊断完成",
+		Data:    map[string]any{"diagnosis": diagnosis},
+	})
 }
 
 func writeDiagnosisSSE(w io.Writer, event DiagnosisEvent) error {
@@ -862,9 +973,10 @@ func (s Server) runDiagnosisJob(job *DiagnosisJob) {
 		"简历必须由 Legato 后端成功解析，否则诊断任务失败。",
 		"成绩单是可选增强材料；如解析失败，本次诊断会跳过成绩单证据并继续生成结果。",
 		"岗位推荐、匹配差距和目标岗位雷达由 Benchmark 后的 Legato Job Matching Team via Presto 生成。",
-		"成长路径仍为模拟数据，待接入真实规划 Agent。",
+		"成长路径将在岗位匹配完成后由 Legato Path Planning Team via Presto 生成。",
 		"其他材料当前只记录文件元信息，尚未纳入真实解析。",
 	}
+	diagnosis.PathPlan = PathPlan{ExportFormats: []string{"PDF", "Word"}, Stages: []PlanStage{}}
 
 	job.SetDiagnosis(diagnosis)
 	job.Emit(DiagnosisEvent{Type: "job.started", Status: "running", Message: "已开始诊断，Legato 解析为必需步骤"})
@@ -1000,58 +1112,7 @@ func (s Server) runDiagnosisJob(job *DiagnosisJob) {
 		Data:    map[string]any{"ability_profile": diagnosis.AbilityProfile},
 	})
 
-	job.Emit(DiagnosisEvent{Type: "step.update", Step: "path", Status: "running", Message: "路径规划 Agent 正在生成阶段任务"})
-	var downstream sync.WaitGroup
-	downstream.Add(1)
-	go func() {
-		defer downstream.Done()
-		time.Sleep(260 * time.Millisecond)
-		job.Emit(DiagnosisEvent{
-			Type:    "step.update",
-			Step:    "path",
-			Status:  "done",
-			Message: "成长路径已生成，可查看路径模块",
-			Data:    map[string]any{"path_plan": diagnosis.PathPlan},
-		})
-	}()
-	downstreamDone := make(chan struct{})
-	go func() {
-		downstream.Wait()
-		close(downstreamDone)
-	}()
-
-	downstreamPending := true
-	for downstreamPending {
-		select {
-		case <-downstreamDone:
-			downstreamPending = false
-			downstreamDone = nil
-		case <-ctx.Done():
-			downstreamPending = false
-		}
-	}
-
-	job.Emit(DiagnosisEvent{Type: "step.update", Step: "outputs", Status: "running", Message: "导出 Agent 正在整理结构化输出"})
-	shortPause()
-	diagnosis.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
 	job.SetDiagnosis(diagnosis)
-	job.Emit(DiagnosisEvent{
-		Type:    "step.update",
-		Step:    "outputs",
-		Status:  "done",
-		Message: "结构化输出已就绪",
-		Data: map[string]any{
-			"backend_requirements":   diagnosis.BackendRequirements,
-			"production_limitations": diagnosis.ProductionLimitations,
-			"generated_at":           diagnosis.GeneratedAt,
-		},
-	})
-	job.Emit(DiagnosisEvent{
-		Type:    "job.done",
-		Status:  "completed",
-		Message: "异步诊断完成",
-		Data:    map[string]any{"diagnosis": diagnosis},
-	})
 }
 
 func (s Server) runLegatoStage(ctx context.Context, job *DiagnosisJob, target string, step string, runningMessage string) (*LegatoEnvelope, error) {
@@ -1540,6 +1601,19 @@ func jobMatchingTimeout() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
+func pathPlanningTimeout() time.Duration {
+	value := strings.TrimSpace(os.Getenv("PATH_PLANNING_TIMEOUT_SECONDS"))
+	if value == "" {
+		return defaultPathPlanningTimeout
+	}
+	seconds, err := strconv.Atoi(value)
+	if err != nil || seconds <= 0 {
+		log.Printf("invalid PATH_PLANNING_TIMEOUT_SECONDS=%q, using %s", value, defaultPathPlanningTimeout)
+		return defaultPathPlanningTimeout
+	}
+	return time.Duration(seconds) * time.Second
+}
+
 func diagnosisTimeout() time.Duration {
 	value := strings.TrimSpace(os.Getenv("DIAGNOSIS_TIMEOUT_SECONDS"))
 	if value == "" {
@@ -1566,6 +1640,17 @@ func withoutJobMatchingFailureLimitations(limitations []string) []string {
 	out := make([]string, 0, len(limitations))
 	for _, item := range limitations {
 		if strings.Contains(item, "Job Matching 失败") {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func withoutPathPlanningFailureLimitations(limitations []string) []string {
+	out := make([]string, 0, len(limitations))
+	for _, item := range limitations {
+		if strings.Contains(item, "Path Planning 失败") {
 			continue
 		}
 		out = append(out, item)
