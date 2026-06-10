@@ -1334,7 +1334,7 @@ func runLegatoWithOptions(ctx context.Context, sourcePath string, target string,
 	}
 	cmd := exec.CommandContext(ctx, python, args...)
 	cmd.Dir = root
-	cmd.Env = append(os.Environ(), "PYTHONPATH="+pythonPath(root))
+	cmd.Env = legatoCommandEnv(root)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("%s failed: %w: %s", target, err, strings.TrimSpace(string(output)))
@@ -1347,6 +1347,14 @@ func runLegatoWithOptions(ctx context.Context, sourcePath string, target string,
 		return nil, fmt.Errorf("Legato %s failed: %s", target, envelope.Error)
 	}
 	return &envelope, nil
+}
+
+func legatoCommandEnv(root string) []string {
+	return append(os.Environ(),
+		"PYTHONPATH="+pythonPath(root),
+		"PYTHONIOENCODING=utf-8",
+		"PYTHONUTF8=1",
+	)
 }
 
 func saveDiagnosisUploads(r *http.Request) ([]SavedUpload, error) {

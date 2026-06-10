@@ -9,6 +9,15 @@ from .pipeline import process
 from .schemas import SCHEMAS
 
 
+def write_utf8(stream, text: str) -> None:
+    if hasattr(stream, "reconfigure"):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    stream.write(text + "\n")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="legato", description="Structure resumes, transcripts, and chat context.")
     parser.add_argument("source", help="Input PDF, image, or Markdown file.")
@@ -93,14 +102,14 @@ def main(argv: list[str] | None = None) -> int:
         ).to_dict()
     except Exception as exc:
         payload = {"status": "failed", "error": str(exc)}
-        print(json.dumps(payload, ensure_ascii=False, indent=2), file=sys.stderr)
+        write_utf8(sys.stderr, json.dumps(payload, ensure_ascii=False, indent=2))
         return 1
 
     output = json.dumps(result, ensure_ascii=False, indent=2)
     if args.output:
         Path(args.output).write_text(output + "\n", encoding="utf-8")
     else:
-        print(output)
+        write_utf8(sys.stdout, output)
     return 0
 
 

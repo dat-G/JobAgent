@@ -62,6 +62,33 @@ func TestItemBenchmarkBatchWorkersUsesEnvAndCaps(t *testing.T) {
 	}
 }
 
+func TestLegatoCommandEnvIncludesUtf8Encoding(t *testing.T) {
+	t.Setenv("PYTHONPATH", "existing")
+
+	env := legatoCommandEnv(`E:\Dev\JobAgent\Agents\legato`)
+	got := map[string]string{}
+	for _, item := range env {
+		key, value, ok := strings.Cut(item, "=")
+		if !ok {
+			continue
+		}
+		got[key] = value
+	}
+
+	if got["PYTHONIOENCODING"] != "utf-8" {
+		t.Fatalf("expected PYTHONIOENCODING=utf-8, got %q", got["PYTHONIOENCODING"])
+	}
+	if got["PYTHONUTF8"] != "1" {
+		t.Fatalf("expected PYTHONUTF8=1, got %q", got["PYTHONUTF8"])
+	}
+	if !strings.HasPrefix(got["PYTHONPATH"], `E:\Dev\JobAgent\Agents\legato`) {
+		t.Fatalf("expected PYTHONPATH to start with legato root, got %q", got["PYTHONPATH"])
+	}
+	if !strings.Contains(got["PYTHONPATH"], "existing") {
+		t.Fatalf("expected PYTHONPATH to retain existing entries, got %q", got["PYTHONPATH"])
+	}
+}
+
 func TestDiagnosisJobSnapshotsDoNotShareAbilityProfileSlices(t *testing.T) {
 	job := NewJobStore().Create(nil)
 	diagnosis := Diagnosis{
