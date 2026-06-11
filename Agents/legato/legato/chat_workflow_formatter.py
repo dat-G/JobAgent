@@ -11,6 +11,19 @@ from .model_routing import load_model_route
 
 
 CHAT_LIST_FIELDS = ("actions", "evidence_refs", "missing_evidence")
+UI_INTENT_MODES = {"none", "show_schema", "update_result"}
+UI_INTENT_TARGETS = {
+    "none",
+    "basic",
+    "education",
+    "awards",
+    "experiences",
+    "profile_radar",
+    "matching",
+    "path_plan",
+    "top_jobs",
+}
+UI_PATCH_OPS = {"add", "replace", "remove"}
 
 
 @dataclass(frozen=True)
@@ -104,16 +117,19 @@ class ChatWorkflowFormatter:
             diagnosis = context
 
         history = normalize_history(self.stage_input.get("history"))
+        ui_schema_catalog = object_value(self.stage_input.get("ui_schema_catalog"))
         extra_context = "" if question == source_context.strip() else source_context.strip()
         return {
             "question": question[:4000],
             "diagnosis_context": diagnosis,
             "conversation_history": history[-12:],
+            "ui_schema_catalog": ui_schema_catalog,
             "source_context": extra_context[:20000],
             "debug": {
                 "question_chars": len(question),
                 "diagnosis_keys": sorted(diagnosis.keys()),
                 "history_count": len(history),
+                "ui_schema_targets": sorted(ui_schema_catalog.keys()),
                 "source_context_chars": len(extra_context),
             },
         }
@@ -125,6 +141,7 @@ class ChatWorkflowFormatter:
             .replace("{{question}}", input_context["question"])
             .replace("{{diagnosis_context}}", compact_json(input_context["diagnosis_context"]))
             .replace("{{conversation_history}}", compact_json(input_context["conversation_history"]))
+            .replace("{{ui_schema_catalog}}", compact_json(input_context["ui_schema_catalog"]))
             .replace("{{source_context}}", input_context["source_context"])
         )
 
@@ -161,6 +178,8 @@ class ChatWorkflowFormatter:
             raise ValueError("chat answer missing numeric confidence")
         if confidence < 0 or confidence > 1:
             raise ValueError("chat answer confidence must be between 0 and 1")
+        if "ui_intent" in data:
+            validate_ui_intent(data["ui_intent"])
 
     def _debug_envelope(self, results: dict[str, dict[str, Any]], total_ms: int) -> dict[str, Any]:
         route = {
@@ -195,13 +214,63 @@ class ChatWorkflowFormatter:
 
 
 def normalize_chat_answer(data: dict[str, Any]) -> dict[str, Any]:
-    return {
+    normalized = {
         "answer": str(data.get("answer", "")).strip(),
         "conclusion": str(data.get("conclusion", "")).strip(),
         "actions": clean_string_list(data.get("actions")),
         "evidence_refs": clean_string_list(data.get("evidence_refs")),
         "missing_evidence": clean_string_list(data.get("missing_evidence")),
         "confidence": float(data.get("confidence", 0)),
+    }
+    if "ui_intent" in data:
+        normalized["ui_intent"] = normalize_ui_intent(data["ui_intent"])
+    return normalized
+
+
+def validate_ui_intent(value: Any) -> None:
+    if not isinstance(value, dict):
+        raise ValueError("chat ui_intent must be a JSON object")
+    mode = value.get("mode")
+    target = value.get("target")
+    if mode not in UI_INTENT_MODES:
+        raise ValueError("chat ui_intent mode is invalid")
+    if target not in UI_INTENT_TARGETS:
+        raise ValueError("chat ui_intent target is invalid")
+    if not isinstance(value.get("patches"), list):
+        raise ValueError("chat ui_intent patches must be an array")
+    if not isinstance(value.get("schema"), dict):
+        raise ValueError("chat ui_intent schema must be an object")
+    if not isinstance(value.get("summary"), str):
+        raise ValueError("chat ui_intent summary must be a string")
+    for patch in value["patches"]:
+        if not isinstance(patch, dict):
+            raise ValueError("chat ui_intent patch must be an object")
+        if patch.get("op") not in UI_PATCH_OPS:
+            raise ValueError("chat ui_intent patch op is invalid")
+        path = patch.get("path")
+        if not isinstance(path, str) or not path.startswith("/"):
+            raise ValueError("chat ui_intent patch path is invalid")
+        if patch["op"] in {"add", "replace"} and "value" not in patch:
+            raise ValueError("chat ui_intent patch value is required")
+
+
+def normalize_ui_intent(value: Any) -> dict[str, Any]:
+    validate_ui_intent(value)
+    patches: list[dict[str, Any]] = []
+    for patch in value["patches"]:
+        normalized_patch = {
+            "op": str(patch.get("op", "")).strip(),
+            "path": str(patch.get("path", "")).strip(),
+        }
+        if "value" in patch and normalized_patch["op"] != "remove":
+            normalized_patch["value"] = patch["value"]
+        patches.append(normalized_patch)
+    return {
+        "mode": str(value.get("mode", "none")).strip(),
+        "target": str(value.get("target", "none")).strip(),
+        "patches": patches[:40],
+        "schema": value.get("schema") if isinstance(value.get("schema"), dict) else {},
+        "summary": str(value.get("summary", "")).strip()[:500],
     }
 
 

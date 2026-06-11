@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,10 +16,11 @@ import (
 const maxChatRequestBytes = 2 << 20
 
 type ChatRequest struct {
-	Question      string               `json:"question"`
-	Diagnosis     map[string]any       `json:"diagnosis,omitempty"`
-	History       []ChatHistoryMessage `json:"history,omitempty"`
-	SourceContext string               `json:"source_context,omitempty"`
+	Question        string               `json:"question"`
+	Diagnosis       map[string]any       `json:"diagnosis,omitempty"`
+	History         []ChatHistoryMessage `json:"history,omitempty"`
+	SourceContext   string               `json:"source_context,omitempty"`
+	UISchemaCatalog map[string]any       `json:"ui_schema_catalog,omitempty"`
 }
 
 type ChatHistoryMessage struct {
@@ -45,6 +48,10 @@ func (s Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.History = normalizeChatHistory(req.History)
+	if wantsChatStream(r) {
+		streamChat(w, r, req)
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), chatTimeout())
 	defer cancel()
@@ -53,24 +60,186 @@ func (s Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, chatErrorStatus(err), err.Error())
 		return
 	}
+	response, err := buildChatResponse(envelope)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, response.Payload)
+}
+
+type chatRunResult struct {
+	envelope *LegatoEnvelope
+	err      error
+}
+
+type chatResponse struct {
+	Answer  string
+	Chat    map[string]any
+	Payload map[string]any
+}
+
+func wantsChatStream(r *http.Request) bool {
+	if r.URL.Query().Get("stream") == "1" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/event-stream")
+}
+
+func streamChat(w http.ResponseWriter, r *http.Request, req ChatRequest) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), chatTimeout())
+	defer cancel()
+
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	if writeChatSSE(w, "chat.status", map[string]any{
+		"status":  "running",
+		"message": "Legato Chat workflow 正在生成回答",
+	}) != nil {
+		return
+	}
+	flusher.Flush()
+
+	resultCh := make(chan chatRunResult, 1)
+	go func() {
+		envelope, err := runLegatoChat(ctx, req)
+		resultCh <- chatRunResult{envelope: envelope, err: err}
+	}()
+
+	ticker := time.NewTicker(1500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			_ = writeChatSSE(w, "chat.error", map[string]any{
+				"status": "failed",
+				"error":  "chat stream canceled or timed out",
+			})
+			flusher.Flush()
+			return
+		case <-ticker.C:
+			if writeChatSSE(w, "chat.status", map[string]any{
+				"status":  "running",
+				"message": "Legato Chat workflow 仍在生成回答",
+			}) != nil {
+				return
+			}
+			flusher.Flush()
+		case result := <-resultCh:
+			if result.err != nil {
+				_ = writeChatSSE(w, "chat.error", map[string]any{
+					"status": "failed",
+					"error":  result.err.Error(),
+				})
+				flusher.Flush()
+				return
+			}
+			response, err := buildChatResponse(result.envelope)
+			if err != nil {
+				_ = writeChatSSE(w, "chat.error", map[string]any{
+					"status": "failed",
+					"error":  err.Error(),
+				})
+				flusher.Flush()
+				return
+			}
+			if writeChatSSE(w, "chat.status", map[string]any{
+				"status":  "streaming",
+				"message": "回答已生成，正在流式输出",
+			}) != nil {
+				return
+			}
+			flusher.Flush()
+			for _, chunk := range splitChatAnswerChunks(response.Answer) {
+				if writeChatSSE(w, "chat.chunk", map[string]any{"delta": chunk}) != nil {
+					return
+				}
+				flusher.Flush()
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(12 * time.Millisecond):
+				}
+			}
+			if writeChatSSE(w, "chat.done", response.Payload) != nil {
+				return
+			}
+			flusher.Flush()
+			return
+		}
+	}
+}
+
+func buildChatResponse(envelope *LegatoEnvelope) (chatResponse, error) {
 	chat, ok := envelope.Data["chat"].(map[string]any)
 	if !ok {
-		writeError(w, http.StatusBadGateway, "Legato chat returned invalid payload")
-		return
+		return chatResponse{}, errors.New("Legato chat returned invalid payload")
 	}
 	answer := strings.TrimSpace(stringValue(chat["answer"]))
 	if answer == "" {
-		writeError(w, http.StatusBadGateway, "Legato chat returned empty answer")
-		return
+		return chatResponse{}, errors.New("Legato chat returned empty answer")
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	payload := map[string]any{
 		"answer":     answer,
 		"chat":       chat,
 		"formatter":  envelope.Formatter,
 		"elapsed_ms": envelope.ElapsedMS,
 		"warnings":   envelope.Warnings,
 		"debug":      envelope.Debug,
-	})
+	}
+	return chatResponse{Answer: answer, Chat: chat, Payload: payload}, nil
+}
+
+func writeChatSSE(w io.Writer, event string, payload any) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		data = []byte(`{"status":"failed","error":"chat event marshal failed"}`)
+	}
+	if _, err := fmt.Fprintf(w, "event: %s\n", event); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+		return err
+	}
+	return nil
+}
+
+func splitChatAnswerChunks(answer string) []string {
+	runes := []rune(answer)
+	if len(runes) == 0 {
+		return nil
+	}
+	chunks := make([]string, 0, len(runes)/18+1)
+	for start := 0; start < len(runes); {
+		end := start + 18
+		if end > len(runes) {
+			end = len(runes)
+		}
+		for end < len(runes) && end-start < 28 && !isChatChunkBoundary(runes[end-1]) {
+			end++
+		}
+		chunks = append(chunks, string(runes[start:end]))
+		start = end
+	}
+	return chunks
+}
+
+func isChatChunkBoundary(value rune) bool {
+	switch value {
+	case '。', '，', '；', '：', '、', '.', ',', ';', ':', '!', '?', '！', '？', '\n':
+		return true
+	default:
+		return false
+	}
 }
 
 func runLegatoChat(ctx context.Context, req ChatRequest) (*LegatoEnvelope, error) {
@@ -90,9 +259,10 @@ func runLegatoChat(ctx context.Context, req ChatRequest) (*LegatoEnvelope, error
 	}
 
 	stageInput := map[string]any{
-		"question":  req.Question,
-		"diagnosis": req.Diagnosis,
-		"history":   req.History,
+		"question":          req.Question,
+		"diagnosis":         req.Diagnosis,
+		"history":           req.History,
+		"ui_schema_catalog": req.UISchemaCatalog,
 	}
 	inputPath := filepath.Join(tempDir, "chat-input.json")
 	payload, err := json.Marshal(stageInput)

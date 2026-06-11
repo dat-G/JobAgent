@@ -43,6 +43,8 @@ func (n *SequenceNode) Run(ctx context.Context, state State, emit Emitter) (Stat
 
 type ParallelOption func(*ParallelNode)
 
+const maxParallelNodeConcurrency = 500
+
 type ParallelNode struct {
 	name           string
 	nodes          []Node
@@ -95,7 +97,10 @@ func (n *ParallelNode) Run(ctx context.Context, state State, emit Emitter) (Stat
 	defer cancel()
 
 	limit := n.maxConcurrency
-	if limit <= 0 || limit > len(n.nodes) {
+	if limit <= 0 || limit > maxParallelNodeConcurrency {
+		limit = maxParallelNodeConcurrency
+	}
+	if limit > len(n.nodes) {
 		limit = len(n.nodes)
 	}
 	sem := make(chan struct{}, limit)

@@ -27,6 +27,10 @@ from legato.resume_workflow_formatter import (
 
 
 class ResumeWorkflowFormatterTest(unittest.TestCase):
+    def test_max_workers_caps_at_five_hundred(self) -> None:
+        formatter = ResumeWorkflowFormatter(max_workers=999)
+        self.assertEqual(formatter.max_workers, 500)
+
     def test_slice_certifications_awards_keeps_scattered_awards(self) -> None:
         text = "\n".join(
             [

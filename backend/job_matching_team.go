@@ -21,9 +21,9 @@ import (
 )
 
 const jobMatchingTeamName = "Legato Job Matching Team"
-const maxPlannedJobMatchingAgents = 6
+const maxPlannedJobMatchingAgents = 500
 const minPlannedJobMatchingAgents = 3
-const maxJobMatchingAgentConcurrency = 3
+const maxJobMatchingAgentConcurrency = 500
 const maxJobMatchingAgentPromptWarningBytes = 80000
 const maxJobMatchingAgentResultArrayItems = 6
 const maxJobMatchingAgentResultStringRunes = 900
@@ -1613,7 +1613,7 @@ Return strict JSON only:
 Rules:
 - You are the first Agent. Decide the team shape from resume complexity, evidence volume, benchmark status, education signals and skill ambiguity.
 - Treat radar_context.overall as the strongest ability-profile signal. If radar_context has campus/external splits, assign at least one Agent focus to translate those gaps into student development actions.
-- Return 3 to 6 agents. More evidence, cross-domain signals, ambiguous roles, or high-impact-but-risky evidence should use more agents and higher reasoning_effort.
+- Return 3 to 500 agents. More evidence, cross-domain signals, ambiguous roles, or high-impact-but-risky evidence should use more agents and higher reasoning_effort.
 - Required perspectives across the selected agents: ability fit, evidence quality, education threshold, role family mapping.
 - For complex cases, add growth potential and counterfactual risk perspectives.
 - Agents must judge from different angles and must not duplicate each other.

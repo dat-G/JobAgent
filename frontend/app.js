@@ -36,6 +36,142 @@ const assistantStorageKey = "jobagent.llmAssistant.v1";
 const assistantMaxMessages = 80;
 const assistantMaxSessions = 24;
 const assistantPromptLimit = 1200;
+const assistantEditableTargets = {
+  basic: {
+    label: "基础信息",
+    roots: ["/ability_profile/basic_info"],
+    description: "姓名、性别、出生年份、学校、学院、专业、学历和材料来源。",
+    schema: {
+      type: "object",
+      fields: {
+        name: "string",
+        sex: "string",
+        birth_year: "string|number",
+        school: "string",
+        department: "string",
+        major: "string",
+        degree: "string",
+        transcript_use: "string"
+      }
+    }
+  },
+  education: {
+    label: "教育经历",
+    roots: ["/ability_profile/education"],
+    description: "多段学历、学校层次、排名和专业信息。",
+    schema: {
+      type: "array",
+      item: {
+        school: "string",
+        department: "string",
+        major: "string",
+        degree: "string",
+        school_level: "string",
+        school_tags: "string[]",
+        ruanke_rank: "number|string",
+        inference: "string"
+      }
+    }
+  },
+  awards: {
+    label: "奖项与证书",
+    roots: ["/ability_profile/awards"],
+    description: "没有长描述的奖项、比赛和证书证据。",
+    schema: {
+      type: "array",
+      item: {
+        name: "string",
+        result: "string",
+        evidence_scope: "校内|校外|string",
+        level: "number",
+        impact_factor: "number",
+        benchmark_scores: "number[6]",
+        reason: "string"
+      }
+    }
+  },
+  experiences: {
+    label: "经历证据",
+    roots: ["/ability_profile/experiences"],
+    description: "有贡献描述的项目、实习、比赛、任职等经历。",
+    schema: {
+      type: "array",
+      item: {
+        type: "string",
+        role: "string",
+        contribution: "string",
+        evidence_scope: "校内|校外|string",
+        level: "number",
+        impact_factor: "number",
+        benchmark_scores: "number[6]",
+        reason: "string"
+      }
+    }
+  },
+  profile_radar: {
+    label: "能力画像雷达",
+    roots: ["/ability_profile/radar_data", "/ability_profile/radar_series"],
+    description: "六维能力分与校内、校外、综合雷达序列。",
+    schema: {
+      type: "object",
+      fields: {
+        radar_data: "{name:string, score:number}[]",
+        radar_series: "{label:string, scope:string, scores:number[], count:number}[]"
+      }
+    }
+  },
+  matching: {
+    label: "岗位匹配",
+    roots: ["/matching_result"],
+    description: "首选岗位、匹配度、目标雷达、差距、行动建议和推荐理由。",
+    schema: {
+      type: "object",
+      fields: {
+        target_role: "string",
+        overall_match: "number",
+        match_level: "string",
+        selected_job: "object",
+        student_radar: "{name:string, score:number}[]",
+        target_radar: "{name:string, score:number}[]",
+        gap_details: "{capability:string,current:string,expected:string,action:string,severity:string}[]",
+        development_actions: "{priority:string,scope:string,description:string}[]",
+        recommendations: "string[]",
+        recommended_reasons: "string[]"
+      }
+    }
+  },
+  path_plan: {
+    label: "路径规划",
+    roots: ["/path_plan"],
+    description: "阶段目标、周任务、达标标准、资源链接和导出格式。",
+    schema: {
+      type: "object",
+      fields: {
+        summary: "string",
+        export_formats: "string[]",
+        stages: "{stage:string,goal:string,deliverable:string,weeks:{week:string,task:string,metric:string,priority:string}[],standards:string[],resources:{label:string,url:string}[]}[]"
+      }
+    }
+  },
+  top_jobs: {
+    label: "TOP5 岗位",
+    roots: ["/ability_profile/top5_matching_jobs"],
+    description: "画像区域和输出区域共用的推荐岗位列表。",
+    schema: {
+      type: "array",
+      item: {
+        title: "string",
+        match: "number",
+        category: "string",
+        fit_summary: "string",
+        reasons: "string[]",
+        proof_gaps: "string[]",
+        next_proof: "string",
+        education_gate: "string"
+      }
+    }
+  }
+};
 
 let diagnosis = null;
 let resumeReady = false;
@@ -47,6 +183,7 @@ let diagnosisEvents = null;
 let currentJobId = "";
 let benchmarkRequestInFlight = false;
 let matchingRequestInFlight = false;
+let pathRequestInFlight = false;
 let baseJobDone = false;
 let failedRunStep = "";
 let firstResultRevealed = false;
@@ -69,6 +206,7 @@ let assistantAgentStreamActive = false;
 let assistantAgentStreamAutoOpened = false;
 let assistantAgentTypewriterTimers = new Map();
 let assistantStateSaveTimer = 0;
+let assistantStreamRenderFrame = 0;
 
 const agentSteps = ["resume_agent", "transcript_agent", "profile", "matching", "path", "outputs"];
 const moduleLocks = {
@@ -469,6 +607,7 @@ function setRunDone() {
   }
   failedRunStep = "";
   matchingRequestInFlight = false;
+  pathRequestInFlight = false;
   document.querySelector("#runStatus").textContent = "诊断已生成";
   setRunDetail("诊断完成，可以查看和导出结果。", { immediate: true });
   document.querySelector(".generation-dock").classList.remove("is-running");
@@ -481,7 +620,7 @@ function setRunDone() {
 }
 
 function canMarkRunDone() {
-  if (benchmarkRequestInFlight || matchingRequestInFlight || failedRunStep) return false;
+  if (benchmarkRequestInFlight || matchingRequestInFlight || pathRequestInFlight || failedRunStep) return false;
   const allStepsDone = agentSteps.every((step) => document.querySelector(`[data-run-step="${step}"]`)?.classList.contains("is-done"));
   return allStepsDone && moduleLocks.profile && moduleLocks.matching && moduleLocks.path && moduleLocks.outputs;
 }
@@ -573,6 +712,7 @@ function nextIncompleteRunStepDetail() {
 }
 
 function setRunFailed(message) {
+  pathRequestInFlight = false;
   document.querySelector("#runStatus").textContent = "诊断失败";
   setRunDetail(message || "Legato 必需解析失败，请检查材料或后端服务。", { immediate: true });
   document.querySelector(".generation-dock").classList.remove("is-running");
@@ -1286,6 +1426,10 @@ function retryFromFailedStep(step) {
     retryJobMatching();
     return;
   }
+  if (step === "path") {
+    retryPathPlanning();
+    return;
+  }
   showToast("该失败阶段暂不支持局部继续，请重新生成诊断。");
 }
 
@@ -1294,6 +1438,7 @@ function resetResultModules() {
   currentJobId = "";
   benchmarkRequestInFlight = false;
   matchingRequestInFlight = false;
+  pathRequestInFlight = false;
   firstResultRevealed = false;
   Object.keys(moduleLocks).forEach((module) => {
     moduleLocks[module] = false;
@@ -2140,13 +2285,14 @@ function setMatchingRunFailed(errorMessage = "") {
 
 function setPathRunFailed(errorMessage = "") {
   failedRunStep = "path";
+  pathRequestInFlight = false;
   assistantAgentStreamActive = false;
   markAgentStep("path", "failed");
-  setRunStepRetryable("path", false);
+  setRunStepRetryable("path", true);
   document.querySelector("#runStatus").textContent = "失败：路径规划";
   setRunDetail(errorMessage
-    ? `Path Planning 失败：${errorMessage}。岗位匹配结果已保留。`
-    : "Path Planning 失败，路径规划模块未生成，岗位匹配结果已保留。", { immediate: true });
+    ? `Path Planning 失败：${errorMessage}。岗位匹配结果已保留，点击下方红色“路径”继续。`
+    : "Path Planning 失败，路径规划模块未生成，岗位匹配结果已保留。点击下方红色“路径”从失败处继续。", { immediate: true });
   markAssistantPathPlanningStreamsFailed(errorMessage
     ? `Path Planning 失败：${errorMessage}`
     : "Path Planning 失败，路径规划模块未生成。");
@@ -2280,6 +2426,7 @@ function retryJobMatching() {
   }
   if (matchingRequestInFlight) return;
   matchingRequestInFlight = true;
+  pathRequestInFlight = false;
   failedRunStep = "";
   assistantAgentStreamActive = false;
   setRunStepRetryable("matching", false);
@@ -2361,6 +2508,91 @@ function retryJobMatching() {
     .finally(() => {
       matchingRequestInFlight = false;
       if (baseJobDone && !failedRunStep) setRunDone();
+      updateAssistantContext();
+      renderAssistantSuggestions();
+    });
+}
+
+function retryPathPlanning() {
+  if (!currentJobId || !diagnosis?.matching_result) {
+    showToast("没有可继续的岗位匹配结果，请先完成岗位匹配。");
+    return;
+  }
+  if (!hasMeaningfulMatchingResult(diagnosis.matching_result)) {
+    showToast("岗位匹配结果尚未完成，暂不能启动路径规划。");
+    return;
+  }
+  if (pathRequestInFlight) return;
+  pathRequestInFlight = true;
+  failedRunStep = "";
+  assistantAgentStreamActive = false;
+  setRunStepRetryable("path", false);
+  document.querySelector(`[data-run-step="path"]`)?.classList.remove("is-done", "is-failed");
+  document.querySelector(`[data-run-step="outputs"]`)?.classList.remove("is-done", "is-failed");
+  markAgentStep("path", "running");
+  unlockModule("matching");
+  lockModule("path");
+  lockModule("outputs");
+  document.querySelector("#runStatus").textContent = "生成中";
+  setRunDetail("正在从路径规划继续，Legato Path Planning Team 正在重新生成阶段目标和周任务。", { immediate: true });
+  document.querySelector(".generation-dock").classList.add("is-running");
+  runButton.disabled = true;
+  runButton.textContent = "生成中";
+
+  fetch(`/api/diagnosis/${encodeURIComponent(currentJobId)}/path`, {
+    method: "POST"
+  })
+    .then((response) => {
+      if (!response.ok) {
+        const error = new Error("Path Planning request failed");
+        error.status = response.status;
+        throw error;
+      }
+      return response.json();
+    })
+    .then((payload) => {
+      diagnosis = diagnosis || createDiagnosisShell();
+      if (payload.ability_profile) {
+        diagnosis.ability_profile = payload.ability_profile;
+        renderBasicInfo(diagnosis);
+        renderAbilityRadar(payload.ability_profile);
+        renderResumeEvidence(payload.ability_profile);
+      }
+      if (payload.matching_result) {
+        diagnosis.matching_result = payload.matching_result;
+        renderMatching(payload.matching_result);
+      }
+      if (payload.top_jobs) {
+        diagnosis.ability_profile.top5_matching_jobs = payload.top_jobs;
+        renderTopJobs(payload.top_jobs);
+      }
+      if (payload.production_limitations) {
+        diagnosis.production_limitations = payload.production_limitations;
+        renderLimitations(payload.production_limitations);
+      }
+      if (payload.path_error || payload.error) {
+        setPathRunFailed(payload.path_error || payload.error);
+        return;
+      }
+      if (!hasReadyPathPlan(payload.path_plan, diagnosis.matching_result)) {
+        setPathRunFailed("Path Planning 未返回有效阶段目标。");
+        return;
+      }
+      diagnosis.path_plan = payload.path_plan;
+      renderPath(payload.path_plan);
+      finalizePathPlanningStreamFromPathPayload(payload);
+      completeRunStepsThrough("path");
+      unlockModule("path");
+      markAgentStep("outputs", "done");
+      unlockModule("outputs");
+      setRunDone();
+    })
+    .catch((error) => {
+      setPathRunFailed(error?.status === 409 ? "岗位匹配尚未完成，暂不能重跑路径规划" : "");
+    })
+    .finally(() => {
+      pathRequestInFlight = false;
+      if (!failedRunStep && canMarkRunDone()) setRunDone();
       updateAssistantContext();
       renderAssistantSuggestions();
     });
@@ -3607,13 +3839,13 @@ function renderPath(plan) {
                   <span class="task-week">${escapeHTML(week.week || "本周")}</span>
                   <strong>${escapeHTML(week.task || "等待任务")}</strong>
                   <b>${escapeHTML(priority)}</b>
-                  ${renderResultChatButton("path_task", index, week.task || "周任务", weekIndex)}
                 </summary>
                 <div class="task-detail">
                   <span>达标指标</span>
                   <p>${escapeHTML(week.metric || "等待达标指标")}</p>
                 </div>
               </details>
+              ${renderResultChatButton("path_task", index, week.task || "周任务", weekIndex)}
             </li>
             `;
           }).join("")}
@@ -3772,7 +4004,7 @@ function setupExports() {
       downloadJSON("ability-profile.json", diagnosis.ability_profile);
     }
     if (type === "profile-xlsx") {
-      window.location.href = "/api/export/ability-profile.xlsx";
+      window.location.href = diagnosisExportURL("ability-profile.xlsx", "/api/export/ability-profile.xlsx");
     }
     if (type === "profile-pdf") {
       printSectionAsPDF("profile", "能力画像");
@@ -3787,12 +4019,17 @@ function setupExports() {
       downloadJSON("path-plan.json", diagnosis.path_plan);
     }
     if (type === "path-doc") {
-      window.location.href = "/api/export/path-plan.doc";
+      window.location.href = diagnosisExportURL("path-plan.doc", "/api/export/path-plan.doc");
     }
     if (type === "path-pdf") {
       printSectionAsPDF("path", "路径规划");
     }
   });
+}
+
+function diagnosisExportURL(filename, fallback) {
+  if (!currentJobId) return fallback;
+  return `/api/diagnosis/${encodeURIComponent(currentJobId)}/export/${encodeURIComponent(filename)}`;
 }
 
 function setupAssistant() {
@@ -5603,7 +5840,9 @@ function renderAssistantSuggestions() {
   const suggestions = isAssistantReady() ? [
     "优先补哪项能力？",
     "首位岗位为什么匹配？",
-    "本周行动清单"
+    "本周行动清单",
+    "显示路径规划 schema",
+    "把路径任务改得更偏前端求职"
   ] : [];
   assistantSuggestions.innerHTML = suggestions.map((text) => `
     <button type="button" data-suggestion="${escapeAttribute(text)}">${escapeHTML(text)}</button>
@@ -5625,7 +5864,7 @@ function updateAssistantInputMeta() {
   const ready = isAssistantReady();
   const inspectable = isAssistantInspectable();
   assistantInput.placeholder = ready
-    ? "追问能力短板、岗位理由或任务优先级"
+    ? "追问、请求 schema 或修改当前结果"
     : inspectable ? "可先编辑问题，诊断完成后发送" : "诊断完成后可追问";
   assistantInputMeta.textContent = ready
     ? length ? `${length}/${assistantPromptLimit}` : `最多 ${assistantPromptLimit} 字`
@@ -5687,13 +5926,32 @@ async function sendAssistantMessage(promptOverride = "", focusedContextsOverride
   saveAssistantState();
   renderAssistant();
 
+  let streamedAnswer = "";
   try {
-    const answer = await requestAssistantAnswer(session, prompt, focusedContexts);
+    const response = await requestAssistantAnswer(session, prompt, focusedContexts, {
+      onStatus(message) {
+        const loading = session.messages.find((item) => item.id === loadingID);
+        if (!loading || streamedAnswer) return;
+        loading.content = message || "Legato Chat workflow 正在生成回答。";
+        loading.status = "loading";
+        scheduleAssistantStreamRender();
+      },
+      onDelta(delta) {
+        const loading = session.messages.find((item) => item.id === loadingID);
+        if (!loading || !delta) return;
+        streamedAnswer += delta;
+        loading.content = streamedAnswer;
+        loading.status = "loading";
+        scheduleAssistantStreamRender();
+      }
+    });
+    const uiResult = applyAssistantUIIntent(response.chat);
     const loading = session.messages.find((message) => message.id === loadingID);
     if (loading) {
-      loading.content = answer || "模型没有返回可用内容。";
+      loading.content = assistantAnswerWithUIResult(response.answer, uiResult) || "模型没有返回可用内容。";
       loading.status = "done";
       loading.retryPrompt = "";
+      loading.uiResult = uiResult;
     }
   } catch (error) {
     const loading = session.messages.find((message) => message.id === loadingID);
@@ -5722,25 +5980,336 @@ async function retryAssistantMessage(messageID) {
   await sendAssistantMessage(message.retryPrompt, retryContexts);
 }
 
-async function requestAssistantAnswer(session, prompt, focusedContexts = null) {
+async function requestAssistantAnswer(session, prompt, focusedContexts = null, streamHandlers = {}) {
   assistantAbort = new AbortController();
   const timeout = window.setTimeout(() => assistantAbort.abort(), 70000);
   try {
-    const payload = await fetchJSON("/api/chat", {
+    const response = await fetch("/api/chat?stream=1", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
       body: JSON.stringify({
         question: prompt,
         diagnosis: assistantContextForModel({ focusedContexts }),
+        ui_schema_catalog: assistantUISchemaCatalog(),
         history: assistantHistoryForModel(session, prompt)
       }),
       signal: assistantAbort.signal
     });
-    return String(payload.answer || payload.chat?.answer || "").trim();
+    if (!response.ok) {
+      const text = await response.text();
+      let data = {};
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        data = {};
+      }
+      const error = new Error(data.error || data.message || `http_${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
+    const contentType = response.headers.get("Content-Type") || "";
+    const payload = response.body && contentType.toLowerCase().includes("text/event-stream")
+      ? await readAssistantChatStream(response.body, streamHandlers)
+      : await response.json();
+    return {
+      answer: String(payload.answer || payload.chat?.answer || "").trim(),
+      chat: payload.chat && typeof payload.chat === "object" ? payload.chat : {},
+      raw: payload
+    };
   } finally {
     window.clearTimeout(timeout);
     assistantAbort = null;
   }
+}
+
+async function readAssistantChatStream(body, handlers = {}) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let donePayload = null;
+  for (;;) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    const events = buffer.split(/\n\n/);
+    buffer = events.pop() || "";
+    for (const rawEvent of events) {
+      const payload = consumeAssistantChatStreamEvent(rawEvent, handlers);
+      if (payload) donePayload = payload;
+    }
+    if (done) break;
+  }
+  if (buffer.trim()) {
+    const payload = consumeAssistantChatStreamEvent(buffer, handlers);
+    if (payload) donePayload = payload;
+  }
+  if (!donePayload) throw new Error("chat_stream_incomplete");
+  return donePayload;
+}
+
+function consumeAssistantChatStreamEvent(rawEvent, handlers = {}) {
+  const normalized = String(rawEvent || "").replace(/\r/g, "");
+  if (!normalized.trim()) return null;
+  let event = "message";
+  const dataLines = [];
+  normalized.split("\n").forEach((line) => {
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+  });
+  if (!dataLines.length) return null;
+  let payload = {};
+  try {
+    payload = JSON.parse(dataLines.join("\n"));
+  } catch {
+    throw new Error("chat_stream_invalid_json");
+  }
+  if (event === "chat.status") {
+    handlers.onStatus?.(String(payload.message || ""));
+    return null;
+  }
+  if (event === "chat.chunk") {
+    handlers.onDelta?.(String(payload.delta || ""));
+    return null;
+  }
+  if (event === "chat.error") {
+    throw new Error(String(payload.error || "chat_stream_failed"));
+  }
+  if (event === "chat.done") {
+    return payload;
+  }
+  return null;
+}
+
+function scheduleAssistantStreamRender() {
+  if (assistantStreamRenderFrame) return;
+  assistantStreamRenderFrame = window.requestAnimationFrame(() => {
+    assistantStreamRenderFrame = 0;
+    renderAssistantMessages({ stickToBottom: true });
+  });
+}
+
+function assistantUISchemaCatalog() {
+  return Object.fromEntries(Object.entries(assistantEditableTargets).map(([target, config]) => [
+    target,
+    {
+      target,
+      label: config.label,
+      roots: config.roots,
+      description: config.description,
+      schema: config.schema,
+      current_value: assistantEditableCurrentValue(target)
+    }
+  ]));
+}
+
+function assistantEditableCurrentValue(target) {
+  const profile = diagnosis?.ability_profile || {};
+  switch (target) {
+    case "basic":
+      return deepCloneJSON(profile.basic_info || {});
+    case "education":
+      return deepCloneJSON(Array.isArray(profile.education) ? profile.education : []);
+    case "awards":
+      return deepCloneJSON(Array.isArray(profile.awards) ? profile.awards.slice(0, 24) : []);
+    case "experiences":
+      return deepCloneJSON(Array.isArray(profile.experiences) ? profile.experiences.slice(0, 24) : []);
+    case "profile_radar":
+      return deepCloneJSON({
+        radar_data: profile.radar_data || [],
+        radar_series: profile.radar_series || []
+      });
+    case "matching":
+      return deepCloneJSON(diagnosis?.matching_result || {});
+    case "path_plan":
+      return deepCloneJSON(diagnosis?.path_plan || {});
+    case "top_jobs":
+      return deepCloneJSON(Array.isArray(profile.top5_matching_jobs) ? profile.top5_matching_jobs : []);
+    default:
+      return null;
+  }
+}
+
+function applyAssistantUIIntent(chat) {
+  const intent = normalizeAssistantUIIntent(chat?.ui_intent);
+  if (!intent || intent.mode === "none") return { status: "none", applied: 0, message: "" };
+  const targetConfig = assistantEditableTargets[intent.target];
+  if (!targetConfig) {
+    return { status: "blocked", applied: 0, message: "未识别可编辑区域。" };
+  }
+  if (intent.mode === "show_schema") {
+    return {
+      status: "schema",
+      applied: 0,
+      message: `${targetConfig.label} schema 已返回。`,
+      target: intent.target
+    };
+  }
+  if (intent.mode !== "update_result") return { status: "none", applied: 0, message: "" };
+  if (!diagnosis) {
+    return { status: "blocked", applied: 0, message: "当前没有可修改的诊断结果。" };
+  }
+  const patches = intent.patches.filter((patch) => isAssistantPatchAllowed(intent.target, patch));
+  if (!patches.length) {
+    return { status: "blocked", applied: 0, message: "模型没有返回可安全应用的修改。" };
+  }
+  const draft = deepCloneJSON(diagnosis);
+  try {
+    patches.forEach((patch) => applyJSONPatchOperation(draft, patch));
+  } catch (error) {
+    return { status: "blocked", applied: 0, message: `修改未应用：${error.message || "patch 失败"}` };
+  }
+  diagnosis = ensureDiagnosisShape(draft);
+  renderDiagnosis(diagnosis);
+  updateAssistantContext();
+  renderAssistantSuggestions();
+  const message = intent.summary || `${targetConfig.label}已更新 ${patches.length} 处。`;
+  showToast(message);
+  return {
+    status: "applied",
+    applied: patches.length,
+    message,
+    target: intent.target
+  };
+}
+
+function normalizeAssistantUIIntent(value) {
+  if (!value || typeof value !== "object") return null;
+  const mode = cleanDisplayText(value.mode || "none");
+  const target = cleanDisplayText(value.target || "none");
+  if (!["none", "show_schema", "update_result"].includes(mode)) return null;
+  if (target !== "none" && !assistantEditableTargets[target]) return null;
+  const patches = Array.isArray(value.patches)
+    ? value.patches.slice(0, 40).map((patch) => normalizeAssistantPatch(patch, target)).filter(Boolean)
+    : [];
+  const schema = value.schema && typeof value.schema === "object" && !Array.isArray(value.schema) ? value.schema : {};
+  return {
+    mode,
+    target,
+    patches,
+    schema,
+    summary: cleanDisplayText(value.summary || "").slice(0, 500)
+  };
+}
+
+function normalizeAssistantPatch(value, target = "") {
+  if (!value || typeof value !== "object") return null;
+  const op = cleanDisplayText(value.op);
+  const path = normalizeAssistantPatchPath(target, cleanDisplayText(value.path));
+  if (!["add", "replace", "remove"].includes(op) || !path.startsWith("/") || path.length > 240) return null;
+  if (op !== "remove" && !Object.prototype.hasOwnProperty.call(value, "value")) return null;
+  const patch = { op, path };
+  if (op !== "remove" && Object.prototype.hasOwnProperty.call(value, "value")) {
+    patch.value = deepCloneJSON(value.value);
+  }
+  return patch;
+}
+
+function normalizeAssistantPatchPath(target, path) {
+  if (!path) return "";
+  let cleanPath = path.startsWith("/") ? path : `/${path}`;
+  if (cleanPath.startsWith("/diagnosis/")) cleanPath = cleanPath.slice("/diagnosis".length);
+  const config = assistantEditableTargets[target];
+  if (!config || target === "none") return cleanPath;
+  if (config.roots.some((root) => cleanPath === root || cleanPath.startsWith(`${root}/`))) {
+    return cleanPath;
+  }
+  const root = config.roots[0];
+  if (!root) return cleanPath;
+  if (cleanPath === "/") return root;
+  return `${root}${cleanPath}`;
+}
+
+function isAssistantPatchAllowed(target, patch) {
+  const config = assistantEditableTargets[target];
+  if (!config || !patch) return false;
+  const parts = parseJSONPointer(patch.path);
+  if (!parts || parts.some((part) => ["__proto__", "prototype", "constructor"].includes(part))) return false;
+  return config.roots.some((root) => patch.path === root || patch.path.startsWith(`${root}/`));
+}
+
+function applyJSONPatchOperation(root, patch) {
+  const parts = parseJSONPointer(patch.path);
+  if (!parts || parts.length === 0) throw new Error("patch path 无效");
+  const key = parts.at(-1);
+  const parent = resolveJSONPointerParent(root, parts);
+  if (Array.isArray(parent)) {
+    applyArrayPatch(parent, key, patch);
+    return;
+  }
+  if (!parent || typeof parent !== "object") throw new Error("patch 父节点不存在");
+  if (patch.op === "remove") {
+    if (!Object.prototype.hasOwnProperty.call(parent, key)) throw new Error("remove 路径不存在");
+    delete parent[key];
+    return;
+  }
+  parent[key] = deepCloneJSON(patch.value);
+}
+
+function resolveJSONPointerParent(root, parts) {
+  let cursor = root;
+  for (const part of parts.slice(0, -1)) {
+    if (Array.isArray(cursor)) {
+      const index = Number(part);
+      if (!Number.isInteger(index) || index < 0 || index >= cursor.length) throw new Error("数组路径不存在");
+      cursor = cursor[index];
+    } else if (cursor && typeof cursor === "object") {
+      if (!Object.prototype.hasOwnProperty.call(cursor, part)) throw new Error("对象路径不存在");
+      cursor = cursor[part];
+    } else {
+      throw new Error("patch 路径不存在");
+    }
+  }
+  return cursor;
+}
+
+function applyArrayPatch(parent, key, patch) {
+  const index = key === "-" ? parent.length : Number(key);
+  if (!Number.isInteger(index) || index < 0 || index > parent.length) throw new Error("数组索引无效");
+  if (patch.op === "add") {
+    parent.splice(index, 0, deepCloneJSON(patch.value));
+    return;
+  }
+  if (index >= parent.length) throw new Error("数组索引不存在");
+  if (patch.op === "remove") {
+    parent.splice(index, 1);
+    return;
+  }
+  parent[index] = deepCloneJSON(patch.value);
+}
+
+function parseJSONPointer(path) {
+  if (typeof path !== "string" || !path.startsWith("/")) return null;
+  return path.slice(1).split("/").map((part) => part.replace(/~1/g, "/").replace(/~0/g, "~"));
+}
+
+function ensureDiagnosisShape(value) {
+  const shell = createDiagnosisShell();
+  const next = value && typeof value === "object" ? value : {};
+  return {
+    ...shell,
+    ...next,
+    ability_profile: { ...shell.ability_profile, ...(next.ability_profile || {}) },
+    matching_result: { ...shell.matching_result, ...(next.matching_result || {}) },
+    path_plan: { ...shell.path_plan, ...(next.path_plan || {}) },
+    backend_requirements: Array.isArray(next.backend_requirements) ? next.backend_requirements : shell.backend_requirements,
+    production_limitations: Array.isArray(next.production_limitations) ? next.production_limitations : shell.production_limitations
+  };
+}
+
+function assistantAnswerWithUIResult(answer, result) {
+  const cleanAnswer = cleanDisplayText(answer);
+  if (!result || result.status === "none") return cleanAnswer;
+  if (result.status === "applied") {
+    return [cleanAnswer, `界面已更新：${result.message}`].filter(Boolean).join(" ");
+  }
+  if (result.status === "blocked") {
+    return [cleanAnswer, `界面未更新：${result.message}`].filter(Boolean).join(" ");
+  }
+  return cleanAnswer;
+}
+
+function deepCloneJSON(value) {
+  if (typeof structuredClone === "function") return structuredClone(value);
+  return JSON.parse(JSON.stringify(value ?? null));
 }
 
 async function fetchJSON(url, options) {

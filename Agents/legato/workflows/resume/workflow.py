@@ -7,6 +7,8 @@ from typing import Callable
 
 
 FieldRunner = Callable[[str, str], str]
+DEFAULT_WORKFLOW_WORKERS = 30
+MAX_WORKFLOW_WORKERS = 500
 
 
 class JsonRetryError(RuntimeError):
@@ -23,14 +25,14 @@ class FieldResult:
 class ResumeWorkflow:
     fields = ("name", "birth_year")
 
-    def __init__(self, runner: FieldRunner, *, max_retries: int = 5, max_workers: int = 8) -> None:
+    def __init__(self, runner: FieldRunner, *, max_retries: int = 5, max_workers: int = DEFAULT_WORKFLOW_WORKERS) -> None:
         if max_retries < 1:
             raise ValueError("max_retries must be >= 1")
         if max_workers < 1:
             raise ValueError("max_workers must be >= 1")
         self.runner = runner
         self.max_retries = max_retries
-        self.max_workers = max_workers
+        self.max_workers = min(max_workers, MAX_WORKFLOW_WORKERS)
 
     def run(self, resume_text: str) -> dict[str, str | int]:
         workers = min(self.max_workers, len(self.fields))
@@ -61,4 +63,3 @@ class ResumeWorkflow:
         raise JsonRetryError(
             f"{field} did not return valid JSON after {self.max_retries} attempts"
         ) from last_error
-

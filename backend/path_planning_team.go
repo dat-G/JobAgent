@@ -12,7 +12,7 @@ import (
 
 const pathPlanningTeamName = "Legato Path Planning Team"
 const minPlannedPathAgents = 3
-const maxPlannedPathAgents = 5
+const maxPlannedPathAgents = 500
 
 type pathPlanningAgentPlan struct {
 	Complexity      string                    `json:"complexity"`
@@ -215,7 +215,7 @@ Return strict JSON only:
 }
 Rules:
 - You run only after Job Matching is complete. Use selected_job, report_sections, gap_details and development_actions as required inputs.
-- Return 3 to 5 agents.
+- Return 3 to 500 agents.
 - Required perspectives: stage_goal, weekly_tasks, acceptance.
 - Add evidence_delivery when proof gaps or weak evidence exist. Add schedule_risk for complex or high-risk plans.
 - The plan must lead to a rendered PathPlan containing 阶段目标、周任务、达标标准.

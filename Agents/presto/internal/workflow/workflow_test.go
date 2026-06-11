@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -181,6 +182,53 @@ func TestParallelMaxConcurrency(t *testing.T) {
 	}
 	if maxActive > 2 {
 		t.Fatalf("max active branches = %d, want <= 2", maxActive)
+	}
+}
+
+func TestParallelDefaultConcurrencyCapsAtFiveHundred(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var mu sync.Mutex
+	active := 0
+	maxActive := 0
+	makeRunner := func(name string) *agent.Runner {
+		return testRunner(t, testProviderFunc(func(_ context.Context, _ agent.ChatRequest) (agent.ChatResponse, error) {
+			mu.Lock()
+			active++
+			if active > maxActive {
+				maxActive = active
+			}
+			mu.Unlock()
+
+			time.Sleep(20 * time.Millisecond)
+
+			mu.Lock()
+			active--
+			mu.Unlock()
+			return agent.ChatResponse{Message: agent.Message{Content: name + " done"}}, nil
+		}))
+	}
+
+	nodes := make([]Node, 505)
+	for index := range nodes {
+		name := "branch-" + strconv.Itoa(index)
+		nodes[index] = Agent(name, makeRunner(name))
+	}
+	wf, err := New(Parallel(nodes...))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := wf.Run(ctx, "limit default fanout", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Results) != len(nodes) {
+		t.Fatalf("results = %d, want %d", len(state.Results), len(nodes))
+	}
+	if maxActive > maxParallelNodeConcurrency {
+		t.Fatalf("max active branches = %d, want <= %d", maxActive, maxParallelNodeConcurrency)
 	}
 }
 

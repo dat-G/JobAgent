@@ -48,6 +48,11 @@ func TestItemBenchmarkMaxRequestsUsesEnv(t *testing.T) {
 	if got := itemBenchmarkMaxRequests(); got != 3 {
 		t.Fatalf("expected env max requests 3, got %d", got)
 	}
+
+	t.Setenv("ITEM_BENCHMARK_MAX_REQUESTS", "600")
+	if got := itemBenchmarkMaxRequests(); got != maxItemBenchmarkMaxRequests {
+		t.Fatalf("expected capped max requests %d, got %d", maxItemBenchmarkMaxRequests, got)
+	}
 }
 
 func TestItemBenchmarkBatchWorkersUsesEnvAndCaps(t *testing.T) {
@@ -56,7 +61,7 @@ func TestItemBenchmarkBatchWorkersUsesEnvAndCaps(t *testing.T) {
 		t.Fatalf("expected env batch workers 3, got %d", got)
 	}
 
-	t.Setenv("ITEM_BENCHMARK_BATCH_WORKERS", "12")
+	t.Setenv("ITEM_BENCHMARK_BATCH_WORKERS", "600")
 	if got := itemBenchmarkBatchWorkers(); got != maxItemBenchmarkBatchWorkers {
 		t.Fatalf("expected capped batch workers %d, got %d", maxItemBenchmarkBatchWorkers, got)
 	}

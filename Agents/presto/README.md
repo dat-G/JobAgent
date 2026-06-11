@@ -87,7 +87,7 @@ wf, err := workflow.New(workflow.Sequence(
 ))
 ```
 
-`Parallel` runs branches concurrently with goroutines and fan-in preserves branch declaration order for deterministic downstream prompts. Use a limit when needed:
+`Parallel` runs branches concurrently with goroutines and fan-in preserves branch declaration order for deterministic downstream prompts. Default and explicit branch concurrency are capped at 500. Use a lower limit when needed:
 
 ```go
 workflow.Parallel(a, b, c).With(workflow.WithMaxConcurrency(2))

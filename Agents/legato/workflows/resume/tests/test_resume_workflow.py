@@ -43,6 +43,15 @@ class ResumeWorkflowTest(unittest.TestCase):
         self.assertEqual(workflow.run(""), {"name": "陈曦", "birth_year": 2002})
         self.assertGreaterEqual(max_active, 2)
 
+    def test_max_workers_caps_at_five_hundred(self) -> None:
+        def runner(field: str, resume_text: str) -> str:
+            if field == "name":
+                return '{"name":"陈曦"}'
+            return '{"birth_year":2002}'
+
+        workflow = ResumeWorkflow(runner, max_retries=5, max_workers=999)
+        self.assertEqual(workflow.max_workers, 500)
+
     def test_retries_non_json_output_up_to_five_attempts(self) -> None:
         attempts: dict[str, int] = {"name": 0, "birth_year": 0}
 

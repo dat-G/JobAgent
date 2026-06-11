@@ -97,6 +97,46 @@ CHAT_SCHEMA = {
                 "evidence_refs": {"type": "array", "items": {"type": "string"}},
                 "missing_evidence": {"type": "array", "items": {"type": "string"}},
                 "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "ui_intent": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["mode", "target", "patches", "schema", "summary"],
+                    "properties": {
+                        "mode": {
+                            "type": "string",
+                            "enum": ["none", "show_schema", "update_result"],
+                        },
+                        "target": {
+                            "type": "string",
+                            "enum": [
+                                "none",
+                                "basic",
+                                "education",
+                                "awards",
+                                "experiences",
+                                "profile_radar",
+                                "matching",
+                                "path_plan",
+                                "top_jobs",
+                            ],
+                        },
+                        "patches": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["op", "path"],
+                                "properties": {
+                                    "op": {"type": "string", "enum": ["add", "replace", "remove"]},
+                                    "path": {"type": "string"},
+                                    "value": {},
+                                },
+                            },
+                        },
+                        "schema": {"type": "object"},
+                        "summary": {"type": "string"},
+                    },
+                },
             },
         },
     },

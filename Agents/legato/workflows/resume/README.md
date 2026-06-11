@@ -98,6 +98,8 @@ profile agent ----------------\
 certifications_awards agent --+-- local school tags + local experience -> merge -> validate -> JSON
 ```
 
+Workflow worker concurrency defaults to 30 and is capped at 500 for both full workflow and stage-level item benchmark requests.
+
 `certifications_awards` does not receive the full resume by default. It first uses a broad keyword recall step and keeps matched lines plus nearby context. If the recalled candidate text is too short, it falls back to the full resume.
 
 Experience is generated locally in the first version to avoid an extra high-latency model request. It uses resume text plus `certifications_awards` to produce work/project, contest, and campus-role entries.
@@ -122,7 +124,7 @@ No contact extraction in this workflow version.
 
 ## Item Benchmark
 
-`--workflow-stage item_benchmark` benchmarks evidence items concurrently through Presto.
+`--workflow-stage item_benchmark` benchmarks evidence items concurrently through Presto, with stage-level workers capped at 500.
 The recommended production path is to run it after `experience_hybrid`, with caller-assembled items passed by `--workflow-stage-input`.
 If no input file is provided, it falls back to extracting `certifications_awards` first for CLI compatibility.
 Each item request includes an education context summary: school, degree level, major, and research direction lines when present.

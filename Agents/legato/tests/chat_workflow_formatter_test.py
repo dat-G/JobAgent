@@ -92,6 +92,78 @@ class ChatWorkflowFormatterTest(unittest.TestCase):
         self.assertEqual(result.data["chat"]["conclusion"], "先选证据最强的岗位。")
         self.assertEqual(result.debug["agents"]["answer"]["retry_count"], 1)
 
+    def test_answer_can_return_schema_intent(self) -> None:
+        formatter = ChatWorkflowFormatter(
+            max_retries=1,
+            stage_input={
+                "question": "给我路径规划 schema",
+                "ui_schema_catalog": {
+                    "path_plan": {
+                        "roots": ["/path_plan"],
+                        "schema": {"type": "object", "fields": {"stages": "array"}},
+                    }
+                },
+            },
+        )
+
+        def fake_call(prompt: str, group: str) -> str:
+            self.assertIn("UI schema catalog JSON:", prompt)
+            self.assertIn("path_plan", prompt)
+            return json.dumps(
+                {
+                    "answer": "结论：路径规划 schema 如下。",
+                    "conclusion": "已返回路径规划 schema。",
+                    "actions": ["按 schema 指定要改的阶段"],
+                    "evidence_refs": ["ui_schema_catalog.path_plan"],
+                    "missing_evidence": [],
+                    "confidence": 0.9,
+                    "ui_intent": {
+                        "mode": "show_schema",
+                        "target": "path_plan",
+                        "patches": [],
+                        "schema": {"type": "object", "fields": {"stages": "array"}},
+                        "summary": "路径规划 schema 已返回。",
+                    },
+                },
+                ensure_ascii=False,
+            )
+
+        formatter._call_presto = fake_call  # type: ignore[method-assign]
+        result = formatter.format_stage("", "answer")
+        self.assertEqual(result.data["chat"]["ui_intent"]["mode"], "show_schema")
+        self.assertEqual(result.data["chat"]["ui_intent"]["target"], "path_plan")
+
+    def test_answer_can_return_update_patch_intent(self) -> None:
+        formatter = ChatWorkflowFormatter(max_retries=1, stage_input={"question": "把第一周任务改成补作品集"})
+
+        def fake_call(_prompt: str, _group: str) -> str:
+            return json.dumps(
+                {
+                    "answer": "结论：将更新第一周任务。",
+                    "conclusion": "准备更新路径任务。",
+                    "actions": ["刷新路径规划查看结果"],
+                    "evidence_refs": ["path_plan"],
+                    "missing_evidence": [],
+                    "confidence": 0.82,
+                    "ui_intent": {
+                        "mode": "update_result",
+                        "target": "path_plan",
+                        "patches": [
+                            {"op": "replace", "path": "/path_plan/stages/0/weeks/0/task", "value": "补作品集首页和项目说明"}
+                        ],
+                        "schema": {},
+                        "summary": "已准备更新路径规划第一周任务。",
+                    },
+                },
+                ensure_ascii=False,
+            )
+
+        formatter._call_presto = fake_call  # type: ignore[method-assign]
+        result = formatter.format_stage("", "answer")
+        patch = result.data["chat"]["ui_intent"]["patches"][0]
+        self.assertEqual(patch["path"], "/path_plan/stages/0/weeks/0/task")
+        self.assertEqual(patch["value"], "补作品集首页和项目说明")
+
     def test_lightweight_chat_workflow_retries_json(self) -> None:
         outputs = iter(
             [
@@ -112,6 +184,31 @@ class ChatWorkflowFormatterTest(unittest.TestCase):
         workflow = ChatWorkflow(lambda _context: next(outputs), max_retries=2)
         result = workflow.run_with_meta({"question": "能问什么？"})
         self.assertEqual(result.attempts, 2)
+
+    def test_lightweight_chat_workflow_accepts_ui_intent(self) -> None:
+        workflow = ChatWorkflow(
+            lambda _context: json.dumps(
+                {
+                    "answer": "结论：已准备修改。",
+                    "conclusion": "准备修改。",
+                    "actions": ["查看界面"],
+                    "evidence_refs": ["matching"],
+                    "missing_evidence": [],
+                    "confidence": 0.8,
+                    "ui_intent": {
+                        "mode": "update_result",
+                        "target": "matching",
+                        "patches": [{"op": "replace", "path": "/matching_result/match_level", "value": "需补强"}],
+                        "schema": {},
+                        "summary": "匹配结论已准备更新。",
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            max_retries=1,
+        )
+        result = workflow.run_with_meta({"question": "改一下匹配结论"})
+        self.assertEqual(result.data["ui_intent"]["target"], "matching")
 
     def test_lightweight_chat_workflow_fails_after_retries(self) -> None:
         workflow = ChatWorkflow(lambda _context: "bad", max_retries=2)

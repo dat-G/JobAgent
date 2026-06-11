@@ -12,6 +12,9 @@ from typing import Any
 from .formatter import PrestoFormatter, extract_json_object
 from .model_routing import load_model_route
 
+DEFAULT_WORKFLOW_WORKERS = 30
+MAX_WORKFLOW_WORKERS = 500
+
 CERT_AWARD_KEYWORDS = (
     "证书",
     "考试",
@@ -133,13 +136,13 @@ class ResumeWorkflowFormatter:
         presto_url: str | None = None,
         timeout_seconds: float = 30,
         max_retries: int = 5,
-        max_workers: int = 8,
+        max_workers: int = DEFAULT_WORKFLOW_WORKERS,
         stage_input: dict[str, Any] | None = None,
         combine_agents: bool = False,
     ) -> None:
         self.presto = PrestoFormatter(presto_url, timeout_seconds=timeout_seconds)
         self.max_retries = max_retries
-        self.max_workers = max_workers
+        self.max_workers = max(1, min(max_workers, MAX_WORKFLOW_WORKERS))
         self.stage_input = stage_input or {}
         self.combine_agents = combine_agents
         self.prompts_dir = Path(__file__).resolve().parents[1] / "workflows" / "resume" / "prompts"
@@ -247,7 +250,7 @@ class ResumeWorkflowFormatter:
             )
         if stage == "item_benchmark":
             external_items = normalize_benchmark_input_items(self.stage_input.get("items"))
-            stage_max_workers = safe_int(self.stage_input.get("max_workers"), self.max_workers)
+            stage_max_workers = min(safe_int(self.stage_input.get("max_workers"), self.max_workers), MAX_WORKFLOW_WORKERS)
             agents: dict[str, dict[str, Any]] = {}
             if external_items:
                 items = external_items
@@ -478,7 +481,7 @@ class ResumeWorkflowFormatter:
         if not items:
             return {"items": [], "agents": agents}
 
-        worker_count = max(1, max_workers or self.max_workers)
+        worker_count = max(1, min(max_workers or self.max_workers, MAX_WORKFLOW_WORKERS))
         with ThreadPoolExecutor(max_workers=min(worker_count, max(1, len(items)))) as executor:
             futures = {
                 executor.submit(self._run_item_benchmark_with_retry, resume_text, item, index): index

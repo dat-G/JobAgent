@@ -36,7 +36,7 @@ JobAgent 是一套面向大学生求职准备和高校就业指导场景的 Agen
    - Major Baseline 为专业、学历和学业信号生成六维 academic prior。
 6. Go 后端统一聚合 `radar_data` 和 `radar_series`，前端不再自行计算画像分值。
 7. Benchmark 和 Major Baseline 完成后，后端启动 Legato Job Matching Team：
-   - Adaptive Planner 先判断复杂度并派生 3 到 6 个多视角 Agent。
+   - Adaptive Planner 先判断复杂度并派生 3 到 500 个多视角 Agent。
    - 多视角 Agent 并发分析能力、证据、学历门槛、岗位族和风险。
    - Synthesis Arbiter 汇总输出岗位匹配 JSON，后端校验雷达一致性。
 8. Job Matching 完成后，Path Planning Team 基于首选岗位、差距明细和发展动作生成成长路径。
@@ -247,7 +247,7 @@ Resume workflow 当前并发运行：
 
 Benchmark 阶段同时运行：
 
-1. Item Benchmark：证据按批并发，默认最多 5 个请求，每批默认 2 个 worker，可通过环境变量调整。
+1. Item Benchmark：证据按批并发，默认最多 30 个请求，每批默认 30 个 worker，可通过环境变量调整，最高均为 500。
 2. Major Baseline：根据专业、学校层级、学历和成绩单线索输出六维 academic prior。
 
 任意 Item Benchmark 批次返回后，后端会通过 SSE 更新对应证据卡片；Major Baseline 返回后补齐专业六维基线。二者全部完成后才允许 Job Matching。
@@ -257,7 +257,7 @@ Benchmark 阶段同时运行：
 Job Matching 是当前系统最完整的 Agentic 模块。流程如下：
 
 1. Adaptive Planner 读取学生画像、证据数量、专业基线、学历门槛、简历全文上下文和复杂度信号。
-2. Planner 输出受限 Agent plan，后端校验 3 到 6 个 Agent，最多 3 个并发 run。
+2. Planner 输出受限 Agent plan，后端校验 3 到 500 个 Agent，最多 500 个并发 run。
 3. 多视角 Agent 并发分析，必须覆盖 ability fit、evidence quality、education threshold、role family mapping；复杂案例可增加 growth potential、counterfactual risk、market 等视角。
 4. Synthesis Arbiter 汇总所有视角，输出严格 JSON：首选岗位、TOP5、匹配度、目标雷达、差距明细、推荐理由、发展动作。
 5. 后端校验输出：`student_radar` 必须与后端权威画像一致，`target_radar` 必须与首选岗位 requirement radar 一致；不合格会自动触发严格 JSON retry。
@@ -269,7 +269,7 @@ Job Matching 是当前系统最完整的 Agentic 模块。流程如下：
 路径规划只在岗位匹配完成后启动。流程为：
 
 1. Path Planner 基于 `selected_job`、`report_sections`、`gap_details` 和 `development_actions` 判断规划复杂度。
-2. Planner 派生 3 到 5 个路径规划 Agent，必需视角包括 `stage_goal`、`weekly_tasks`、`acceptance`；证据弱或风险高时增加 `evidence_delivery`、`schedule_risk`。
+2. Planner 派生 3 到 500 个路径规划 Agent，必需视角包括 `stage_goal`、`weekly_tasks`、`acceptance`；证据弱或风险高时增加 `evidence_delivery`、`schedule_risk`。
 3. 多 Agent 并发输出阶段建议、周任务、资源、guardrails。
 4. Path Synthesis Arbiter 合成为 2 到 4 个阶段，每阶段包含目标、3 到 5 个周任务、资源、达标标准和交付物。
 5. 后端规范化输出，过滤无效资源链接和不完整阶段。

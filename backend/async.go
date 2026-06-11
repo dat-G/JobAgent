@@ -25,8 +25,10 @@ const defaultDiagnosisTimeout = 120 * time.Second
 const defaultJobMatchingTimeout = 600 * time.Second
 const defaultPathPlanningTimeout = 600 * time.Second
 const defaultDiagnosisTempRetention = 2 * time.Hour
-const defaultItemBenchmarkBatchWorkers = 2
-const maxItemBenchmarkBatchWorkers = 4
+const defaultItemBenchmarkMaxRequests = 30
+const maxItemBenchmarkMaxRequests = 500
+const defaultItemBenchmarkBatchWorkers = 30
+const maxItemBenchmarkBatchWorkers = 500
 
 type JobStore struct {
 	seq  uint64
@@ -333,11 +335,69 @@ func (s Server) handleDiagnosisJob(w http.ResponseWriter, r *http.Request) {
 		s.handleDiagnosisMatching(w, job)
 		return
 	}
+	if len(parts) == 2 && parts[1] == "path" {
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, http.MethodPost)
+			return
+		}
+		s.handleDiagnosisPath(w, job)
+		return
+	}
+	if len(parts) == 3 && parts[1] == "export" {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, http.MethodGet)
+			return
+		}
+		handleDiagnosisExport(w, job, parts[2])
+		return
+	}
 	if len(parts) == 1 && r.Method == http.MethodGet {
 		writeJSON(w, http.StatusOK, job.Snapshot())
 		return
 	}
 	writeError(w, http.StatusNotFound, "diagnosis job not found")
+}
+
+func handleDiagnosisExport(w http.ResponseWriter, job *DiagnosisJob, name string) {
+	diagnosis := job.CurrentDiagnosis()
+	switch name {
+	case "ability-profile.json":
+		writeExportJSON(w, "ability-profile.json", diagnosis.AbilityProfile)
+	case "ability-profile.xlsx":
+		data, err := buildAbilityProfileXLSX(diagnosis.AbilityProfile)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Excel 导出失败")
+			return
+		}
+		w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+		w.Header().Set("Content-Disposition", `attachment; filename="ability-profile.xlsx"`)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+	case "path-plan.json":
+		writeExportJSON(w, "path-plan.json", diagnosis.PathPlan)
+	case "path-plan.doc":
+		doc := buildPathPlanDoc(diagnosis.PathPlan)
+		w.Header().Set("Content-Type", "application/msword; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="growth-path-plan.doc"`)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, doc)
+	case "matching-result.json":
+		writeExportJSON(w, "matching-result.json", diagnosis.MatchingResult)
+	default:
+		writeError(w, http.StatusNotFound, "diagnosis export not found")
+	}
+}
+
+func writeExportJSON(w http.ResponseWriter, filename string, value any) {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "JSON 导出失败")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
 }
 
 func streamDiagnosisEvents(w http.ResponseWriter, r *http.Request, job *DiagnosisJob) {
@@ -691,6 +751,15 @@ func (s Server) handleDiagnosisMatching(w http.ResponseWriter, job *DiagnosisJob
 	s.runJobMatchingStageAndWrite(w, job, diagnosis)
 }
 
+func (s Server) handleDiagnosisPath(w http.ResponseWriter, job *DiagnosisJob) {
+	diagnosis := job.CurrentDiagnosis()
+	if message := pathPlanningPrerequisiteError(diagnosis); message != "" {
+		writeError(w, http.StatusConflict, message)
+		return
+	}
+	s.runPathPlanningStageAndWrite(w, job, diagnosis)
+}
+
 func benchmarkPrerequisiteError(diagnosis Diagnosis) string {
 	profile := diagnosis.AbilityProfile
 	if !resumeProfileReady(profile) {
@@ -714,6 +783,29 @@ func matchingPrerequisiteError(diagnosis Diagnosis) string {
 		return "能力画像尚未完成 Benchmark 与 Major Baseline，暂不能启动岗位匹配"
 	}
 	return ""
+}
+
+func pathPlanningPrerequisiteError(diagnosis Diagnosis) string {
+	if !hasMeaningfulMatchingResult(diagnosis.MatchingResult) {
+		return "岗位匹配尚未完成，暂不能启动路径规划"
+	}
+	return ""
+}
+
+func hasMeaningfulMatchingResult(match MatchingResult) bool {
+	return strings.TrimSpace(match.TargetRole) != "" ||
+		strings.TrimSpace(match.Source) != "" ||
+		strings.TrimSpace(match.FitSummary) != "" ||
+		strings.TrimSpace(match.SelectedJob.Title) != "" ||
+		strings.TrimSpace(match.SelectedJob.FitSummary) != "" ||
+		match.OverallMatch > 0 ||
+		len(match.StudentRadar) > 0 ||
+		len(match.TargetRadar) > 0 ||
+		len(match.ReportSections) > 0 ||
+		len(match.GapDetails) > 0 ||
+		len(match.DevelopmentActions) > 0 ||
+		len(match.Recommendations) > 0 ||
+		len(match.Reasons) > 0
 }
 
 func resumeProfileReady(profile AbilityProfile) bool {
@@ -767,6 +859,10 @@ func (s Server) runJobMatchingStageAndWrite(w http.ResponseWriter, job *Diagnosi
 		return
 	}
 	diagnosis.ProductionLimitations = withoutJobMatchingFailureLimitations(diagnosis.ProductionLimitations)
+	s.runPathPlanningStageAndWrite(w, job, diagnosis)
+}
+
+func (s Server) runPathPlanningStageAndWrite(w http.ResponseWriter, job *DiagnosisJob, diagnosis Diagnosis) {
 	pathCtx, pathCancel := context.WithTimeout(context.Background(), pathPlanningTimeout())
 	defer pathCancel()
 	diagnosis, pathErr := s.runPathPlanningStage(pathCtx, job, diagnosis)
@@ -774,7 +870,7 @@ func (s Server) runJobMatchingStageAndWrite(w http.ResponseWriter, job *Diagnosi
 		log.Printf("diagnosis %s path planning failed: %v", job.ID, pathErr)
 		diagnosis.ProductionLimitations = addProductionLimitationOnce(
 			diagnosis.ProductionLimitations,
-			"Path Planning 失败，阶段目标、周任务和达标标准未生成，可稍后从岗位匹配后重新规划。",
+			"Path Planning 失败，阶段目标、周任务和达标标准未生成，可点击路径阶段继续或稍后重试。",
 		)
 		job.SetDiagnosis(diagnosis)
 		job.Emit(DiagnosisEvent{
@@ -1571,12 +1667,16 @@ func itemBenchmarkMaxRequests() int {
 		}
 		count, err := strconv.Atoi(value)
 		if err != nil || count <= 0 {
-			log.Printf("invalid %s=%q, using 5", key, value)
-			return 5
+			log.Printf("invalid %s=%q, using %d", key, value, defaultItemBenchmarkMaxRequests)
+			return defaultItemBenchmarkMaxRequests
+		}
+		if count > maxItemBenchmarkMaxRequests {
+			log.Printf("%s=%d exceeds max %d, using %d", key, count, maxItemBenchmarkMaxRequests, maxItemBenchmarkMaxRequests)
+			return maxItemBenchmarkMaxRequests
 		}
 		return count
 	}
-	return 5
+	return defaultItemBenchmarkMaxRequests
 }
 
 func itemBenchmarkBatchWorkers() int {

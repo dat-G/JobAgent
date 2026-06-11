@@ -718,7 +718,7 @@ func backendRequirements() []BackendRequirement {
 		{ID: "BR-01", Title: "材料上传与对象存储", Status: "not_started", Priority: "P0", Details: []string{"支持简历必传、成绩单可选、其他材料可选", "返回文件 ID、解析状态、可追踪错误", "限制文件类型、大小和病毒扫描策略"}},
 		{ID: "BR-02", Title: "简历结构化解析 API", Status: "partial_in_legato_cli", Priority: "P0", Details: []string{"把 Legato 简历 workflow 暴露为 HTTP API", "输出基础信息、教育、证书奖项、经历和置信度", "支持 PDF、DOCX、Markdown、图片 OCR 回退"}},
 		{ID: "BR-03", Title: "成绩单解析与课程能力映射", Status: "partial_ocr_blocked", Priority: "P0", Details: []string{"解析课程、学期、成绩、GPA 和专业课程分类", "将课程映射到岗位能力维度", "扫描版成绩单需要稳定 OCR 服务"}},
-		{ID: "BR-04", Title: "岗位能力模型与 JD 解析", Status: "partial_in_legato_presto_team", Priority: "P0", Details: []string{"已新增 Adaptive Planner 动态派生多视角 Presto Agent", "后端会校验 Planner 输出并限制 3 到 6 个 Agent、最多 3 个并发 run", "每个 Presto run 的事件流会转发到前端 chat 状态卡", "当前基于简历证据、六维能力和学历门槛推断岗位", "后续仍需接入真实岗位库、JD 数据源和地区过滤", "后续可扩展为粘贴 JD 的定向分析模式"}},
+		{ID: "BR-04", Title: "岗位能力模型与 JD 解析", Status: "partial_in_legato_presto_team", Priority: "P0", Details: []string{"已新增 Adaptive Planner 动态派生多视角 Presto Agent", "后端会校验 Planner 输出并限制 3 到 500 个 Agent、最多 500 个并发 run", "每个 Presto run 的事件流会转发到前端 chat 状态卡", "当前基于简历证据、六维能力和学历门槛推断岗位", "后续仍需接入真实岗位库、JD 数据源和地区过滤", "后续可扩展为粘贴 JD 的定向分析模式"}},
 		{ID: "BR-05", Title: "能力评分与雷达数据引擎", Status: "ready_in_backend", Priority: "P0", Details: []string{"Item Benchmark 生成证据级六维分布和 Impact", "Major Baseline 生成专业六维 prior", "Go 后端统一聚合学生最终六维画像与雷达 series", "Job Matching 使用同一画像生成岗位目标雷达和差距"}},
 		{ID: "BR-06", Title: "成长路径规划生成", Status: "partial_in_presto_team", Priority: "P1", Details: []string{"Job Matching 完成后启动 Legato Path Planning Team", "Path Planner 动态派生路径规划 Agent", "输出阶段目标、周任务、资源链接和达标标准", "根据学生短板和岗位权重调整优先级", "后续支持任务完成状态和再规划"}},
 		{ID: "BR-07", Title: "结构化导出服务", Status: "mock_in_gateway", Priority: "P1", Details: []string{"能力画像导出 JSON 和 Excel", "路径规划导出 PDF 和 Word", "匹配结果导出可视化报表"}},
@@ -729,8 +729,15 @@ func backendRequirements() []BackendRequirement {
 }
 
 func buildAbilityProfileXLSX(profile AbilityProfile) ([]byte, error) {
+	title := "能力画像"
+	if profile.BasicInfo.Name != "" {
+		title += " · " + profile.BasicInfo.Name
+	}
+	if profile.BasicInfo.TargetRole != "" {
+		title += " · 推荐岗位：" + profile.BasicInfo.TargetRole
+	}
 	rows := [][]string{
-		{"能力画像", "模拟数据"},
+		{title},
 		{"姓名", profile.BasicInfo.Name},
 		{"性别", profile.BasicInfo.Sex},
 		{"出生年份", profile.BasicInfo.BirthYear},
@@ -812,12 +819,17 @@ func buildAbilityProfileXLSX(profile AbilityProfile) ([]byte, error) {
 
 	var buffer bytes.Buffer
 	archive := zip.NewWriter(&buffer)
+	maxCols := maxRowColumns(rows)
+	if maxCols < 10 {
+		maxCols = 10
+	}
 	files := map[string]string{
 		"[Content_Types].xml":        contentTypesXML(),
 		"_rels/.rels":                rootRelsXML(),
-		"xl/workbook.xml":            workbookXML(),
+		"xl/workbook.xml":            workbookXML(maxCols, len(rows)),
 		"xl/_rels/workbook.xml.rels": workbookRelsXML(),
 		"xl/worksheets/sheet1.xml":   worksheetXML(rows),
+		"xl/styles.xml":              workbookStylesXML(),
 		"docProps/core.xml":          corePropsXML(),
 		"docProps/app.xml":           appPropsXML(),
 	}
@@ -839,55 +851,314 @@ func buildAbilityProfileXLSX(profile AbilityProfile) ([]byte, error) {
 func worksheetXML(rows [][]string) string {
 	var builder strings.Builder
 	builder.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`)
-	builder.WriteString(`<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>`)
+	maxCols := maxRowColumns(rows)
+	if maxCols < 10 {
+		maxCols = 10
+	}
+	builder.WriteString(`<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">`)
+	builder.WriteString(`<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>`)
+	builder.WriteString(fmt.Sprintf(`<dimension ref="A1:%s%d"/>`, columnName(maxCols), len(rows)))
+	builder.WriteString(`<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>`)
+	builder.WriteString(`<sheetFormatPr defaultRowHeight="18"/>`)
+	builder.WriteString(worksheetColumnsXML())
+	builder.WriteString(`<sheetData>`)
 	for rowIndex, row := range rows {
-		builder.WriteString(fmt.Sprintf(`<row r="%d">`, rowIndex+1))
+		height := excelRowHeight(row)
+		if height > 0 {
+			builder.WriteString(fmt.Sprintf(`<row r="%d" ht="%.1f" customHeight="1">`, rowIndex+1, height))
+		} else {
+			builder.WriteString(fmt.Sprintf(`<row r="%d">`, rowIndex+1))
+		}
 		for colIndex, value := range row {
 			ref := fmt.Sprintf("%s%d", columnName(colIndex+1), rowIndex+1)
-			builder.WriteString(fmt.Sprintf(`<c r="%s" t="inlineStr"><is><t>%s</t></is></c>`, ref, xmlText(value)))
+			styleID := excelCellStyle(rowIndex, row, colIndex, value)
+			builder.WriteString(fmt.Sprintf(`<c r="%s" s="%d" t="inlineStr"><is><t>%s</t></is></c>`, ref, styleID, xmlText(value)))
 		}
 		builder.WriteString(`</row>`)
 	}
-	builder.WriteString(`</sheetData></worksheet>`)
+	builder.WriteString(`</sheetData>`)
+	builder.WriteString(fmt.Sprintf(`<mergeCells count="1"><mergeCell ref="A1:%s1"/></mergeCells>`, columnName(maxCols)))
+	builder.WriteString(`<printOptions horizontalCentered="1"/>`)
+	builder.WriteString(`<pageMargins left="0.25" right="0.25" top="0.45" bottom="0.45" header="0.20" footer="0.20"/>`)
+	builder.WriteString(`<pageSetup paperSize="9" orientation="landscape" fitToWidth="1" fitToHeight="0"/>`)
+	builder.WriteString(`</worksheet>`)
 	return builder.String()
 }
 
+func worksheetColumnsXML() string {
+	widths := []float64{16, 18, 20, 12, 11, 11, 28, 34, 28, 24}
+	var builder strings.Builder
+	builder.WriteString(`<cols>`)
+	for index, width := range widths {
+		col := index + 1
+		builder.WriteString(fmt.Sprintf(`<col min="%d" max="%d" width="%.1f" customWidth="1"/>`, col, col, width))
+	}
+	builder.WriteString(`</cols>`)
+	return builder.String()
+}
+
+func excelCellStyle(rowIndex int, row []string, colIndex int, value string) int {
+	if rowIndex == 0 {
+		return 1
+	}
+	if len(row) == 0 || isBlankRow(row) {
+		return 0
+	}
+	if isExcelSectionHeader(row) {
+		return 2
+	}
+	if rowIndex >= 1 && rowIndex <= 8 {
+		if colIndex == 0 {
+			return 3
+		}
+		return 5
+	}
+	if strings.Contains(value, "/10") || strings.HasSuffix(value, "%") || strings.HasPrefix(value, "#") || value == "是" || value == "否" {
+		return 6
+	}
+	return 5
+}
+
+func excelRowHeight(row []string) float64 {
+	if len(row) == 0 || isBlankRow(row) {
+		return 8
+	}
+	maxLen := 0
+	for _, value := range row {
+		if length := len([]rune(value)); length > maxLen {
+			maxLen = length
+		}
+	}
+	switch {
+	case maxLen > 90:
+		return 60
+	case maxLen > 58:
+		return 46
+	case maxLen > 34:
+		return 34
+	default:
+		return 0
+	}
+}
+
+func maxRowColumns(rows [][]string) int {
+	maxCols := 0
+	for _, row := range rows {
+		if len(row) > maxCols {
+			maxCols = len(row)
+		}
+	}
+	return maxCols
+}
+
+func isBlankRow(row []string) bool {
+	for _, value := range row {
+		if strings.TrimSpace(value) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func isExcelSectionHeader(row []string) bool {
+	if len(row) == 0 {
+		return false
+	}
+	switch strings.TrimSpace(row[0]) {
+	case "教育经历", "专业六维基线", "六维指标", "奖项与证书", "经历", "TOP5 匹配岗位":
+		return true
+	default:
+		return false
+	}
+}
+
 func buildPathPlanDoc(plan PathPlan) string {
+	stats := pathPlanDocStats(plan)
 	var builder strings.Builder
 	builder.WriteString(`<!doctype html><html><head><meta charset="utf-8"><title>成长路径规划</title>`)
-	builder.WriteString(`<style>body{font-family:Arial,"PingFang SC","Microsoft YaHei",sans-serif;line-height:1.6;color:#1f2937}h1{font-size:24px}h2{font-size:18px;margin-top:24px}table{border-collapse:collapse;width:100%;margin:12px 0}td,th{border:1px solid #d1d5db;padding:8px;text-align:left}th{background:#eef2ff}</style>`)
+	builder.WriteString(`<style>
+@page{size:595.3pt 841.9pt;margin:34pt 38pt 36pt 38pt}
+body{margin:0;font-family:Arial,"PingFang SC","Microsoft YaHei",sans-serif;font-size:10pt;line-height:1.38;color:#111827;background:#fff}
+h1{margin:0 0 7pt;color:#0f172a;font-size:20pt;line-height:1.12}
+h2{margin:0 0 5pt;color:#0f172a;font-size:13pt;line-height:1.22}
+p{margin:0 0 6pt}.muted{color:#64748b}.small{font-size:8.5pt;color:#64748b}
+.summary{width:100%;border-collapse:separate;border-spacing:5pt;margin:8pt 0 10pt}
+.summary td{width:25%;border:1px solid #d8e0ea;background:#f8fafc;padding:6pt 7pt;vertical-align:top}
+.summary b{display:block;margin-bottom:2pt;color:#475569;font-size:8.5pt}.summary strong{color:#0f172a;font-size:12pt}
+.stage{margin:12pt 0 0;padding-top:8pt;border-top:2pt solid #2563eb;page-break-inside:avoid}
+.goal{margin-bottom:6pt;color:#334155}
+.deliverable{margin:6pt 0 8pt;padding:6pt 7pt;border:1px solid #d8e0ea;background:#f8fafc}
+table.tasks{width:100%;border-collapse:collapse;table-layout:fixed;margin:6pt 0 8pt}
+.tasks th,.tasks td{border:1px solid #cbd5e1;padding:4.5pt 5pt;text-align:left;vertical-align:top;font-size:9pt;line-height:1.32;word-break:break-word}
+.tasks th{background:#eaf2ff;color:#1e3a8a;font-weight:bold}
+.col-week{width:13%}.col-task{width:43%}.col-metric{width:34%}.col-priority{width:10%}
+.priority{display:inline-block;min-width:18pt;text-align:center;padding:1.5pt 4pt;font-weight:bold}
+.priority-high{color:#991b1b;background:#fee2e2}.priority-medium{color:#1d4ed8;background:#dbeafe}.priority-low{color:#047857;background:#d1fae5}
+.two-col{width:100%;border-collapse:collapse;margin-top:6pt}.two-col td{width:50%;vertical-align:top;padding:0 6pt 0 0}
+.block-title{display:block;margin:0 0 4pt;color:#334155;font-weight:bold}
+ul.compact-list{margin:0 0 4pt 14pt;padding:0}ul.compact-list li{margin:0 0 3pt}
+.resource-url{display:block;margin-top:1pt;color:#64748b;font-size:8pt}
+.empty{color:#94a3b8}.footer{margin-top:12pt;padding-top:6pt;border-top:1px solid #e2e8f0;color:#64748b;font-size:8pt}
+</style>`)
 	builder.WriteString(`</head><body><h1>个性化成长路径规划</h1>`)
-	for _, stage := range plan.Stages {
-		builder.WriteString(`<h2>` + html.EscapeString(stage.Stage) + `</h2>`)
-		builder.WriteString(`<p><strong>阶段目标：</strong>` + html.EscapeString(stage.Goal) + `</p>`)
-		builder.WriteString(`<table><thead><tr><th>周次</th><th>任务</th><th>达标指标</th><th>优先级</th></tr></thead><tbody>`)
-		for _, week := range stage.Weeks {
-			builder.WriteString(`<tr><td>` + html.EscapeString(week.Week) + `</td><td>` + html.EscapeString(week.Task) + `</td><td>` + html.EscapeString(week.Metric) + `</td><td>` + html.EscapeString(week.Priority) + `</td></tr>`)
-		}
-		builder.WriteString(`</tbody></table><p><strong>交付物：</strong>` + html.EscapeString(stage.Deliverable) + `</p><ul>`)
-		for _, standard := range stage.Standards {
-			builder.WriteString(`<li>` + html.EscapeString(standard) + `</li>`)
-		}
-		builder.WriteString(`</ul>`)
+	builder.WriteString(`<p class="muted">围绕推荐岗位能力差距生成阶段目标、周任务、资源链接和达标标准。</p>`)
+	builder.WriteString(`<table class="summary"><tr>`)
+	builder.WriteString(`<td><b>阶段</b><strong>` + fmt.Sprintf("%d", stats.stageCount) + `</strong></td>`)
+	builder.WriteString(`<td><b>周任务</b><strong>` + fmt.Sprintf("%d", stats.taskCount) + `</strong></td>`)
+	builder.WriteString(`<td><b>高优先级</b><strong>` + fmt.Sprintf("%d", stats.highPriorityCount) + `</strong></td>`)
+	builder.WriteString(`<td><b>导出格式</b><strong>` + html.EscapeString(pathPlanDocFormats(plan)) + `</strong></td>`)
+	builder.WriteString(`</tr></table>`)
+	if len(plan.Stages) == 0 {
+		builder.WriteString(`<p class="empty">暂无路径规划结果。请等待 Path Planning Team 返回阶段目标后再导出。</p>`)
+		builder.WriteString(`</body></html>`)
+		return builder.String()
 	}
+	for _, stage := range plan.Stages {
+		builder.WriteString(`<section class="stage">`)
+		builder.WriteString(`<h2>` + html.EscapeString(defaultText(stage.Stage, "阶段目标")) + `</h2>`)
+		builder.WriteString(`<p class="goal"><strong>目标：</strong>` + html.EscapeString(defaultText(stage.Goal, "待补充阶段目标")) + `</p>`)
+		builder.WriteString(`<table class="tasks"><thead><tr><th class="col-week">周次</th><th class="col-task">任务</th><th class="col-metric">达标指标</th><th class="col-priority">优先级</th></tr></thead><tbody>`)
+		for _, week := range stage.Weeks {
+			priority := defaultText(week.Priority, "中")
+			builder.WriteString(`<tr><td>` + html.EscapeString(defaultText(week.Week, "本周")) + `</td><td>` + html.EscapeString(defaultText(week.Task, "待补充任务")) + `</td><td>` + html.EscapeString(defaultText(week.Metric, "待补充达标指标")) + `</td><td><span class="priority ` + docPriorityClass(priority) + `">` + html.EscapeString(priority) + `</span></td></tr>`)
+		}
+		builder.WriteString(`</tbody></table>`)
+		builder.WriteString(`<p class="deliverable"><strong>阶段交付物：</strong>` + html.EscapeString(defaultText(stage.Deliverable, "阶段作品、复盘文档和可验证证据")) + `</p>`)
+		builder.WriteString(`<table class="two-col"><tr><td><span class="block-title">达标标准</span>` + pathPlanDocStandards(stage.Standards) + `</td><td><span class="block-title">资源链接</span>` + pathPlanDocResources(stage.Resources) + `</td></tr></table>`)
+		builder.WriteString(`</section>`)
+	}
+	builder.WriteString(`<p class="footer">由 JobAgent 根据当前诊断结果生成。建议导出后按实际岗位 JD 和时间安排复核。</p>`)
 	builder.WriteString(`</body></html>`)
 	return builder.String()
 }
 
+type pathPlanDocStat struct {
+	stageCount        int
+	taskCount         int
+	highPriorityCount int
+	resourceCount     int
+}
+
+func pathPlanDocStats(plan PathPlan) pathPlanDocStat {
+	stats := pathPlanDocStat{stageCount: len(plan.Stages)}
+	for _, stage := range plan.Stages {
+		stats.taskCount += len(stage.Weeks)
+		stats.resourceCount += len(stage.Resources)
+		for _, week := range stage.Weeks {
+			if strings.Contains(week.Priority, "高") {
+				stats.highPriorityCount++
+			}
+		}
+	}
+	return stats
+}
+
+func pathPlanDocFormats(plan PathPlan) string {
+	if len(plan.ExportFormats) == 0 {
+		return "PDF / Word"
+	}
+	return strings.Join(plan.ExportFormats, " / ")
+}
+
+func pathPlanDocStandards(items []string) string {
+	if len(items) == 0 {
+		return `<p class="empty">暂无达标标准</p>`
+	}
+	var builder strings.Builder
+	builder.WriteString(`<ul class="compact-list">`)
+	for _, item := range items {
+		builder.WriteString(`<li>` + html.EscapeString(item) + `</li>`)
+	}
+	builder.WriteString(`</ul>`)
+	return builder.String()
+}
+
+func pathPlanDocResources(items []Resource) string {
+	if len(items) == 0 {
+		return `<p class="empty">暂无资源链接</p>`
+	}
+	var builder strings.Builder
+	builder.WriteString(`<ul class="compact-list">`)
+	for _, item := range items {
+		label := defaultText(item.Label, item.URL)
+		url := strings.TrimSpace(item.URL)
+		if url == "" {
+			builder.WriteString(`<li>` + html.EscapeString(label) + `</li>`)
+			continue
+		}
+		builder.WriteString(`<li><a href="` + html.EscapeString(url) + `">` + html.EscapeString(label) + `</a><span class="resource-url">` + html.EscapeString(url) + `</span></li>`)
+	}
+	builder.WriteString(`</ul>`)
+	return builder.String()
+}
+
+func docPriorityClass(priority string) string {
+	switch {
+	case strings.Contains(priority, "高"):
+		return "priority-high"
+	case strings.Contains(priority, "低"):
+		return "priority-low"
+	default:
+		return "priority-medium"
+	}
+}
+
+func defaultText(value string, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
 func contentTypesXML() string {
-	return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>`
+	return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>`
 }
 
 func rootRelsXML() string {
 	return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/></Relationships>`
 }
 
-func workbookXML() string {
-	return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Ability Profile" sheetId="1" r:id="rId1"/></sheets></workbook>`
+func workbookXML(maxCols int, maxRows int) string {
+	printArea := fmt.Sprintf("'Ability Profile'!$A$1:$%s$%d", columnName(maxCols), maxRows)
+	return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Ability Profile" sheetId="1" r:id="rId1"/></sheets><definedNames><definedName name="_xlnm.Print_Area" localSheetId="0">` + xmlText(printArea) + `</definedName></definedNames></workbook>`
 }
 
 func workbookRelsXML() string {
-	return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`
+	return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`
+}
+
+func workbookStylesXML() string {
+	return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="4">
+    <font><sz val="10"/><name val="Arial"/></font>
+    <font><b/><sz val="16"/><color rgb="FFFFFFFF"/><name val="Arial"/></font>
+    <font><b/><sz val="10"/><color rgb="FFFFFFFF"/><name val="Arial"/></font>
+    <font><b/><sz val="10"/><color rgb="FF334155"/><name val="Arial"/></font>
+  </fonts>
+  <fills count="5">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"/></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FF2563EB"/><bgColor indexed="64"/></patternFill></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FF334155"/><bgColor indexed="64"/></patternFill></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFEFF6FF"/><bgColor indexed="64"/></patternFill></fill>
+  </fills>
+  <borders count="2">
+    <border><left/><right/><top/><bottom/><diagonal/></border>
+    <border><left style="thin"><color rgb="FFD8E0EA"/></left><right style="thin"><color rgb="FFD8E0EA"/></right><top style="thin"><color rgb="FFD8E0EA"/></top><bottom style="thin"><color rgb="FFD8E0EA"/></bottom><diagonal/></border>
+  </borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="7">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+    <xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFill="1" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="left" vertical="center"/></xf>
+    <xf numFmtId="0" fontId="2" fillId="3" borderId="1" xfId="0" applyFill="1" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="left" vertical="center" wrapText="1"/></xf>
+    <xf numFmtId="0" fontId="3" fillId="4" borderId="1" xfId="0" applyFill="1" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="left" vertical="top" wrapText="1"/></xf>
+    <xf numFmtId="0" fontId="3" fillId="4" borderId="1" xfId="0" applyFill="1" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment horizontal="left" vertical="top" wrapText="1"/></xf>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="top" wrapText="1"/></xf>
+  </cellXfs>
+  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+</styleSheet>`
 }
 
 func corePropsXML() string {

@@ -2103,12 +2103,11 @@ legend {
   bottom: 0;
 }
 
-.path-task summary > .context-chat-button.is-path-task-chat {
-  position: relative;
-  right: auto;
+.task-list li > .context-chat-button.is-path-task-chat {
+  position: absolute;
+  top: 10px;
+  right: 10px;
   bottom: auto;
-  justify-self: end;
-  align-self: center;
   width: 32px;
   height: 32px;
   min-height: 32px;
@@ -2137,7 +2136,7 @@ legend {
     transform 150ms var(--ease);
 }
 
-.path-task summary > .context-chat-button.is-path-task-chat::before {
+.task-list li > .context-chat-button.is-path-task-chat::before {
   content: "";
   position: absolute;
   inset: 4px;
@@ -2148,8 +2147,8 @@ legend {
   transition: opacity 150ms var(--ease), transform 150ms var(--ease);
 }
 
-.path-task summary > .context-chat-button.is-path-task-chat span,
-.path-task summary > .context-chat-button.is-path-task-chat:is(:hover, :focus-visible) span {
+.task-list li > .context-chat-button.is-path-task-chat span,
+.task-list li > .context-chat-button.is-path-task-chat:is(:hover, :focus-visible) span {
   left: 50%;
   width: 12px;
   height: 12px;
@@ -2162,27 +2161,27 @@ legend {
   pointer-events: none;
 }
 
-.path-task summary > .context-chat-button.is-path-task-chat span::before {
+.task-list li > .context-chat-button.is-path-task-chat span::before {
   width: 10px;
   height: 1.6px;
   color: color-mix(in oklch, var(--primary-strong) 76%, var(--ink));
 }
 
-.path-task summary > .context-chat-button.is-path-task-chat span::after {
+.task-list li > .context-chat-button.is-path-task-chat span::after {
   width: 1.6px;
   height: 10px;
   color: color-mix(in oklch, var(--primary-strong) 76%, var(--ink));
 }
 
-.path-task summary > .context-chat-button.is-path-task-chat strong,
-.path-task summary > .context-chat-button.is-path-task-chat:is(:hover, :focus-visible) strong {
+.task-list li > .context-chat-button.is-path-task-chat strong,
+.task-list li > .context-chat-button.is-path-task-chat:is(:hover, :focus-visible) strong {
   max-width: 0;
   opacity: 0;
   transform: translate(-3px, -50%);
   pointer-events: none;
 }
 
-.path-task summary > .context-chat-button.is-path-task-chat:is(:hover, :focus-visible) {
+.task-list li > .context-chat-button.is-path-task-chat:is(:hover, :focus-visible) {
   width: 32px;
   border-color: color-mix(in oklch, var(--primary) 48%, var(--line));
   background:
@@ -2198,12 +2197,12 @@ legend {
   transform: translateY(-1px) scale(1.03);
 }
 
-.path-task summary > .context-chat-button.is-path-task-chat:is(:hover, :focus-visible)::before {
+.task-list li > .context-chat-button.is-path-task-chat:is(:hover, :focus-visible)::before {
   opacity: 1;
   transform: scale(1);
 }
 
-.path-task summary > .context-chat-button.is-path-task-chat:active:not(:disabled) {
+.task-list li > .context-chat-button.is-path-task-chat:active:not(:disabled) {
   transform: translateY(0) scale(0.98);
 }
 
@@ -3769,17 +3768,32 @@ td {
 .path-task summary {
   min-width: 0;
   display: grid;
-  grid-template-columns: 64px minmax(0, 1fr) 34px 32px 28px;
+  grid-template-columns: 64px minmax(0, 1fr) 34px 28px;
   gap: 8px;
   align-items: start;
   min-height: 52px;
-  padding: 10px 12px 10px 0;
+  padding: 10px 52px 10px 0;
   cursor: pointer;
   list-style: none;
 }
 
 .path-task summary::-webkit-details-marker {
   display: none;
+}
+
+.path-task summary > .task-week {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.path-task summary > strong {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.path-task summary > b {
+  grid-column: 3;
+  grid-row: 1;
 }
 
 .path-task summary:focus-visible {
@@ -3790,6 +3804,8 @@ td {
 
 .path-task summary::after {
   content: "+";
+  grid-column: 4;
+  grid-row: 1;
   display: inline-grid;
   place-items: center;
   width: 24px;
@@ -6228,8 +6244,12 @@ td {
   }
 
   .path-task summary {
-    grid-template-columns: 58px minmax(0, 1fr) 34px 32px 28px;
+    grid-template-columns: 58px minmax(0, 1fr) 34px 28px;
+    grid-template-rows: auto auto;
     gap: 8px;
+    row-gap: 7px;
+    align-items: center;
+    padding-right: 48px;
   }
 
   .task-week {
@@ -6237,13 +6257,19 @@ td {
     padding-inline: 6px;
   }
 
+  .path-task summary > strong {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    padding-right: 2px;
+  }
+
   .path-task summary b {
-    grid-column: auto;
+    grid-column: 3;
     grid-row: 1;
   }
 
   .path-task summary::after {
-    grid-column: auto;
+    grid-column: 4;
     grid-row: 1;
   }
 
