@@ -69,7 +69,18 @@ def validate_ui_intent_payload(value: Any) -> None:
     target = value.get("target")
     if mode not in {"none", "show_schema", "update_result"}:
         raise ValueError("ui_intent mode is invalid")
-    if target not in {"none", "basic", "education", "awards", "experiences", "profile_radar", "matching", "path_plan", "top_jobs"}:
+    if target not in {
+        "none",
+        "basic",
+        "education",
+        "awards",
+        "experiences",
+        "profile_radar",
+        "matching",
+        "path_plan",
+        "top_jobs",
+        "job_recommendations",
+    }:
         raise ValueError("ui_intent target is invalid")
     if not isinstance(value.get("patches"), list):
         raise ValueError("ui_intent patches must be an array")

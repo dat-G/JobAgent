@@ -18,11 +18,12 @@ import (
 )
 
 type runtimeOptions struct {
-	addr         string
-	cache        bool
-	cacheDir     string
-	clearCache   bool
-	asyncTimeout time.Duration
+	addr            string
+	cache           bool
+	cacheDir        string
+	clearCache      bool
+	asyncTimeout    time.Duration
+	providerTimeout time.Duration
 }
 
 func main() {
@@ -66,6 +67,7 @@ func parseOptions() runtimeOptions {
 	flag.BoolVar(&options.clearCache, "clear-cache", false, "clear persistent provider response cache before starting")
 	flag.Parse()
 	options.asyncTimeout = asyncRunTimeout()
+	options.providerTimeout = providerTimeout()
 	return options
 }
 
@@ -82,7 +84,7 @@ func buildRunner(options runtimeOptions) *agent.Runner {
 		if model == "presto-mock" {
 			model = "gpt-4.1-mini"
 		}
-		llm = provider.NewOpenAIChat(baseURL, apiKey, nil)
+		llm = provider.NewOpenAIChat(baseURL, apiKey, &http.Client{Timeout: options.providerTimeout})
 	}
 	if options.cache {
 		cached, err := provider.NewCachedProvider(llm, provider.CacheOptions{
@@ -167,6 +169,15 @@ func asyncRunTimeout() time.Duration {
 	timeout, err := time.ParseDuration(value)
 	if err != nil || timeout <= 0 {
 		log.Fatalf("invalid PRESTO_ASYNC_RUN_TIMEOUT %q: use a positive duration like 10m", value)
+	}
+	return timeout
+}
+
+func providerTimeout() time.Duration {
+	value := envDefault("PRESTO_PROVIDER_TIMEOUT_SECONDS", "150")
+	timeout, err := time.ParseDuration(value + "s")
+	if err != nil || timeout <= 0 {
+		log.Fatalf("invalid PRESTO_PROVIDER_TIMEOUT_SECONDS %q: use positive seconds like 150", value)
 	}
 	return timeout
 }

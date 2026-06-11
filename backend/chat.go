@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -272,7 +273,7 @@ func runLegatoChat(ctx context.Context, req ChatRequest) (*LegatoEnvelope, error
 	if err := os.WriteFile(inputPath, payload, 0o600); err != nil {
 		return nil, errors.New("无法写入 chat input")
 	}
-	return runLegatoWithWorkflowStageInput(ctx, sourcePath, "chat", "answer", inputPath)
+	return runLegatoWithWorkflowStageInputTimeout(ctx, sourcePath, "chat", "answer", inputPath, chatLegatoTimeoutMS())
 }
 
 func normalizeChatHistory(history []ChatHistoryMessage) []ChatHistoryMessage {
@@ -301,13 +302,25 @@ func normalizeChatHistory(history []ChatHistoryMessage) []ChatHistoryMessage {
 func chatTimeout() time.Duration {
 	value := strings.TrimSpace(os.Getenv("CHAT_TIMEOUT_SECONDS"))
 	if value == "" {
-		return 70 * time.Second
+		return 150 * time.Second
 	}
 	seconds, err := parsePositiveInt(value)
 	if err != nil {
-		return 70 * time.Second
+		return 150 * time.Second
 	}
 	return time.Duration(seconds) * time.Second
+}
+
+func chatLegatoTimeoutMS() string {
+	value := strings.TrimSpace(os.Getenv("CHAT_LEGATO_TIMEOUT_MS"))
+	if value != "" {
+		return value
+	}
+	budget := chatTimeout() - 10*time.Second
+	if budget < 60*time.Second {
+		budget = 60 * time.Second
+	}
+	return strconv.FormatInt(budget.Milliseconds(), 10)
 }
 
 func parsePositiveInt(value string) (int, error) {

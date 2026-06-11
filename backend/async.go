@@ -1399,7 +1399,15 @@ func runLegatoWithWorkflowStageInput(ctx context.Context, sourcePath string, tar
 	return runLegatoWithOptions(ctx, sourcePath, target, workflowStageInput, workflowStage)
 }
 
+func runLegatoWithWorkflowStageInputTimeout(ctx context.Context, sourcePath string, target string, workflowStage string, workflowStageInput string, timeoutMS string) (*LegatoEnvelope, error) {
+	return runLegatoWithOptionsTimeout(ctx, sourcePath, target, workflowStageInput, timeoutMS, workflowStage)
+}
+
 func runLegatoWithOptions(ctx context.Context, sourcePath string, target string, workflowStageInput string, workflowStage ...string) (*LegatoEnvelope, error) {
+	return runLegatoWithOptionsTimeout(ctx, sourcePath, target, workflowStageInput, legatoTimeoutMS(), workflowStage...)
+}
+
+func runLegatoWithOptionsTimeout(ctx context.Context, sourcePath string, target string, workflowStageInput string, timeoutMS string, workflowStage ...string) (*LegatoEnvelope, error) {
 	root := legatoRoot()
 	if root == "" {
 		return nil, errors.New("cannot locate Agents/legato")
@@ -1409,7 +1417,7 @@ func runLegatoWithOptions(ctx context.Context, sourcePath string, target string,
 		"-m", "legato.cli",
 		sourcePath,
 		"--target", target,
-		"--timeout-ms", legatoTimeoutMS(),
+		"--timeout-ms", timeoutMS,
 	}
 	if target == "resume" || target == "chat" {
 		args = append(args, "--workflow", target)

@@ -4937,6 +4937,32 @@ td {
   color: var(--muted);
 }
 
+.assistant-message.is-loading.is-answer-streaming .assistant-bubble {
+  color: var(--ink);
+}
+
+.assistant-stream-cursor {
+  width: 1.5px;
+  height: 0.92em;
+  display: none;
+  margin-left: 3px;
+  transform: translateY(0.14em);
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--primary) 58%, var(--ink));
+  opacity: 0.7;
+  animation: assistantCursorBlink 1.45s ease-in-out infinite;
+}
+
+.assistant-message.is-answer-streaming .assistant-stream-cursor {
+  display: inline-block;
+}
+
+@keyframes assistantCursorBlink {
+  50% {
+    opacity: 0.24;
+  }
+}
+
 .assistant-message.is-agent-stream {
   max-width: 100%;
   animation: none;

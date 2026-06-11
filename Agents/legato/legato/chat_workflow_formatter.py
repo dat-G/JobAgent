@@ -22,6 +22,7 @@ UI_INTENT_TARGETS = {
     "matching",
     "path_plan",
     "top_jobs",
+    "job_recommendations",
 }
 UI_PATCH_OPS = {"add", "replace", "remove"}
 

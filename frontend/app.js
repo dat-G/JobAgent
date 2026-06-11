@@ -36,6 +36,8 @@ const assistantStorageKey = "jobagent.llmAssistant.v1";
 const assistantMaxMessages = 80;
 const assistantMaxSessions = 24;
 const assistantPromptLimit = 1200;
+const assistantRequestTimeoutMs = 150000;
+const assistantStreamTickMs = 52;
 const assistantEditableTargets = {
   basic: {
     label: "基础信息",
@@ -168,6 +170,28 @@ const assistantEditableTargets = {
         proof_gaps: "string[]",
         next_proof: "string",
         education_gate: "string"
+      }
+    }
+  },
+  job_recommendations: {
+    label: "岗位推荐",
+    roots: ["/matching_result", "/ability_profile/top5_matching_jobs"],
+    description: "首选岗位匹配和推荐岗位队列，用于根据用户偏好的新方向重写推荐。",
+    schema: {
+      type: "object",
+      fields: {
+        matching_result: {
+          target_role: "string",
+          overall_match: "number",
+          match_level: "string",
+          fit_summary: "string",
+          selected_job: "object",
+          gap_details: "{capability:string,current:string,expected:string,action:string,severity:string}[]",
+          development_actions: "{priority:string,scope:string,description:string}[]",
+          recommendations: "string[]",
+          recommended_reasons: "string[]"
+        },
+        top_jobs: "{title:string,match:number,category:string,fit_summary:string,reasons:string[],proof_gaps:string[],next_proof:string,education_gate:string}[]"
       }
     }
   }
@@ -5124,15 +5148,18 @@ function renderAssistantMessages(options = {}) {
   const typeoutState = captureAgentTypeoutState();
   assistantMessages.innerHTML = messages.map((message) => {
     const label = message.streamType === "evidence_context" ? "重点证据" : message.role === "user" ? "你" : message.role === "system" ? "系统" : "AI助手";
-    const stateClass = message.status === "loading" ? " is-loading" : message.status === "error" ? " is-error" : "";
+    const stateClass = [
+      message.status === "loading" ? " is-loading" : message.status === "error" ? " is-error" : "",
+      message.isStreamingAnswer ? " is-answer-streaming" : ""
+    ].join("");
     const streamClass = message.streamType === "agent_team" ? " is-agent-stream" : message.streamType === "evidence_context" ? " is-evidence-context" : "";
     const content = message.role === "user" ? message.content : formatAgentDisplayText(message.content);
     const userRefs = message.role === "user" ? renderAssistantMessageRefs(message.focusedContexts) : "";
     const body = message.streamType === "agent_team" && message.agentStream
       ? renderAgentTeamStreamMessage(message.agentStream, message.id)
-      : `<div class="assistant-bubble">${escapeHTML(content)}</div>`;
+      : renderAssistantTextBubble(message, content);
     return `
-      <article class="assistant-message is-${escapeAttribute(message.role)}${stateClass}${streamClass}">
+      <article class="assistant-message is-${escapeAttribute(message.role)}${stateClass}${streamClass}" data-assistant-message-id="${escapeAttribute(message.id)}">
         <b>${escapeHTML(label)} · ${formatTime(message.createdAt)}</b>
         ${body}
         ${userRefs}
@@ -5151,6 +5178,13 @@ function renderAssistantMessages(options = {}) {
     const maxScrollTop = Math.max(0, assistantMessages.scrollHeight - assistantMessages.clientHeight);
     assistantMessages.scrollTop = Math.min(previousScrollTop, maxScrollTop);
   }
+}
+
+function renderAssistantTextBubble(message, content) {
+  const cursor = message.role === "assistant"
+    ? `<span class="assistant-stream-cursor" aria-hidden="true"></span>`
+    : "";
+  return `<div class="assistant-bubble"><span data-assistant-message-text>${escapeHTML(content)}</span>${cursor}</div>`;
 }
 
 function renderAssistantMessageRefs(contexts) {
@@ -5926,25 +5960,17 @@ async function sendAssistantMessage(promptOverride = "", focusedContextsOverride
   saveAssistantState();
   renderAssistant();
 
-  let streamedAnswer = "";
+  const answerStreamer = createAssistantAnswerStreamer(session, loadingID);
   try {
     const response = await requestAssistantAnswer(session, prompt, focusedContexts, {
       onStatus(message) {
-        const loading = session.messages.find((item) => item.id === loadingID);
-        if (!loading || streamedAnswer) return;
-        loading.content = message || "Legato Chat workflow 正在生成回答。";
-        loading.status = "loading";
-        scheduleAssistantStreamRender();
+        answerStreamer.status(message);
       },
       onDelta(delta) {
-        const loading = session.messages.find((item) => item.id === loadingID);
-        if (!loading || !delta) return;
-        streamedAnswer += delta;
-        loading.content = streamedAnswer;
-        loading.status = "loading";
-        scheduleAssistantStreamRender();
+        answerStreamer.push(delta);
       }
     });
+    await answerStreamer.drain();
     const uiResult = applyAssistantUIIntent(response.chat);
     const loading = session.messages.find((message) => message.id === loadingID);
     if (loading) {
@@ -5952,13 +5978,16 @@ async function sendAssistantMessage(promptOverride = "", focusedContextsOverride
       loading.status = "done";
       loading.retryPrompt = "";
       loading.uiResult = uiResult;
+      loading.isStreamingAnswer = false;
     }
   } catch (error) {
+    answerStreamer.stop();
     const loading = session.messages.find((message) => message.id === loadingID);
     if (loading) {
       loading.content = assistantErrorMessage(error);
       loading.status = "error";
       loading.retryPrompt = prompt;
+      loading.isStreamingAnswer = false;
     }
   } finally {
     session.updatedAt = new Date().toISOString();
@@ -5982,7 +6011,7 @@ async function retryAssistantMessage(messageID) {
 
 async function requestAssistantAnswer(session, prompt, focusedContexts = null, streamHandlers = {}) {
   assistantAbort = new AbortController();
-  const timeout = window.setTimeout(() => assistantAbort.abort(), 70000);
+  const timeout = window.setTimeout(() => assistantAbort.abort(), assistantRequestTimeoutMs);
   try {
     const response = await fetch("/api/chat?stream=1", {
       method: "POST",
@@ -5990,7 +6019,7 @@ async function requestAssistantAnswer(session, prompt, focusedContexts = null, s
       body: JSON.stringify({
         question: prompt,
         diagnosis: assistantContextForModel({ focusedContexts }),
-        ui_schema_catalog: assistantUISchemaCatalog(),
+        ui_schema_catalog: assistantUISchemaCatalog(prompt),
         history: assistantHistoryForModel(session, prompt)
       }),
       signal: assistantAbort.signal
@@ -6071,7 +6100,9 @@ function consumeAssistantChatStreamEvent(rawEvent, handlers = {}) {
     return null;
   }
   if (event === "chat.error") {
-    throw new Error(String(payload.error || "chat_stream_failed"));
+    const error = new Error(String(payload.error || "chat_stream_failed"));
+    error.source = "chat_stream";
+    throw error;
   }
   if (event === "chat.done") {
     return payload;
@@ -6087,18 +6118,152 @@ function scheduleAssistantStreamRender() {
   });
 }
 
-function assistantUISchemaCatalog() {
-  return Object.fromEntries(Object.entries(assistantEditableTargets).map(([target, config]) => [
-    target,
-    {
+function updateAssistantMessageBubble(messageID, content, options = {}) {
+  const selector = `[data-assistant-message-id="${CSS.escape(messageID)}"]`;
+  const item = assistantMessages.querySelector(selector);
+  const textNode = item?.querySelector("[data-assistant-message-text]");
+  if (!item || !textNode) {
+    renderAssistantMessages({ stickToBottom: true });
+    return;
+  }
+  textNode.textContent = formatAgentDisplayText(content);
+  item.classList.toggle("is-loading", options.status === "loading");
+  item.classList.toggle("is-error", options.status === "error");
+  item.classList.toggle("is-answer-streaming", Boolean(options.streaming));
+  if (options.stickToBottom !== false) assistantMessages.scrollTop = assistantMessages.scrollHeight;
+}
+
+function createAssistantAnswerStreamer(session, messageID) {
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let visible = "";
+  let pending = "";
+  let timer = 0;
+  let drainResolve = null;
+
+  const message = () => session.messages.find((item) => item.id === messageID);
+  const finishDrain = () => {
+    if (!pending && !timer && drainResolve) {
+      const resolve = drainResolve;
+      drainResolve = null;
+      resolve();
+    }
+  };
+  const render = (content, streaming) => updateAssistantMessageBubble(messageID, content, {
+    status: "loading",
+    streaming,
+    stickToBottom: true
+  });
+  const writeVisible = () => {
+    const loading = message();
+    if (!loading) return false;
+    loading.content = visible || "正在生成回答。";
+    loading.status = "loading";
+    loading.isStreamingAnswer = Boolean(visible);
+    render(loading.content, Boolean(visible));
+    return true;
+  };
+  const step = () => {
+    timer = 0;
+    if (!pending) {
+      finishDrain();
+      return;
+    }
+    const batchSize = pending.length > 96 ? 3 : pending.length > 36 ? 2 : 1;
+    const emitted = pending.slice(0, batchSize);
+    visible += emitted;
+    pending = pending.slice(batchSize);
+    if (!writeVisible()) {
+      pending = "";
+      finishDrain();
+      return;
+    }
+    if (pending) {
+      timer = window.setTimeout(step, assistantStreamDelayFor(emitted, pending));
+    } else {
+      finishDrain();
+    }
+  };
+  const start = () => {
+    if (!timer && pending) timer = window.setTimeout(step, assistantStreamTickMs);
+  };
+
+  return {
+    status(text) {
+      if (visible || pending) return;
+      const loading = message();
+      if (!loading) return;
+      loading.content = text || "Legato Chat workflow 正在生成回答。";
+      loading.status = "loading";
+      loading.isStreamingAnswer = false;
+      render(loading.content, false);
+    },
+    push(delta) {
+      const text = String(delta || "");
+      if (!text) return;
+      if (reducedMotion) {
+        visible += text;
+        pending = "";
+        writeVisible();
+        finishDrain();
+        return;
+      }
+      pending += text;
+      start();
+    },
+    drain() {
+      if (reducedMotion || (!pending && !timer)) return Promise.resolve();
+      return new Promise((resolve) => {
+        drainResolve = resolve;
+        start();
+      });
+    },
+    stop() {
+      if (timer) {
+        window.clearTimeout(timer);
+        timer = 0;
+      }
+      pending = "";
+      finishDrain();
+    }
+  };
+}
+
+function assistantStreamDelayFor(emitted, pending) {
+  const text = String(emitted || "");
+  if (!pending) return 0;
+  if (/[。！？!?]\s*$/.test(text)) return 190;
+  if (/[，、；：,;:]\s*$/.test(text)) return 105;
+  return assistantStreamTickMs;
+}
+
+function assistantUISchemaCatalog(prompt = "") {
+  const targets = assistantSchemaTargetsForPrompt(prompt);
+  return Object.fromEntries(targets.map((target) => {
+    const config = assistantEditableTargets[target];
+    return [target, {
       target,
       label: config.label,
       roots: config.roots,
       description: config.description,
       schema: config.schema,
       current_value: assistantEditableCurrentValue(target)
-    }
-  ]));
+    }];
+  }));
+}
+
+function assistantSchemaTargetsForPrompt(prompt = "") {
+  const text = cleanDisplayText(prompt).toLowerCase();
+  if (isAssistantJobPreferencePrompt(text)) {
+    return ["job_recommendations", "matching", "top_jobs"];
+  }
+  return Object.keys(assistantEditableTargets);
+}
+
+function isAssistantJobPreferencePrompt(text) {
+  if (!text) return false;
+  const hasPreference = /不喜欢|不想|不要|换|改|转|想干|想做|希望|更想|倾向|推荐/.test(text);
+  const hasRoleSignal = /岗位|职位|方向|职业|工程师|研究员|产品|运营|算法|开发|安全|渗透|测试|数据|前端|后端|web|ai|llm|java|python/.test(text);
+  return hasPreference && hasRoleSignal;
 }
 
 function assistantEditableCurrentValue(target) {
@@ -6123,6 +6288,11 @@ function assistantEditableCurrentValue(target) {
       return deepCloneJSON(diagnosis?.path_plan || {});
     case "top_jobs":
       return deepCloneJSON(Array.isArray(profile.top5_matching_jobs) ? profile.top5_matching_jobs : []);
+    case "job_recommendations":
+      return deepCloneJSON({
+        matching_result: diagnosis?.matching_result || {},
+        top_jobs: Array.isArray(profile.top5_matching_jobs) ? profile.top5_matching_jobs : []
+      });
     default:
       return null;
   }
@@ -6157,7 +6327,7 @@ function applyAssistantUIIntent(chat) {
   } catch (error) {
     return { status: "blocked", applied: 0, message: `修改未应用：${error.message || "patch 失败"}` };
   }
-  diagnosis = ensureDiagnosisShape(draft);
+  diagnosis = normalizeAssistantPatchedDiagnosis(ensureDiagnosisShape(draft), intent.target);
   renderDiagnosis(diagnosis);
   updateAssistantContext();
   renderAssistantSuggestions();
@@ -6207,6 +6377,7 @@ function normalizeAssistantPatchPath(target, path) {
   if (!path) return "";
   let cleanPath = path.startsWith("/") ? path : `/${path}`;
   if (cleanPath.startsWith("/diagnosis/")) cleanPath = cleanPath.slice("/diagnosis".length);
+  cleanPath = normalizeAssistantPatchPathAlias(target, cleanPath);
   const config = assistantEditableTargets[target];
   if (!config || target === "none") return cleanPath;
   if (config.roots.some((root) => cleanPath === root || cleanPath.startsWith(`${root}/`))) {
@@ -6216,6 +6387,21 @@ function normalizeAssistantPatchPath(target, path) {
   if (!root) return cleanPath;
   if (cleanPath === "/") return root;
   return `${root}${cleanPath}`;
+}
+
+function normalizeAssistantPatchPathAlias(target, path) {
+  if (["top_jobs", "job_recommendations"].includes(target)) {
+    if (path === "/top_jobs") return "/ability_profile/top5_matching_jobs";
+    if (path.startsWith("/top_jobs/")) return `/ability_profile/top5_matching_jobs${path.slice("/top_jobs".length)}`;
+    if (path === "/ability_profile/top_jobs") return "/ability_profile/top5_matching_jobs";
+    if (path.startsWith("/ability_profile/top_jobs/")) return `/ability_profile/top5_matching_jobs${path.slice("/ability_profile/top_jobs".length)}`;
+  }
+  if (["matching", "job_recommendations"].includes(target)) {
+    if (path === "/matching" || path === "/job_matching") return "/matching_result";
+    if (path.startsWith("/matching/")) return `/matching_result${path.slice("/matching".length)}`;
+    if (path.startsWith("/job_matching/")) return `/matching_result${path.slice("/job_matching".length)}`;
+  }
+  return path;
 }
 
 function isAssistantPatchAllowed(target, patch) {
@@ -6292,6 +6478,48 @@ function ensureDiagnosisShape(value) {
     path_plan: { ...shell.path_plan, ...(next.path_plan || {}) },
     backend_requirements: Array.isArray(next.backend_requirements) ? next.backend_requirements : shell.backend_requirements,
     production_limitations: Array.isArray(next.production_limitations) ? next.production_limitations : shell.production_limitations
+  };
+}
+
+function normalizeAssistantPatchedDiagnosis(next, target = "") {
+  if (!next || !["top_jobs", "job_recommendations"].includes(target)) return next;
+  const profile = next.ability_profile || {};
+  const jobs = Array.isArray(profile.top5_matching_jobs) ? profile.top5_matching_jobs : [];
+  profile.top5_matching_jobs = jobs.slice(0, 5).map((job, index) => normalizeAssistantJobRecommendation(job, index));
+  next.ability_profile = profile;
+  if (profile.top5_matching_jobs.length) {
+    const first = profile.top5_matching_jobs[0];
+    const match = next.matching_result || {};
+    const selected = match.selected_job && typeof match.selected_job === "object" ? match.selected_job : {};
+    match.target_role = first.title || match.target_role || "";
+    match.overall_match = Number.isFinite(Number(first.match)) ? Number(first.match) : match.overall_match;
+    match.fit_summary = first.fit_summary || match.fit_summary || selected.fit_summary || "";
+    match.selected_job = {
+      ...selected,
+      ...first,
+      title: first.title || selected.title || match.target_role || ""
+    };
+    if (Array.isArray(first.reasons) && first.reasons.length) match.recommended_reasons = first.reasons;
+    next.matching_result = match;
+  }
+  return next;
+}
+
+function normalizeAssistantJobRecommendation(job, index = 0) {
+  const source = job && typeof job === "object" ? job : {};
+  return {
+    ...source,
+    rank: Number(source.rank || index + 1),
+    title: cleanDisplayText(source.title || source.target_role || `推荐岗位 ${index + 1}`),
+    category: cleanDisplayText(source.category || "用户偏好方向"),
+    match: safeScore(source.match ?? source.overall_match ?? 0),
+    fit_summary: cleanDisplayText(source.fit_summary || source.summary || ""),
+    reasons: Array.isArray(source.reasons) ? source.reasons.map(cleanDisplayText).filter(Boolean).slice(0, 4) : [],
+    proof_gaps: Array.isArray(source.proof_gaps) ? source.proof_gaps.map(cleanDisplayText).filter(Boolean).slice(0, 4) : [],
+    next_proof: cleanDisplayText(source.next_proof || source.next_step || ""),
+    education_gate: cleanDisplayText(source.education_gate || ""),
+    education_gate_status: cleanDisplayText(source.education_gate_status || ""),
+    evidence_strength: cleanDisplayText(source.evidence_strength || "")
   };
 }
 
@@ -6442,6 +6670,7 @@ function assistantErrorMessage(error) {
   if (error?.status === 400) return "请求内容无法被模型服务识别，请缩短问题后重试。";
   if (error?.status === 429) return "模型请求过于频繁，请稍后重试。";
   if (error?.status >= 500) return "Legato Chat 服务暂时不可用，请稍后重试。";
+  if (error?.source === "chat_stream") return `AI助手生成失败：${cleanDisplayText(error.message || "模型返回错误")}`;
   return "无法连接 LLM 服务，请检查网络或后端状态。";
 }
 

@@ -22,7 +22,7 @@
             "mode": { "type": "string", "enum": ["none", "show_schema", "update_result"] },
             "target": {
               "type": "string",
-              "enum": ["none", "basic", "education", "awards", "experiences", "profile_radar", "matching", "path_plan", "top_jobs"]
+              "enum": ["none", "basic", "education", "awards", "experiences", "profile_radar", "matching", "path_plan", "top_jobs", "job_recommendations"]
             },
             "patches": {
               "type": "array",

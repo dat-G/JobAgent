@@ -164,6 +164,39 @@ class ChatWorkflowFormatterTest(unittest.TestCase):
         self.assertEqual(patch["path"], "/path_plan/stages/0/weeks/0/task")
         self.assertEqual(patch["value"], "补作品集首页和项目说明")
 
+    def test_answer_can_return_job_recommendation_intent(self) -> None:
+        formatter = ChatWorkflowFormatter(max_retries=1, stage_input={"question": "我不喜欢当前岗位，我想做渗透测试"})
+
+        def fake_call(_prompt: str, _group: str) -> str:
+            return json.dumps(
+                {
+                    "answer": "结论：会按渗透测试方向更新推荐。",
+                    "conclusion": "按渗透测试方向更新。",
+                    "actions": ["查看新的推荐岗位"],
+                    "evidence_refs": ["matching", "top_jobs"],
+                    "missing_evidence": [],
+                    "confidence": 0.76,
+                    "ui_intent": {
+                        "mode": "update_result",
+                        "target": "job_recommendations",
+                        "patches": [
+                            {
+                                "op": "replace",
+                                "path": "/top_jobs",
+                                "value": [{"title": "渗透测试工程师", "match": 70, "category": "用户偏好方向"}],
+                            }
+                        ],
+                        "schema": {},
+                        "summary": "岗位推荐已准备更新。",
+                    },
+                },
+                ensure_ascii=False,
+            )
+
+        formatter._call_presto = fake_call  # type: ignore[method-assign]
+        result = formatter.format_stage("", "answer")
+        self.assertEqual(result.data["chat"]["ui_intent"]["target"], "job_recommendations")
+
     def test_lightweight_chat_workflow_retries_json(self) -> None:
         outputs = iter(
             [
@@ -209,6 +242,45 @@ class ChatWorkflowFormatterTest(unittest.TestCase):
         )
         result = workflow.run_with_meta({"question": "改一下匹配结论"})
         self.assertEqual(result.data["ui_intent"]["target"], "matching")
+
+    def test_lightweight_chat_workflow_accepts_job_recommendation_intent(self) -> None:
+        workflow = ChatWorkflow(
+            lambda _context: json.dumps(
+                {
+                    "answer": "结论：会按产品方向更新推荐。",
+                    "conclusion": "按产品方向更新。",
+                    "actions": ["查看新的岗位队列"],
+                    "evidence_refs": ["matching", "top_jobs"],
+                    "missing_evidence": [],
+                    "confidence": 0.72,
+                    "ui_intent": {
+                        "mode": "update_result",
+                        "target": "job_recommendations",
+                        "patches": [
+                            {
+                                "op": "replace",
+                                "path": "/top_jobs",
+                                "value": [
+                                    {
+                                        "title": "AI 产品经理",
+                                        "match": 68,
+                                        "category": "用户偏好方向",
+                                        "fit_summary": "更贴近用户表达的产品方向。",
+                                    }
+                                ],
+                            },
+                            {"op": "replace", "path": "/matching_result/target_role", "value": "AI 产品经理"},
+                        ],
+                        "schema": {},
+                        "summary": "岗位推荐已准备更新。",
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            max_retries=1,
+        )
+        result = workflow.run_with_meta({"question": "我不喜欢当前岗位，我想做 AI 产品"})
+        self.assertEqual(result.data["ui_intent"]["target"], "job_recommendations")
 
     def test_lightweight_chat_workflow_fails_after_retries(self) -> None:
         workflow = ChatWorkflow(lambda _context: "bad", max_retries=2)

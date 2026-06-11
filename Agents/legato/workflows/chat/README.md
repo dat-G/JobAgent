@@ -63,6 +63,7 @@ The source file is treated as optional source context. For frontend use, pass th
 - `mode: "show_schema"` returns the requested region schema from `ui_schema_catalog`.
 - `mode: "update_result"` returns minimal JSON Patch operations. Patch paths can be full diagnosis paths or target-relative paths; the frontend normalizes them and validates that every path stays under the target region root before mutating its local diagnosis state.
 - Factual extraction fields should only be patched when the user explicitly supplies the corrected value.
+- `target: "job_recommendations"` is used when the user rejects the current recommended role and states a new preferred direction. It can update both `/matching_result` and `/top_jobs`, which the frontend maps to the recommendation queue.
 
 ## CLI
 
