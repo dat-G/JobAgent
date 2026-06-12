@@ -25,7 +25,7 @@ def extract_pdf_text_layer(source: str | Path) -> PdfTextDocument:
         import pypdfium2 as pdfium
     except ImportError as exc:
         raise RuntimeError(
-            "pypdfium2 is not installed. Run `scripts/install_dev_offline.sh` "
+            "pypdfium2 is not installed. Run `python scripts/install_dev.py` "
             "or fall back to MarkItDown."
         ) from exc
 
@@ -54,4 +54,3 @@ def extract_pdf_text_layer(source: str | Path) -> PdfTextDocument:
         char_count=len(text),
         non_whitespace_chars=sum(1 for char in text if not char.isspace()),
     )
-

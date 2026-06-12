@@ -22,7 +22,7 @@ For a virtual environment:
 ```sh
 python3 -m venv .venv
 . .venv/bin/activate
-scripts/install_dev_offline.sh
+python scripts/install_dev.py --offline
 ```
 
 ## Platform Note

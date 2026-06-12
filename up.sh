@@ -183,11 +183,11 @@ Legato CLI is not available.
 Expected directory: $LEGATO_DIR
 Python: $python
 
-Install the offline Legato environment with:
+Install the Legato environment with:
   cd "$LEGATO_DIR"
-  python3 -m venv .venv
+  python3.11 -m venv .venv
   . .venv/bin/activate
-  scripts/install_dev_offline.sh
+  python scripts/install_dev.py
 EOF
     exit 1
   fi

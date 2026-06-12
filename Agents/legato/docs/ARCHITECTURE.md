@@ -170,13 +170,13 @@ The project vendors Python wheels under:
 vendor/wheelhouse
 ```
 
-Offline install script:
+Cross-platform install script:
 
 ```sh
-scripts/install_dev_offline.sh
+python scripts/install_dev.py
 ```
 
-This makes Legato self-contained for the current macOS arm64 Python 3.13 target.
+By default the script downloads packages from the configured Python package index. Use `--offline` to install from `vendor/wheelhouse` when the wheelhouse matches the deployment target.
 
 ## Future API Shape
 

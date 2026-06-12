@@ -51,7 +51,7 @@ def create_paddle_ocr(*, detection_model: str, recognition_model: str) -> Any:
     except ImportError as exc:
         raise RuntimeError(
             "PaddleOCR is not installed. Install the optional stack with "
-            "`scripts/install_paddleocr_optional.sh`."
+            "`python scripts/install_dev.py --with-paddleocr`."
         ) from exc
 
     return PaddleOCR(

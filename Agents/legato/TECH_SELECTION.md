@@ -157,7 +157,7 @@ PaddleOCR 已作为可选 OCR backend 接入，但不进入默认路径。
 安装：
 
 ```sh
-scripts/install_paddleocr_optional.sh
+python scripts/install_dev.py --with-paddleocr
 ```
 
 使用：
@@ -269,13 +269,13 @@ requirements.build.lock
 离线开发安装：
 
 ```sh
-scripts/install_dev_offline.sh
+python scripts/install_dev.py --offline
 ```
 
 注意：
 
-- 当前 wheelhouse 是 macOS arm64 + Python 3.13。
-- Linux、x86_64 或其他 Python 版本需要重新生成 wheelhouse。
+- 默认安装会从远程 Python package index 下载依赖。
+- 离线安装需要 wheelhouse 与目标 OS、CPU 架构和 Python 版本匹配。
 - OCR、Presto 服务和 LLM provider 的封装仍需单独定义。
 
 ## 后续增强

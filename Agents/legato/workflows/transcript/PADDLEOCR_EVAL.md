@@ -90,7 +90,7 @@ PaddleOCR is useful enough to keep as an optional stack, but not suitable as Leg
 Current status:
 
 - Optional adapter added: `legato.ocr_paddle`.
-- Optional install script added: `scripts/install_paddleocr_optional.sh`.
+- Optional install path added: `python scripts/install_dev.py --with-paddleocr`.
 - CLI flag added: `--ocr-backend paddle`.
 - Default OCR remains disabled.
 
@@ -100,4 +100,3 @@ Recommended next tests:
 2. Test GPU or Paddle high-performance inference.
 3. Compare RapidOCR on the same transcript sample.
 4. Benchmark OCR table recovery quality, not just raw text.
-

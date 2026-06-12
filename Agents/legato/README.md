@@ -42,15 +42,15 @@ Formatter modes:
 - Presto mode: sends a schema prompt to `Agents/presto` through its session/run API.
 - Local mode: `--no-presto`, deterministic rules for smoke tests and local acceptance.
 
-## Install Offline
+## Install
 
-MarkItDown and PDF dependencies are vendored under `vendor/wheelhouse`.
+By default, the installer downloads dependencies from the configured Python package index. Use `--offline` only when the deployment target has a matching wheelhouse under `vendor/wheelhouse`.
 
 ```sh
 cd /Users/sunnychen/Dev/JobAgent/Agents/legato
-python3 -m venv .venv
+python3.11 -m venv .venv
 . .venv/bin/activate
-scripts/install_dev_offline.sh
+python scripts/install_dev.py
 ```
 
 The script installs:
@@ -60,16 +60,22 @@ The script installs:
 - offline build dependency `setuptools`
 - Legato itself in editable mode
 
-The current wheelhouse was built for macOS arm64 and Python 3.13. Regenerate it for Linux, x86_64, or another Python version.
+Offline install:
+
+```sh
+python scripts/install_dev.py --offline
+```
+
+The bundled wheelhouse is platform-specific. Regenerate it for the target OS, CPU architecture, and Python version before using `--offline`.
 
 ## Optional PaddleOCR
 
-PaddleOCR is not part of the default offline install because it is large and slow to initialize on the current macOS CPU environment.
+PaddleOCR is not part of the default install because it is large and slow to initialize on the current macOS CPU environment.
 
 Install it only in a dedicated environment:
 
 ```sh
-scripts/install_paddleocr_optional.sh
+python scripts/install_dev.py --with-paddleocr
 ```
 
 Use it explicitly:
