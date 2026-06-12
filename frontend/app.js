@@ -6331,7 +6331,7 @@ function applyAssistantUIIntent(chat) {
   renderDiagnosis(diagnosis);
   updateAssistantContext();
   renderAssistantSuggestions();
-  const message = intent.summary || `${targetConfig.label}已更新 ${patches.length} 处。`;
+  const message = assistantUIIntentToastMessage(intent, targetConfig, patches);
   showToast(message);
   return {
     status: "applied",
@@ -6339,6 +6339,13 @@ function applyAssistantUIIntent(chat) {
     message,
     target: intent.target
   };
+}
+
+function assistantUIIntentToastMessage(intent, targetConfig, patches) {
+  if (intent.target === "job_recommendations" || intent.target === "top_jobs") return "推荐已更新";
+  if (intent.target === "matching") return "匹配已更新";
+  if (intent.target === "path_plan") return "路径已更新";
+  return `${targetConfig.label}已更新`;
 }
 
 function normalizeAssistantUIIntent(value) {
