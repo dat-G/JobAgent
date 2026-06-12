@@ -22,6 +22,15 @@ func FastRetry() RetryPolicy {
 	}
 }
 
+func RunRetry() RetryPolicy {
+	return RetryPolicy{
+		MaxAttempts: 3,
+		BaseDelay:   120 * time.Millisecond,
+		MaxDelay:    time.Second,
+		Jitter:      true,
+	}
+}
+
 func NoRetry() RetryPolicy {
 	return RetryPolicy{MaxAttempts: 1}
 }

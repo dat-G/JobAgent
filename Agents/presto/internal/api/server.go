@@ -318,14 +318,21 @@ func (s *Server) executeRun(ctx context.Context, runID string, sessionID string,
 		Stream:    tokenStream,
 	})
 
+	lastRunError := ""
 	for event := range events {
+		if event.Type == agent.EventRunError {
+			lastRunError = event.Message
+		}
 		payload, _ := json.Marshal(event)
 		s.store.AppendEvent(runID, string(event.Type), payload)
 	}
 
 	result, ok := <-results
 	if !ok {
-		run, _ := s.store.FinishRun(runID, "", "runner failed without result")
+		if strings.TrimSpace(lastRunError) == "" {
+			lastRunError = "runner failed without result"
+		}
+		run, _ := s.store.FinishRun(runID, "", lastRunError)
 		return run
 	}
 	run, ok := s.store.FinishRun(runID, result.Output, "")

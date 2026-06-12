@@ -38,6 +38,7 @@ const assistantMaxSessions = 24;
 const assistantPromptLimit = 1200;
 const assistantRequestTimeoutMs = 150000;
 const assistantStreamTickMs = 52;
+const assistantReasoningRenderMs = 120;
 const assistantEditableTargets = {
   basic: {
     label: "基础信息",
@@ -231,6 +232,8 @@ let assistantAgentStreamAutoOpened = false;
 let assistantAgentTypewriterTimers = new Map();
 let assistantStateSaveTimer = 0;
 let assistantStreamRenderFrame = 0;
+let assistantAgentPatchTimer = 0;
+const assistantAgentPatchQueue = new Map();
 
 const agentSteps = ["resume_agent", "transcript_agent", "profile", "matching", "path", "outputs"];
 const moduleLocks = {
@@ -645,8 +648,30 @@ function setRunDone() {
 
 function canMarkRunDone() {
   if (benchmarkRequestInFlight || matchingRequestInFlight || pathRequestInFlight || failedRunStep) return false;
+  return areAllRunStepsDone() && areAllResultModulesUnlocked();
+}
+
+function areAllRunStepsDone() {
   const allStepsDone = agentSteps.every((step) => document.querySelector(`[data-run-step="${step}"]`)?.classList.contains("is-done"));
-  return allStepsDone && moduleLocks.profile && moduleLocks.matching && moduleLocks.path && moduleLocks.outputs;
+  return allStepsDone;
+}
+
+function areAllResultModulesUnlocked() {
+  return moduleLocks.profile && moduleLocks.matching && moduleLocks.path && moduleLocks.outputs;
+}
+
+function clearSettledRunRequests() {
+  benchmarkRequestInFlight = false;
+  matchingRequestInFlight = false;
+  pathRequestInFlight = false;
+}
+
+function settleRunDoneFromRenderedState() {
+  if (!diagnosis || failedRunStep) return false;
+  if (!areAllRunStepsDone() || !areAllResultModulesUnlocked()) return false;
+  clearSettledRunRequests();
+  setRunDone();
+  return true;
 }
 
 function canMarkOutputsDone() {
@@ -786,7 +811,12 @@ function connectDiagnosisEvents(eventsUrl) {
       }
       reconcileRunStepsFromDiagnosis(diagnosis);
     }
-    const keepEventsForBenchmark = benchmarkRequestInFlight || diagnosis?.ability_profile?.benchmark_status === "benchmarking";
+    const benchmarkStatus = diagnosis?.ability_profile?.benchmark_status || "";
+    if (benchmarkStatus && !isBenchmarkActiveStatus(benchmarkStatus)) benchmarkRequestInFlight = false;
+    if (hasMeaningfulMatchingResult(diagnosis?.matching_result)) matchingRequestInFlight = false;
+    if (hasReadyPathPlan(diagnosis?.path_plan, diagnosis?.matching_result)) pathRequestInFlight = false;
+    const keepEventsForBenchmark = benchmarkRequestInFlight || isBenchmarkActiveStatus(benchmarkStatus);
+    let shouldSettleRunDone = false;
     if (keepEventsForBenchmark) {
       setRunWaitingForBenchmark();
     } else if (diagnosis?.ability_profile?.benchmark_status === "failed") {
@@ -796,10 +826,11 @@ function connectDiagnosisEvents(eventsUrl) {
         markAgentStep("outputs", "done");
         unlockModule("outputs");
       }
-      setRunDone();
+      shouldSettleRunDone = true;
     }
     if (!keepEventsForBenchmark) {
       closeDiagnosisEvents();
+      if (shouldSettleRunDone && !settleRunDoneFromRenderedState()) setRunDone();
       updateAssistantContext();
     }
   });
@@ -947,7 +978,7 @@ function handleDiagnosisEvent(event) {
     if (event.step === "matching" && hasMeaningfulMatchingResult(diagnosis?.matching_result)) unlockModule("matching");
     if (event.step === "path" && hasReadyPathPlan(diagnosis?.path_plan, diagnosis?.matching_result)) unlockModule("path");
     if (event.step === "outputs" && canMarkOutputsDone()) unlockModule("outputs");
-    if (baseJobDone) setRunDone();
+    if (baseJobDone && !settleRunDoneFromRenderedState()) setRunDone();
   }
   updateAssistantContext();
   renderAssistantSuggestions();
@@ -1001,14 +1032,22 @@ function handleAgentTeamChatEvent(event) {
   if (created && !assistantAgentStreamAutoOpened && !assistantState.expanded) {
     assistantAgentStreamAutoOpened = true;
   }
-  if (isTokenDelta && patchAgentStreamText(message.id, normalized.agentKey)) {
+  if (isTokenDelta) {
+    if (queueAgentStreamTextPatch(message.id, normalized.agentKey)) return;
+    if (!isAgentStreamExpanded(message.agentStream, normalized.agentKey)) return;
+    scheduleAssistantStreamRender();
     return;
   }
-  if (isTokenDelta && !isAgentStreamExpanded(message.agentStream, normalized.agentKey)) return;
   renderAssistant();
-  if (streamTerminal && baseJobDone && !benchmarkRequestInFlight && !matchingRequestInFlight) {
-    if (normalized.status === "done" && !failedRunStep) setRunDone();
+  const renderedRunComplete = diagnosis && !failedRunStep && areAllRunStepsDone() && areAllResultModulesUnlocked();
+  const noPendingRunRequests = !benchmarkRequestInFlight && !matchingRequestInFlight && !pathRequestInFlight;
+  if (streamTerminal && baseJobDone && (noPendingRunRequests || renderedRunComplete)) {
     closeDiagnosisEvents();
+    if (normalized.status === "done" && !failedRunStep && !settleRunDoneFromRenderedState()) {
+      setRunDone();
+    } else {
+      updateAssistantContext();
+    }
   }
 }
 
@@ -5045,6 +5084,7 @@ function isAssistantReady() {
     !diagnosisEvents &&
     !benchmarkRequestInFlight &&
     !matchingRequestInFlight &&
+    !pathRequestInFlight &&
     !failedRunStep &&
     benchmarkStatus !== "benchmarking" &&
     benchmarkStatus !== "failed"
@@ -5052,7 +5092,7 @@ function isAssistantReady() {
 }
 
 function isAssistantInspectable() {
-  return isAssistantReady() || assistantAgentStreamActive || Boolean(diagnosisEvents) || benchmarkRequestInFlight || matchingRequestInFlight || Boolean(diagnosis);
+  return isAssistantReady() || assistantAgentStreamActive || Boolean(diagnosisEvents) || benchmarkRequestInFlight || matchingRequestInFlight || pathRequestInFlight || Boolean(diagnosis);
 }
 
 function syncAssistantAvailability() {
@@ -5096,7 +5136,7 @@ function syncAssistantAvailability() {
   } else if (inspectOnly) {
     updateAssistantRailStatus("生成中可查看");
   } else {
-    updateAssistantRailStatus(diagnosisEvents || benchmarkRequestInFlight || matchingRequestInFlight ? "结果生成中" : "结果完成后可追问");
+    updateAssistantRailStatus(diagnosisEvents || benchmarkRequestInFlight || matchingRequestInFlight || pathRequestInFlight ? "结果生成中" : "结果完成后可追问");
   }
 }
 
@@ -5184,7 +5224,11 @@ function renderAssistantTextBubble(message, content) {
   const cursor = message.role === "assistant"
     ? `<span class="assistant-stream-cursor" aria-hidden="true"></span>`
     : "";
-  return `<div class="assistant-bubble"><span data-assistant-message-text>${escapeHTML(content)}</span>${cursor}</div>`;
+  const reasoningContent = String(message.reasoningContent || "").trim();
+  const reasoning = message.role === "assistant"
+    ? `<div class="assistant-reasoning"${reasoningContent ? "" : " hidden"}><span>思考</span><em data-assistant-message-reasoning>${escapeHTML(reasoningContent)}</em></div>`
+    : "";
+  return `<div class="assistant-bubble">${reasoning}<span data-assistant-message-text>${escapeHTML(content)}</span>${cursor}</div>`;
 }
 
 function renderAssistantMessageRefs(contexts) {
@@ -5735,6 +5779,31 @@ function patchAgentStreamText(messageID, agentKey) {
   return true;
 }
 
+function queueAgentStreamTextPatch(messageID, agentKey) {
+  const key = String(agentKey || "");
+  if (!key) return false;
+  const { message } = findActiveAgentStreamMessage(messageID, key);
+  const stream = message?.agentStream;
+  if (!stream?.expandedAgents?.[key] || !stream.agents?.[key]) return false;
+  assistantAgentPatchQueue.set(`${messageID}:${key}`, { messageID, agentKey: key });
+  if (!assistantAgentPatchTimer) {
+    assistantAgentPatchTimer = window.setTimeout(flushAgentStreamTextPatches, 50);
+  }
+  return true;
+}
+
+function flushAgentStreamTextPatches() {
+  assistantAgentPatchTimer = 0;
+  if (assistantAgentPatchQueue.size === 0) return;
+  const patches = [...assistantAgentPatchQueue.values()];
+  assistantAgentPatchQueue.clear();
+  let needsRender = false;
+  patches.forEach(({ messageID, agentKey }) => {
+    if (!patchAgentStreamText(messageID, agentKey)) needsRender = true;
+  });
+  if (needsRender) scheduleAssistantStreamRender();
+}
+
 function stableAgentStructuredOutputText(agent) {
   const text = agent?.status === "done" || agent?.status === "failed" || agent?.typingDone
     ? agent.outputPreview || agent.typedOutput || ""
@@ -5886,7 +5955,7 @@ function renderAssistantSuggestions() {
 function updateAssistantContext() {
   if (!assistantContext) return;
   const ready = isAssistantReady();
-  const label = ready ? "可追问" : assistantAgentStreamActive ? "Agent Team 流式生成" : diagnosisEvents || benchmarkRequestInFlight || matchingRequestInFlight || diagnosis ? "诊断生成中" : "等待诊断";
+  const label = ready ? "可追问" : assistantAgentStreamActive ? "Agent Team 流式生成" : diagnosisEvents || benchmarkRequestInFlight || matchingRequestInFlight || pathRequestInFlight || diagnosis ? "诊断生成中" : "等待诊断";
   const pillClass = ready ? "is-real" : "is-warning";
   assistantContext.setAttribute("aria-label", label);
   assistantContext.innerHTML = `<span class="status-pill ${pillClass}">${escapeHTML(label)}</span>`;
@@ -5952,7 +6021,7 @@ async function sendAssistantMessage(promptOverride = "", focusedContextsOverride
     : focusedContextsForAssistant();
   session.messages.push({ id: uniqueId("msg"), role: "user", content: prompt, createdAt: now, status: "done", focusedContexts });
   const loadingID = uniqueId("msg");
-  session.messages.push({ id: loadingID, role: "assistant", content: "正在通过 Legato Chat workflow 生成回答。", createdAt: now, status: "loading", retryPrompt: prompt, focusedContexts });
+  session.messages.push({ id: loadingID, role: "assistant", content: "正在连接 Presto Chat workflow。", createdAt: now, status: "loading", retryPrompt: prompt, focusedContexts });
   session.title = titleForPrompt(prompt);
   session.updatedAt = now;
   assistantInput.value = "";
@@ -5968,6 +6037,12 @@ async function sendAssistantMessage(promptOverride = "", focusedContextsOverride
       },
       onDelta(delta) {
         answerStreamer.push(delta);
+      },
+      onReasoning(delta) {
+        answerStreamer.reasoning(delta);
+      },
+      onReset(message) {
+        answerStreamer.reset(message);
       }
     });
     await answerStreamer.drain();
@@ -6099,6 +6174,14 @@ function consumeAssistantChatStreamEvent(rawEvent, handlers = {}) {
     handlers.onDelta?.(String(payload.delta || ""));
     return null;
   }
+  if (event === "chat.reasoning") {
+    handlers.onReasoning?.(String(payload.delta || ""));
+    return null;
+  }
+  if (event === "chat.reset") {
+    handlers.onReset?.(String(payload.message || ""));
+    return null;
+  }
   if (event === "chat.error") {
     const error = new Error(String(payload.error || "chat_stream_failed"));
     error.source = "chat_stream";
@@ -6127,6 +6210,17 @@ function updateAssistantMessageBubble(messageID, content, options = {}) {
     return;
   }
   textNode.textContent = formatAgentDisplayText(content);
+  const reasoningContent = String(options.reasoningContent || "").trim();
+  const reasoningNode = item.querySelector("[data-assistant-message-reasoning]");
+  if (reasoningContent && !reasoningNode) {
+    renderAssistantMessages({ stickToBottom: true });
+    return;
+  }
+  if (reasoningNode) {
+    reasoningNode.textContent = reasoningContent;
+    const wrapper = reasoningNode.closest(".assistant-reasoning");
+    if (wrapper) wrapper.hidden = !reasoningContent;
+  }
   item.classList.toggle("is-loading", options.status === "loading");
   item.classList.toggle("is-error", options.status === "error");
   item.classList.toggle("is-answer-streaming", Boolean(options.streaming));
@@ -6138,11 +6232,14 @@ function createAssistantAnswerStreamer(session, messageID) {
   let visible = "";
   let pending = "";
   let timer = 0;
+  let reasoningVisible = "";
+  let reasoningPending = "";
+  let reasoningTimer = 0;
   let drainResolve = null;
 
   const message = () => session.messages.find((item) => item.id === messageID);
   const finishDrain = () => {
-    if (!pending && !timer && drainResolve) {
+    if (!pending && !timer && !reasoningPending && !reasoningTimer && drainResolve) {
       const resolve = drainResolve;
       drainResolve = null;
       resolve();
@@ -6151,6 +6248,7 @@ function createAssistantAnswerStreamer(session, messageID) {
   const render = (content, streaming) => updateAssistantMessageBubble(messageID, content, {
     status: "loading",
     streaming,
+    reasoningContent: message()?.reasoningContent || "",
     stickToBottom: true
   });
   const writeVisible = () => {
@@ -6186,16 +6284,78 @@ function createAssistantAnswerStreamer(session, messageID) {
   const start = () => {
     if (!timer && pending) timer = window.setTimeout(step, assistantStreamTickMs);
   };
+  const writeReasoning = () => {
+    reasoningTimer = 0;
+    if (!reasoningPending) {
+      finishDrain();
+      return;
+    }
+    const loading = message();
+    if (!loading) {
+      reasoningPending = "";
+      finishDrain();
+      return;
+    }
+    reasoningVisible = capAssistantReasoningText(reasoningVisible + reasoningPending);
+    reasoningPending = "";
+    loading.reasoningContent = reasoningVisible;
+    loading.status = "loading";
+    render(loading.content || "模型正在分析诊断上下文。", Boolean(visible || pending));
+    finishDrain();
+  };
+  const startReasoning = () => {
+    if (!reasoningTimer && reasoningPending) {
+      reasoningTimer = window.setTimeout(writeReasoning, assistantReasoningRenderMs);
+    }
+  };
 
   return {
     status(text) {
       if (visible || pending) return;
       const loading = message();
       if (!loading) return;
-      loading.content = text || "Legato Chat workflow 正在生成回答。";
+      loading.content = text || "Presto Chat workflow 正在生成回答。";
       loading.status = "loading";
       loading.isStreamingAnswer = false;
       render(loading.content, false);
+    },
+    reasoning(delta) {
+      const text = String(delta || "");
+      if (!text) return;
+      const loading = message();
+      if (!loading) return;
+      reasoningPending += text;
+      if (reasoningPending.length > 420) {
+        if (reasoningTimer) {
+          window.clearTimeout(reasoningTimer);
+          reasoningTimer = 0;
+        }
+        writeReasoning();
+      } else {
+        startReasoning();
+      }
+    },
+    reset(text) {
+      if (timer) {
+        window.clearTimeout(timer);
+        timer = 0;
+      }
+      if (reasoningTimer) {
+        window.clearTimeout(reasoningTimer);
+        reasoningTimer = 0;
+      }
+      visible = "";
+      pending = "";
+      reasoningVisible = "";
+      reasoningPending = "";
+      const loading = message();
+      if (!loading) return;
+      loading.content = text || "Presto 正在重试。";
+      loading.reasoningContent = "";
+      loading.status = "loading";
+      loading.isStreamingAnswer = false;
+      render(loading.content, false);
+      finishDrain();
     },
     push(delta) {
       const text = String(delta || "");
@@ -6211,10 +6371,11 @@ function createAssistantAnswerStreamer(session, messageID) {
       start();
     },
     drain() {
-      if (reducedMotion || (!pending && !timer)) return Promise.resolve();
+      if (!pending && !timer && !reasoningPending && !reasoningTimer) return Promise.resolve();
       return new Promise((resolve) => {
         drainResolve = resolve;
         start();
+        startReasoning();
       });
     },
     stop() {
@@ -6222,10 +6383,21 @@ function createAssistantAnswerStreamer(session, messageID) {
         window.clearTimeout(timer);
         timer = 0;
       }
+      if (reasoningTimer) {
+        window.clearTimeout(reasoningTimer);
+        reasoningTimer = 0;
+      }
       pending = "";
+      reasoningPending = "";
       finishDrain();
     }
   };
+}
+
+function capAssistantReasoningText(text) {
+  const runes = [...String(text || "")];
+  if (runes.length <= 720) return runes.join("");
+  return "..." + runes.slice(runes.length - 720).join("");
 }
 
 function assistantStreamDelayFor(emitted, pending) {

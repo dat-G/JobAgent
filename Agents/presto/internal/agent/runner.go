@@ -32,6 +32,9 @@ func NewRunner(config Config, provider Provider, store SessionStore) (*Runner, e
 	if config.LLMRetry.MaxAttempts == 0 {
 		config.LLMRetry = FastRetry()
 	}
+	if config.RunRetry.MaxAttempts == 0 {
+		config.RunRetry = RunRetry()
+	}
 
 	registry, err := NewToolRegistry(config.Tools...)
 	if err != nil {
@@ -60,7 +63,7 @@ func (r *Runner) Session(ctx context.Context, id string) (Session, error) {
 func (r *Runner) Run(ctx context.Context, input RunInput) (RunResult, error) {
 	events := make(chan Event, 1)
 	defer close(events)
-	return r.run(ctx, input, events)
+	return r.runWithRetry(ctx, input, events)
 }
 
 func (r *Runner) RunStream(ctx context.Context, input RunInput) (<-chan Event, <-chan RunResult) {
@@ -70,7 +73,7 @@ func (r *Runner) RunStream(ctx context.Context, input RunInput) (<-chan Event, <
 	go func() {
 		defer close(events)
 		defer close(results)
-		result, err := r.run(ctx, input, events)
+		result, err := r.runWithRetry(ctx, input, events)
 		if err != nil {
 			events <- Event{
 				Type:      EventRunError,
@@ -85,6 +88,89 @@ func (r *Runner) RunStream(ctx context.Context, input RunInput) (<-chan Event, <
 	}()
 
 	return events, results
+}
+
+func (r *Runner) runWithRetry(ctx context.Context, input RunInput, events chan<- Event) (RunResult, error) {
+	if input.RunID == "" {
+		input.RunID = NewID("run")
+	}
+
+	attempts := r.config.RunRetry.attempts()
+	var baseline *Session
+	if input.SessionID != "" {
+		session, err := r.store.GetSession(ctx, input.SessionID)
+		if err != nil {
+			return RunResult{}, err
+		}
+		snapshot := cloneSession(session)
+		baseline = &snapshot
+	}
+
+	var lastErr error
+	attemptsUsed := 0
+	for attempt := 1; attempt <= attempts; attempt++ {
+		attemptsUsed = attempt
+		if attempt > 1 {
+			if err := r.restoreRunSession(ctx, baseline); err != nil {
+				return RunResult{}, err
+			}
+		}
+
+		result, err := r.run(ctx, input, events)
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil || attempt == attempts {
+			break
+		}
+
+		emit(events, Event{
+			Type:      EventRunRetry,
+			RunID:     input.RunID,
+			SessionID: input.SessionID,
+			Message:   err.Error(),
+			Data: map[string]any{
+				"attempt":      attempt,
+				"next_attempt": attempt + 1,
+				"max_attempts": attempts,
+			},
+			Time: time.Now().UTC(),
+		})
+		if err := sleepRetryDelay(ctx, r.config.RunRetry, attempt); err != nil {
+			return RunResult{}, err
+		}
+	}
+
+	if lastErr == nil {
+		lastErr = errors.New("runner failed without result")
+	}
+	if attemptsUsed < attempts {
+		return RunResult{}, fmt.Errorf("runner failed after %d/%d attempts: %w", attemptsUsed, attempts, lastErr)
+	}
+	return RunResult{}, fmt.Errorf("runner failed after %d attempts: %w", attempts, lastErr)
+}
+
+func (r *Runner) restoreRunSession(ctx context.Context, baseline *Session) error {
+	if baseline == nil {
+		return nil
+	}
+	return r.store.SaveSession(ctx, cloneSession(*baseline))
+}
+
+func sleepRetryDelay(ctx context.Context, policy RetryPolicy, failedAttempt int) error {
+	delay := policy.delay(failedAttempt)
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (r *Runner) run(ctx context.Context, input RunInput, events chan<- Event) (RunResult, error) {

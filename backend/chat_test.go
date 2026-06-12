@@ -38,3 +38,28 @@ func TestWriteChatSSE(t *testing.T) {
 		t.Fatalf("SSE event must end with a blank line: %q", text)
 	}
 }
+
+func TestChatAnswerPrefixFromJSONStream(t *testing.T) {
+	streamed := `{"answer":"你的专业差距主要在工程化证据`
+	if got := chatAnswerPrefixFromJSONStream(streamed); got != "你的专业差距主要在工程化证据" {
+		t.Fatalf("unexpected partial answer: %q", got)
+	}
+	escaped := `{"answer":"第一行\n第二行","confidence":0.8}`
+	if got := chatAnswerPrefixFromJSONStream(escaped); got != "第一行\n第二行" {
+		t.Fatalf("unexpected escaped answer: %q", got)
+	}
+}
+
+func TestBuildChatResponseFromPrestoOutput(t *testing.T) {
+	output := `{"answer":"建议先补齐岗位证据。","conclusion":"证据短板最明显。","actions":["整理项目"],"confidence":0.8}`
+	response, err := buildChatResponseFromPrestoOutput(output, "sess_1", "run_1")
+	if err != nil {
+		t.Fatalf("buildChatResponseFromPrestoOutput returned error: %v", err)
+	}
+	if response.Answer != "建议先补齐岗位证据。" {
+		t.Fatalf("unexpected answer: %q", response.Answer)
+	}
+	if response.Payload["formatter"] != "presto_chat_workflow_answer_stream" {
+		t.Fatalf("unexpected formatter: %#v", response.Payload["formatter"])
+	}
+}

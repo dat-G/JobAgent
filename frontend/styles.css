@@ -4875,6 +4875,37 @@ td {
   line-height: 1.45;
 }
 
+.assistant-reasoning {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 7px;
+  padding: 7px 8px;
+  border: 1px solid color-mix(in oklch, var(--primary) 14%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in oklch, var(--primary-soft) 34%, var(--bg));
+  color: color-mix(in oklch, var(--muted) 82%, var(--ink));
+  font-size: 0.72rem;
+  line-height: 1.42;
+  white-space: pre-wrap;
+}
+
+.assistant-reasoning[hidden] {
+  display: none;
+}
+
+.assistant-reasoning span {
+  color: color-mix(in oklch, var(--primary-strong) 72%, var(--muted));
+  font-size: 0.64rem;
+  font-weight: 850;
+  letter-spacing: 0;
+}
+
+.assistant-reasoning em {
+  max-height: 5.8em;
+  overflow: hidden;
+  font-style: normal;
+}
+
 .assistant-message.is-user .assistant-bubble {
   border: 1px solid color-mix(in oklch, var(--primary) 18%, var(--line));
   background:

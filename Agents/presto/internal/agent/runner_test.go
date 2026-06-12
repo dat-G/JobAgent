@@ -127,6 +127,52 @@ func TestRunnerRetriesProviderErrors(t *testing.T) {
 	}
 }
 
+func TestRunnerRetriesRunErrorsAndRestoresSession(t *testing.T) {
+	ctx := context.Background()
+	provider := &recordingProvider{}
+	provider.chat = func(ctx context.Context, req ChatRequest, call int) (ChatResponse, error) {
+		if call == 1 {
+			return ChatResponse{}, errors.New("transient run failure")
+		}
+		return ChatResponse{Message: Message{Content: "ok"}}, nil
+	}
+	store := NewMemoryStore()
+	runner, err := NewRunner(Config{
+		Model:    "unit-model",
+		MaxSteps: 2,
+		LLMRetry: NoRetry(),
+		RunRetry: RetryPolicy{
+			MaxAttempts: 3,
+		},
+	}, provider, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := runner.CreateSession(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := runner.Run(ctx, RunInput{SessionID: session.ID, UserInput: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Output != "ok" {
+		t.Fatalf("output = %q, want ok", result.Output)
+	}
+	requests := provider.Requests()
+	if len(requests) != 2 {
+		t.Fatalf("provider calls = %d, want 2", len(requests))
+	}
+	assertMessageRoles(t, requests[0].Messages, RoleSystem, RoleUser)
+	assertMessageRoles(t, requests[1].Messages, RoleSystem, RoleUser)
+	stored, err := store.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMessageRoles(t, stored.Messages, RoleUser, RoleAssistant)
+}
+
 func TestRunnerEmitsModelDeltaEventsWhenStreaming(t *testing.T) {
 	ctx := context.Background()
 	provider := &recordingProvider{}

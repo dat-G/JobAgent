@@ -50,7 +50,7 @@ func (s Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	req.History = normalizeChatHistory(req.History)
 	if wantsChatStream(r) {
-		streamChat(w, r, req)
+		s.streamChat(w, r, req)
 		return
 	}
 
@@ -69,11 +69,6 @@ func (s Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response.Payload)
 }
 
-type chatRunResult struct {
-	envelope *LegatoEnvelope
-	err      error
-}
-
 type chatResponse struct {
 	Answer  string
 	Chat    map[string]any
@@ -87,7 +82,7 @@ func wantsChatStream(r *http.Request) bool {
 	return strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/event-stream")
 }
 
-func streamChat(w http.ResponseWriter, r *http.Request, req ChatRequest) {
+func (s Server) streamChat(w http.ResponseWriter, r *http.Request, req ChatRequest) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming unsupported")
@@ -102,81 +97,160 @@ func streamChat(w http.ResponseWriter, r *http.Request, req ChatRequest) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 
+	emit := func(event string, payload any) bool {
+		if writeChatSSE(w, event, payload) != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+	emitError := func(err error) {
+		if err == nil {
+			err = errors.New("chat stream failed")
+		}
+		_ = emit("chat.error", map[string]any{
+			"status": "failed",
+			"error":  err.Error(),
+		})
+	}
+
 	if writeChatSSE(w, "chat.status", map[string]any{
 		"status":  "running",
-		"message": "Legato Chat workflow 正在生成回答",
+		"message": "正在连接 Presto Chat workflow",
 	}) != nil {
 		return
 	}
 	flusher.Flush()
 
-	resultCh := make(chan chatRunResult, 1)
-	go func() {
-		envelope, err := runLegatoChat(ctx, req)
-		resultCh <- chatRunResult{envelope: envelope, err: err}
-	}()
+	client, err := s.newPrestoClient()
+	if err != nil {
+		emitError(err)
+		return
+	}
+	prompt, err := buildLegatoChatPrompt(req)
+	if err != nil {
+		emitError(err)
+		return
+	}
+	session, err := client.createSession(ctx, map[string]string{
+		"app":      "legato",
+		"workflow": "chat",
+		"group":    "answer",
+		"mode":     "stream",
+	})
+	if err != nil {
+		emitError(err)
+		return
+	}
+	run, err := client.createRun(ctx, session.ID, prompt)
+	if err != nil {
+		emitError(err)
+		return
+	}
+	if !emit("chat.status", map[string]any{
+		"status":     "running",
+		"message":    "Presto run 已创建，等待模型输出",
+		"session_id": session.ID,
+		"run_id":     run.ID,
+	}) {
+		return
+	}
 
-	ticker := time.NewTicker(1500 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			_ = writeChatSSE(w, "chat.error", map[string]any{
-				"status": "failed",
-				"error":  "chat stream canceled or timed out",
-			})
-			flusher.Flush()
-			return
-		case <-ticker.C:
-			if writeChatSSE(w, "chat.status", map[string]any{
-				"status":  "running",
-				"message": "Legato Chat workflow 仍在生成回答",
-			}) != nil {
-				return
+	var output strings.Builder
+	sentAnswer := ""
+	streamErr := client.streamRunEvents(ctx, run.ID, func(event prestoEventResponse) bool {
+		switch event.Type {
+		case "run.retry":
+			output.Reset()
+			sentAnswer = ""
+			if !emit("chat.reset", map[string]any{
+				"status":  "retrying",
+				"message": "Presto 自动重试中，已清空本次未完成输出",
+			}) {
+				return true
 			}
-			flusher.Flush()
-		case result := <-resultCh:
-			if result.err != nil {
-				_ = writeChatSSE(w, "chat.error", map[string]any{
-					"status": "failed",
-					"error":  result.err.Error(),
-				})
-				flusher.Flush()
-				return
+			return false
+		case "model.started":
+			if !emit("chat.status", map[string]any{
+				"status":  "reasoning",
+				"message": "模型开始分析诊断上下文",
+			}) {
+				return true
 			}
-			response, err := buildChatResponse(result.envelope)
-			if err != nil {
-				_ = writeChatSSE(w, "chat.error", map[string]any{
-					"status": "failed",
-					"error":  err.Error(),
-				})
-				flusher.Flush()
-				return
+		case "model.delta":
+			channel, delta := prestoChatDelta(event)
+			if delta == "" {
+				return false
 			}
-			if writeChatSSE(w, "chat.status", map[string]any{
-				"status":  "streaming",
-				"message": "回答已生成，正在流式输出",
-			}) != nil {
-				return
-			}
-			flusher.Flush()
-			for _, chunk := range splitChatAnswerChunks(response.Answer) {
-				if writeChatSSE(w, "chat.chunk", map[string]any{"delta": chunk}) != nil {
-					return
+			if channel == "reasoning" || channel == "analysis" {
+				if !emit("chat.reasoning", map[string]any{"delta": delta}) {
+					return true
 				}
-				flusher.Flush()
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(12 * time.Millisecond):
+				return false
+			}
+			if channel != "content" {
+				return false
+			}
+			output.WriteString(delta)
+			answerPrefix := chatAnswerPrefixFromJSONStream(output.String())
+			if answerPrefix != "" && strings.HasPrefix(answerPrefix, sentAnswer) && len(answerPrefix) > len(sentAnswer) {
+				chunk := answerPrefix[len(sentAnswer):]
+				sentAnswer = answerPrefix
+				if !emit("chat.chunk", map[string]any{"delta": chunk}) {
+					return true
 				}
 			}
-			if writeChatSSE(w, "chat.done", response.Payload) != nil {
+		case "model.done":
+			if !emit("chat.status", map[string]any{
+				"status":  "validating",
+				"message": "模型输出完成，正在校验结构化结果",
+			}) {
+				return true
+			}
+		}
+		return terminalPrestoEvent(event.Type)
+	})
+	if streamErr != nil {
+		emitError(streamErr)
+		return
+	}
+	finished, err := client.waitRun(ctx, run.ID)
+	if err != nil {
+		emitError(err)
+		return
+	}
+	if finished.Error != "" {
+		emitError(errors.New(finished.Error))
+		return
+	}
+	if finished.Status != "completed" {
+		emitError(fmt.Errorf("Presto run ended with status %s", finished.Status))
+		return
+	}
+	response, err := buildChatResponseFromPrestoOutput(finished.Output, session.ID, run.ID)
+	if err != nil {
+		emitError(err)
+		return
+	}
+	if strings.HasPrefix(response.Answer, sentAnswer) {
+		if remaining := response.Answer[len(sentAnswer):]; remaining != "" {
+			if !emit("chat.chunk", map[string]any{"delta": remaining}) {
 				return
 			}
-			flusher.Flush()
+		}
+	} else if sentAnswer != response.Answer {
+		if !emit("chat.reset", map[string]any{
+			"status":  "validated",
+			"message": "最终结构化结果已校验，正在同步完整回答",
+		}) {
 			return
 		}
+		if !emit("chat.chunk", map[string]any{"delta": response.Answer}) {
+			return
+		}
+	}
+	if !emit("chat.done", response.Payload) {
+		return
 	}
 }
 
@@ -241,6 +315,204 @@ func isChatChunkBoundary(value rune) bool {
 	default:
 		return false
 	}
+}
+
+func buildLegatoChatPrompt(req ChatRequest) (string, error) {
+	common, err := readChatPromptFile("common.md")
+	if err != nil {
+		return "", err
+	}
+	template, err := readChatPromptFile("answer.md")
+	if err != nil {
+		return "", err
+	}
+	sourceContext := strings.TrimSpace(req.SourceContext)
+	if sourceContext == "" {
+		sourceContext = req.Question
+	}
+	replacements := map[string]string{
+		"{{common}}":               strings.TrimSpace(common),
+		"{{diagnosis_context}}":    compactChatJSON(req.Diagnosis, "{}"),
+		"{{conversation_history}}": compactChatJSON(req.History, "[]"),
+		"{{ui_schema_catalog}}":    compactChatJSON(req.UISchemaCatalog, "{}"),
+		"{{source_context}}":       sourceContext,
+		"{{question}}":             req.Question,
+	}
+	prompt := template
+	for token, value := range replacements {
+		prompt = strings.ReplaceAll(prompt, token, value)
+	}
+	return prompt, nil
+}
+
+func readChatPromptFile(name string) (string, error) {
+	var candidates []string
+	if legatoDir := strings.TrimSpace(os.Getenv("LEGATO_DIR")); legatoDir != "" {
+		candidates = append(candidates, filepath.Join(legatoDir, "workflows", "chat", "prompts", name))
+	}
+	candidates = append(candidates,
+		filepath.Join("..", "Agents", "legato", "workflows", "chat", "prompts", name),
+		filepath.Join("Agents", "legato", "workflows", "chat", "prompts", name),
+	)
+	if wd, err := os.Getwd(); err == nil {
+		candidates = append(candidates,
+			filepath.Join(wd, "..", "Agents", "legato", "workflows", "chat", "prompts", name),
+			filepath.Join(wd, "Agents", "legato", "workflows", "chat", "prompts", name),
+		)
+	}
+	for _, candidate := range candidates {
+		raw, err := os.ReadFile(candidate)
+		if err == nil {
+			return string(raw), nil
+		}
+	}
+	return "", fmt.Errorf("cannot locate Legato chat prompt %s", name)
+}
+
+func compactChatJSON(value any, fallback string) string {
+	if value == nil {
+		return fallback
+	}
+	raw, err := marshalNoEscape(value)
+	if err != nil {
+		return fallback
+	}
+	return string(raw)
+}
+
+func buildChatResponseFromPrestoOutput(output string, sessionID string, runID string) (chatResponse, error) {
+	chat, err := extractChatPayload(output)
+	if err != nil {
+		return chatResponse{}, err
+	}
+	answer := strings.TrimSpace(rawStringValue(chat["answer"]))
+	if answer == "" {
+		return chatResponse{}, errors.New("Presto chat returned empty answer")
+	}
+	chat = normalizePrestoChatPayload(chat, answer)
+	payload := map[string]any{
+		"answer":    answer,
+		"chat":      chat,
+		"formatter": "presto_chat_workflow_answer_stream",
+		"warnings":  []any{},
+		"debug": map[string]any{
+			"presto_session_id": sessionID,
+			"presto_run_id":     runID,
+		},
+	}
+	return chatResponse{Answer: answer, Chat: chat, Payload: payload}, nil
+}
+
+func extractChatPayload(output string) (map[string]any, error) {
+	raw, err := extractJSONObject(output)
+	if err != nil {
+		return nil, fmt.Errorf("Presto chat returned invalid JSON: %w", err)
+	}
+	if nested, ok := raw["chat"].(map[string]any); ok {
+		return nested, nil
+	}
+	return raw, nil
+}
+
+func normalizePrestoChatPayload(chat map[string]any, answer string) map[string]any {
+	out := make(map[string]any, len(chat)+4)
+	for key, value := range chat {
+		out[key] = value
+	}
+	out["answer"] = answer
+	if _, ok := out["actions"].([]any); !ok {
+		out["actions"] = []any{}
+	}
+	if _, ok := out["evidence_refs"].([]any); !ok {
+		out["evidence_refs"] = []any{}
+	}
+	if _, ok := out["missing_evidence"].([]any); !ok {
+		out["missing_evidence"] = []any{}
+	}
+	if _, ok := out["ui_intent"].(map[string]any); !ok {
+		out["ui_intent"] = map[string]any{
+			"mode":    "none",
+			"target":  "none",
+			"patches": []any{},
+			"schema":  map[string]any{},
+			"summary": "",
+		}
+	}
+	if _, ok := out["confidence"]; !ok {
+		out["confidence"] = 0.5
+	}
+	return out
+}
+
+func prestoChatDelta(event prestoEventResponse) (string, string) {
+	if event.Type != "model.delta" || len(event.Data) == 0 {
+		return "", ""
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(event.Data, &payload); err != nil {
+		return "", ""
+	}
+	data, _ := payload["data"].(map[string]any)
+	if data == nil {
+		data = payload
+	}
+	channel := strings.TrimSpace(rawStringValue(firstNonEmptyAny(data["channel"], payload["channel"])))
+	text := rawStringValue(firstNonEmptyAny(data["text"], data["delta"], payload["text"], payload["delta"]))
+	return channel, text
+}
+
+func chatAnswerPrefixFromJSONStream(text string) string {
+	searchFrom := 0
+	for {
+		index := strings.Index(text[searchFrom:], `"answer"`)
+		if index < 0 {
+			return ""
+		}
+		index += searchFrom + len(`"answer"`)
+		cursor := skipChatJSONSpaces(text, index)
+		if cursor >= len(text) || text[cursor] != ':' {
+			searchFrom = index
+			continue
+		}
+		cursor = skipChatJSONSpaces(text, cursor+1)
+		if cursor >= len(text) || text[cursor] != '"' {
+			return ""
+		}
+		return partialJSONStringValue(text[cursor+1:])
+	}
+}
+
+func skipChatJSONSpaces(text string, index int) int {
+	for index < len(text) {
+		switch text[index] {
+		case ' ', '\n', '\r', '\t':
+			index++
+		default:
+			return index
+		}
+	}
+	return index
+}
+
+func partialJSONStringValue(text string) string {
+	var out strings.Builder
+	for len(text) > 0 {
+		if text[0] == '"' {
+			return out.String()
+		}
+		value, _, tail, err := strconv.UnquoteChar(text, '"')
+		if err != nil {
+			return out.String()
+		}
+		out.WriteRune(value)
+		text = tail
+	}
+	return out.String()
+}
+
+func rawStringValue(value any) string {
+	text, _ := value.(string)
+	return text
 }
 
 func runLegatoChat(ctx context.Context, req ChatRequest) (*LegatoEnvelope, error) {

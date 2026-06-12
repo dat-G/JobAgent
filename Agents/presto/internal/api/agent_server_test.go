@@ -2,9 +2,11 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -84,6 +86,38 @@ func TestHTTPAPIAsyncRunUsesConfiguredTimeout(t *testing.T) {
 	}
 }
 
+func TestHTTPAPIRetriesRunnerBeforeFinalFailure(t *testing.T) {
+	var attempts int32
+	runner, err := agent.NewRunner(agent.Config{
+		Name:     "APIRetryAgent",
+		Model:    "unit-model",
+		MaxSteps: 2,
+		LLMRetry: agent.NoRetry(),
+		RunRetry: agent.RetryPolicy{MaxAttempts: 3},
+	}, failingProvider{attempts: &attempts}, agent.NewMemoryStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewServer(NewStore(), WithRunner(runner)))
+	defer server.Close()
+
+	session := postJSON[Session](t, server.URL+"/sessions", `{}`)
+	run := postJSON[Run](t, server.URL+"/sessions/"+session.ID+"/runs", `{"message":"hello"}`)
+
+	if run.Status != RunStatusFailed {
+		t.Fatalf("run status = %q, want %q", run.Status, RunStatusFailed)
+	}
+	if got := atomic.LoadInt32(&attempts); got != 3 {
+		t.Fatalf("runner attempts = %d, want 3", got)
+	}
+	if strings.Contains(run.Error, "runner failed without result") {
+		t.Fatalf("run error should preserve final runner error, got %q", run.Error)
+	}
+	if !strings.Contains(run.Error, "runner failed after 3 attempts") || !strings.Contains(run.Error, "temporary model failure") {
+		t.Fatalf("run error = %q, want retry count and provider error", run.Error)
+	}
+}
+
 func newAPITestRunner(t *testing.T, provider agent.Provider) *agent.Runner {
 	t.Helper()
 
@@ -139,4 +173,13 @@ func (p blockingProvider) Chat(ctx context.Context, _ agent.ChatRequest) (agent.
 	}
 	<-ctx.Done()
 	return agent.ChatResponse{}, ctx.Err()
+}
+
+type failingProvider struct {
+	attempts *int32
+}
+
+func (p failingProvider) Chat(context.Context, agent.ChatRequest) (agent.ChatResponse, error) {
+	atomic.AddInt32(p.attempts, 1)
+	return agent.ChatResponse{}, errors.New("temporary model failure")
 }

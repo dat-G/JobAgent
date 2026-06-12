@@ -52,6 +52,7 @@ type Config struct {
 	Temperature  float64
 	MaxTokens    int
 	LLMRetry     RetryPolicy
+	RunRetry     RetryPolicy
 }
 
 type Usage struct {
@@ -104,6 +105,7 @@ const (
 	EventToolError    EventType = "tool.error"
 	EventRunDone      EventType = "run.done"
 	EventRunError     EventType = "run.error"
+	EventRunRetry     EventType = "run.retry"
 )
 
 type Event struct {
