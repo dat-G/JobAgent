@@ -18,3 +18,22 @@ test/
 # Impeccable local design artifacts
 .impeccable/
 DESIGN.md
+
+# Local sample uploads/documents
+/test.pdf
+/test2.pdf
+/test3.pdf
+/企业岗位案例验证.docx
+
+# Legacy documentation. Keep the root README.md as the project entry document.
+/PRODUCT.md
+/docs/deployment.md
+/docs/jobagent_technical_report.md
+backend/README.md
+backend/REQUIREMENTS.md
+frontend/README.md
+Agents/**/README.md
+Agents/**/TECH_SELECTION.md
+Agents/**/docs/**/*.md
+Agents/legato/workflows/resume/SCORING_RUBRIC.md
+Agents/legato/workflows/transcript/*_EVAL.md
